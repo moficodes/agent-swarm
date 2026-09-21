@@ -358,16 +358,16 @@
     if (!data) return;
 
     // 1. Update Envoy L7 Parking Meter
-    updateParkingMeter(data.parked_requests || 0);
+    updateParkingMeter(data.parked_requests ?? data.ParkedRequests ?? 0);
 
     // 2. Update Worker Pod Cards
-    updateWorkerCards(data.workers || []);
+    updateWorkerCards(data.workers || data.Workers || []);
 
     // 3. Update Attendee Fleet Badges
-    updateFleetGrid(data.actors || {});
+    renderFleetGrid(data.actors || data.Actors || {});
 
     // 4. Update Event Feed
-    updateEventTicker(data.recent_events || []);
+    updateEventTicker(data.recent_events || data.RecentEvents || []);
   }
 
   function updateParkingMeter(parkedCount) {
@@ -426,8 +426,11 @@
   }
 
   function renderWorkerCard(w, card, badge, actor, task, timer, dot) {
-    if (!card) return;
-    const isBusy = w.ActiveActor && w.ActiveActor !== 'idle';
+    if (!card || !w) return;
+    const activeActor = w.active_actor || w.ActiveActor;
+    const isBusy = activeActor && activeActor !== 'idle';
+    const taskName = w.current_task || w.CurrentTask || (isBusy ? 'Running gVisor workload' : 'Waiting for actor dispatch');
+    const elapsed = w.elapsed_ms ?? w.ElapsedMs ?? 0;
 
     if (isBusy) {
       card.classList.add('active');
@@ -437,11 +440,11 @@
       }
       if (dot) dot.className = 'worker-dot active';
       if (actor) {
-        actor.textContent = formatActorName(w.ActiveActor);
+        actor.textContent = formatActorName(activeActor);
         actor.className = 'stat-value active-actor-val running';
       }
-      if (task) task.textContent = w.CurrentTask || 'Running gVisor workload';
-      if (timer) timer.textContent = (w.ElapsedMs || 0) + ' ms';
+      if (task) task.textContent = taskName;
+      if (timer) timer.textContent = elapsed + ' ms';
     } else {
       card.classList.remove('active');
       if (badge) {
@@ -453,8 +456,8 @@
         actor.textContent = 'idle';
         actor.className = 'stat-value active-actor-val';
       }
-      if (task) task.textContent = 'Waiting for actor dispatch';
-      if (timer) timer.textContent = '0 ms';
+      if (task) task.textContent = taskName;
+      if (timer) timer.textContent = elapsed + ' ms';
     }
   }
 
@@ -467,15 +470,31 @@
     return id;
   }
 
-  function updateFleetGrid(actorsMap) {
-    // Iterate over 50 badge slots
-    for (let i = 1; i <= 50; i++) {
+  function renderFleetGrid(actorsMap) {
+    const actors = actorsMap || {};
+    // Iterate over 100 badge slots (Attendee 01 .. Attendee 100)
+    for (let i = 1; i <= 100; i++) {
       const numStr = String(i).padStart(2, '0');
       const actorID = 'attendee-' + numStr;
-      const badge = document.getElementById('badge-' + actorID);
+      let badge = document.getElementById('badge-' + actorID);
+
+      if (!badge && el.fleetGrid) {
+        badge = document.createElement('div');
+        badge.id = 'badge-' + actorID;
+        badge.dataset.id = actorID;
+        badge.className = 'fleet-badge suspended';
+        badge.innerHTML = `<span class="badge-dot"></span><span class="badge-name">Attendee ${numStr}</span><span class="badge-state-label">SUSPENDED</span>`;
+        el.fleetGrid.appendChild(badge);
+      }
       if (!badge) continue;
 
-      const rawState = (actorsMap[actorID] || 'SUSPENDED').toUpperCase();
+      const rawState = (
+        actors[actorID] ||
+        actors[actorID.toLowerCase()] ||
+        actors['attendee-' + i] ||
+        'SUSPENDED'
+      ).toUpperCase();
+
       let stateClass = 'suspended';
       let stateLabel = 'SUSPENDED';
 
@@ -505,6 +524,7 @@
       }
     }
   }
+  const updateFleetGrid = renderFleetGrid;
 
   function updateEventTicker(events) {
     if (!el.eventTicker) return;

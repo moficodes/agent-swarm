@@ -578,7 +578,7 @@ html, body {
 .legend-dot.running { background: var(--neon-green); box-shadow: 0 0 6px var(--neon-green); }
 .legend-dot.awaiting { background: var(--neon-purple); box-shadow: 0 0 6px var(--neon-purple); }
 
-/* 50 Badge Matrix */
+/* 100 Badge Matrix */
 .fleet-grid {
   display: grid;
   grid-template-columns: repeat(10, 1fr);
@@ -593,6 +593,18 @@ html, body {
 @media (max-width: 1400px) {
   .fleet-grid {
     grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .fleet-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .fleet-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 }
 

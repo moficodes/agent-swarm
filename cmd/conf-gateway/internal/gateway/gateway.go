@@ -191,21 +191,17 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 	}
 
 	proxy := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
+		Rewrite: func(pr *httputil.ProxyRequest) {
 			if targetURL != nil {
-				req.URL.Scheme = targetURL.Scheme
-				req.URL.Host = targetURL.Host
-				req.Host = targetURL.Host
-				if targetURL.Path != "" && targetURL.Path != "/" {
-					req.URL.Path = singleJoiningSlash(targetURL.Path, req.URL.Path)
-				}
+				pr.SetURL(targetURL)
+				pr.Out.Host = targetURL.Host
 			}
-			attendeeID, _ := req.Context().Value(attendeeContextKey{}).(string)
+			attendeeID, _ := pr.In.Context().Value(attendeeContextKey{}).(string)
 			if attendeeID != "" {
-				req.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", gw.atespace, attendeeID))
+				pr.Out.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", gw.atespace, attendeeID))
 			}
 			if gw.geminiAPIKey != "" {
-				req.Header.Set("X-Gemini-API-Key", gw.geminiAPIKey)
+				pr.Out.Header.Set("X-Gemini-API-Key", gw.geminiAPIKey)
 			}
 		},
 		ModifyResponse: gw.modifyResponse,
@@ -703,16 +699,4 @@ func (g *Gateway) addEventLocked(event string) {
 	if len(g.recentEvents) > maxEvents {
 		g.recentEvents = g.recentEvents[len(g.recentEvents)-maxEvents:]
 	}
-}
-
-func singleJoiningSlash(a, b string) string {
-	aslash := strings.HasSuffix(a, "/")
-	bslash := strings.HasPrefix(b, "/")
-	switch {
-	case aslash && bslash:
-		return a + b[1:]
-	case !aslash && !bslash:
-		return a + "/" + b
-	}
-	return a + b
 }
