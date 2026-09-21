@@ -79,6 +79,14 @@ func (m *mockSuspender) waitForCalls(n int, timeout time.Duration) []suspendCall
 	return m.getCalls()
 }
 
+type mockSimulationRunner struct {
+	stopped atomic.Bool
+}
+
+func (m *mockSimulationRunner) Stop() {
+	m.stopped.Store(true)
+}
+
 func TestSessionMinting(t *testing.T) {
 	secret := "test-secret-12345"
 	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
@@ -2001,6 +2009,313 @@ func TestActorInspectorEndpoint(t *testing.T) {
 
 					if details.ActorID != actorID {
 						t.Errorf("expected actor_id %s, got %s", actorID, details.ActorID)
+					}
+				}
+			}(i)
+		}
+
+		wg.Wait()
+	})
+}
+
+func TestResetEndpoint(t *testing.T) {
+	suspender := &mockSuspender{}
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-chat-1",
+			Sender:    types.SenderAssistant,
+			Content:   "WAITING_FOR_APPROVAL: review",
+			Timestamp: time.Now().Unix(),
+			Approval: &types.ApprovalRequest{
+				ApprovalID: "app-reset-1",
+				Summary:    "Scale cluster",
+				Code:       "print('scaling')",
+				Language:   "python",
+				RiskLevel:  types.RiskHigh,
+			},
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithAtespace("ate-demo-conf"),
+		gateway.WithSuspender(suspender),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	t.Run("ResetSuccess", func(t *testing.T) {
+		// Populate attendee-02 with pending approval and chat history via chat call
+		token2 := gw.MintToken("attendee-02")
+		req2, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"need-approval"}`))
+		if err != nil {
+			t.Fatalf("failed to create chat request: %v", err)
+		}
+		req2.Header.Set("Content-Type", "application/json")
+		req2.Header.Set("Authorization", "Bearer "+token2)
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			t.Fatalf("failed chat request: %v", err)
+		}
+		_ = resp2.Body.Close()
+
+		// Set attendee-01 to Running with last result
+		gw.SetActorState("attendee-01", types.StateRunning)
+		gw.SetLastResult("attendee-01", &types.ExecutionResult{
+			Stdout:     "simulation report",
+			ExitCode:   0,
+			DurationMs: 42,
+		})
+
+		// Set attendee-03 to Suspended (already suspended)
+		gw.SetActorState("attendee-03", types.StateSuspended)
+
+		// Subscribe to SSE for attendee-01 to verify StateSuspended broadcast
+		sseCtx, sseCancel := context.WithCancel(context.Background())
+		defer sseCancel()
+
+		sseReq, err := http.NewRequestWithContext(sseCtx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-01", nil)
+		if err != nil {
+			t.Fatalf("failed to create SSE request: %v", err)
+		}
+		sseResp, err := http.DefaultClient.Do(sseReq)
+		if err != nil {
+			t.Fatalf("failed to connect SSE stream: %v", err)
+		}
+		defer sseResp.Body.Close()
+
+		sseReader := bufio.NewReader(sseResp.Body)
+		sseEvents := make(chan types.StateChangeEvent, 10)
+		go func() {
+			for {
+				line, err := sseReader.ReadString('\n')
+				if err != nil {
+					return
+				}
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "data:") {
+					dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+					var ev types.StateChangeEvent
+					if err := json.Unmarshal([]byte(dataStr), &ev); err == nil {
+						sseEvents <- ev
+					}
+				}
+			}
+		}()
+
+		// Drain initial SSE event
+		select {
+		case <-sseEvents:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("timed out waiting for initial SSE event")
+		}
+
+		// Clear prior mock suspender calls from the setup chat call
+		suspender.mu.Lock()
+		suspender.invocations = nil
+		suspender.mu.Unlock()
+
+		// Call POST /api/reset
+		resetResp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
+		if err != nil {
+			t.Fatalf("failed to call /api/reset: %v", err)
+		}
+		defer resetResp.Body.Close()
+
+		if resetResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resetResp.StatusCode)
+		}
+
+		var resetBody struct {
+			Status      string `json:"status"`
+			Message     string `json:"message"`
+			ActorsReset int    `json:"actors_reset"`
+		}
+		if err := json.NewDecoder(resetResp.Body).Decode(&resetBody); err != nil {
+			t.Fatalf("failed to decode reset response: %v", err)
+		}
+
+		if resetBody.Status != "ok" {
+			t.Errorf("expected status 'ok', got %q", resetBody.Status)
+		}
+		if !strings.Contains(resetBody.Message, "Cluster reset") {
+			t.Errorf("expected message to contain 'Cluster reset', got %q", resetBody.Message)
+		}
+		if resetBody.ActorsReset != 2 {
+			t.Errorf("expected actors_reset 2, got %d", resetBody.ActorsReset)
+		}
+
+		// Verify all actor states reset to StateSuspended
+		st1, _ := gw.GetActorState("attendee-01")
+		st2, _ := gw.GetActorState("attendee-02")
+		st3, _ := gw.GetActorState("attendee-03")
+		if st1 != types.StateSuspended {
+			t.Errorf("expected attendee-01 state %s, got %s", types.StateSuspended, st1)
+		}
+		if st2 != types.StateSuspended {
+			t.Errorf("expected attendee-02 state %s, got %s", types.StateSuspended, st2)
+		}
+		if st3 != types.StateSuspended {
+			t.Errorf("expected attendee-03 state %s, got %s", types.StateSuspended, st3)
+		}
+
+		// Verify suspender was called for previously active actors (attendee-01 and attendee-02), but not attendee-03
+		calls := suspender.getCalls()
+		suspendedActors := make(map[string]bool)
+		for _, c := range calls {
+			if c.Atespace == "ate-demo-conf" {
+				suspendedActors[c.ActorID] = true
+			}
+		}
+		if !suspendedActors["attendee-01"] {
+			t.Errorf("expected suspender called for attendee-01, calls: %+v", calls)
+		}
+		if !suspendedActors["attendee-02"] {
+			t.Errorf("expected suspender called for attendee-02, calls: %+v", calls)
+		}
+		if suspendedActors["attendee-03"] {
+			t.Errorf("expected suspender NOT called for already suspended attendee-03, calls: %+v", calls)
+		}
+
+		// Verify last results cleared
+		if res, ok := gw.GetLastResult("attendee-01"); ok && res != nil {
+			t.Errorf("expected last result for attendee-01 to be cleared, got %+v", res)
+		}
+
+		// Verify pending approval and chat history cleared via actor inspector
+		detResp, err := http.Get(ts.URL + "/api/actor/attendee-02")
+		if err != nil {
+			t.Fatalf("failed to get actor details: %v", err)
+		}
+		var details types.ActorDetails
+		if err := json.NewDecoder(detResp.Body).Decode(&details); err != nil {
+			t.Fatalf("failed to decode actor details: %v", err)
+		}
+		_ = detResp.Body.Close()
+
+		if details.PendingApproval != nil {
+			t.Errorf("expected pending approval to be cleared, got %+v", details.PendingApproval)
+		}
+		if len(details.ChatHistory) != 0 {
+			t.Errorf("expected chat history to be cleared, got %d items", len(details.ChatHistory))
+		}
+		if details.LastResult != nil {
+			t.Errorf("expected last result to be nil, got %+v", details.LastResult)
+		}
+
+		// Verify reset event logged in recentEvents
+		telemResp, err := http.Get(ts.URL + "/api/stage/telemetry")
+		if err != nil {
+			t.Fatalf("failed to get telemetry: %v", err)
+		}
+		var telem types.StageTelemetry
+		if err := json.NewDecoder(telemResp.Body).Decode(&telem); err != nil {
+			t.Fatalf("failed to decode telemetry: %v", err)
+		}
+		_ = telemResp.Body.Close()
+
+		foundResetEvent := false
+		for _, ev := range telem.RecentEvents {
+			if strings.Contains(ev, "Cluster reset: all actors suspended to GCS, worker pods freed") {
+				foundResetEvent = true
+				break
+			}
+		}
+		if !foundResetEvent {
+			t.Errorf("expected reset event in recentEvents, got %+v", telem.RecentEvents)
+		}
+
+		// Verify SSE broadcasted StateSuspended event
+		select {
+		case sseEv := <-sseEvents:
+			if sseEv.AttendeeID != "attendee-01" {
+				t.Errorf("expected SSE event attendee_id 'attendee-01', got %q", sseEv.AttendeeID)
+			}
+			if sseEv.State != types.StateSuspended {
+				t.Errorf("expected SSE event state %s, got %s", types.StateSuspended, sseEv.State)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for StateSuspended SSE broadcast")
+		}
+	})
+
+	t.Run("MethodValidation", func(t *testing.T) {
+		methods := []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch}
+		for _, m := range methods {
+			req, err := http.NewRequest(m, ts.URL+"/api/reset", nil)
+			if err != nil {
+				t.Fatalf("failed to create %s request: %v", m, err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("failed %s /api/reset: %v", m, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("expected 405 Method Not Allowed for %s /api/reset, got %d", m, resp.StatusCode)
+			}
+		}
+	})
+
+	t.Run("HaltsSimulationRunner", func(t *testing.T) {
+		runner := &mockSimulationRunner{}
+		gw.SetSimulationRunner(runner)
+
+		resp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
+		if err != nil {
+			t.Fatalf("failed to call /api/reset: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+		if !runner.stopped.Load() {
+			t.Errorf("expected active simulation runner to be halted upon reset")
+		}
+	})
+
+	t.Run("ConcurrencySafety", func(t *testing.T) {
+		const numWorkers = 8
+		const numIterations = 15
+
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+
+		for i := 0; i < numWorkers; i++ {
+			go func(workerID int) {
+				defer wg.Done()
+				client := &http.Client{Timeout: 5 * time.Second}
+
+				for j := 0; j < numIterations; j++ {
+					switch (workerID + j) % 4 {
+					case 0:
+						resp, err := client.Post(ts.URL+"/api/reset", "application/json", nil)
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					case 1:
+						resp, err := client.Get(ts.URL + "/api/stage/telemetry")
+						if err == nil {
+							var telem types.StageTelemetry
+							_ = json.NewDecoder(resp.Body).Decode(&telem)
+							_ = resp.Body.Close()
+						}
+					case 2:
+						resp, err := client.Get(ts.URL + "/api/actor/attendee-01")
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					case 3:
+						resp, err := client.Get(ts.URL + "/api/session")
+						if err == nil {
+							_ = resp.Body.Close()
+						}
 					}
 				}
 			}(i)

@@ -51,6 +51,11 @@ type Suspender interface {
 	SuspendActor(ctx context.Context, atespace, actorID string) error
 }
 
+// SimulationStopper halts an active simulation runner.
+type SimulationStopper interface {
+	Stop()
+}
+
 // SuspendFunc adapts a function to the Suspender interface.
 type SuspendFunc func(ctx context.Context, atespace, actorID string) error
 
@@ -191,6 +196,7 @@ type Gateway struct {
 	lastResults      map[string]*types.ExecutionResult
 	recentEvents     []string
 	parkedCount      int
+	simRunner        SimulationStopper
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -277,6 +283,14 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 
 // Close gracefully stops the background polling routine.
 func (g *Gateway) Close() {
+	g.mu.Lock()
+	runner := g.simRunner
+	g.simRunner = nil
+	g.mu.Unlock()
+	if runner != nil {
+		runner.Stop()
+	}
+
 	if g.cancel != nil {
 		g.cancel()
 		g.wg.Wait()
@@ -298,6 +312,7 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/actor/", g.handleActorDetails)
 	g.mux.HandleFunc("/api/actor", g.handleActorDetails)
 	g.mux.HandleFunc("/api/stage/telemetry", g.handleTelemetry)
+	g.mux.HandleFunc("/api/reset", g.handleReset)
 	if g.aiClient != nil {
 		g.mux.HandleFunc("/api/chat", g.handleChatRequest)
 		g.mux.HandleFunc("/api/approve", g.handleApproveRequest)
@@ -1008,6 +1023,84 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(details)
+}
+
+func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/reset" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	g.mu.Lock()
+	runner := g.simRunner
+	g.simRunner = nil
+	g.mu.Unlock()
+
+	if runner != nil {
+		runner.Stop()
+	}
+
+	g.mu.Lock()
+	var actorsToSuspend []string
+	for id, st := range g.activeActors {
+		if st != types.StateSuspended {
+			actorsToSuspend = append(actorsToSuspend, id)
+		}
+		g.activeActors[id] = types.StateSuspended
+	}
+	sort.Strings(actorsToSuspend)
+
+	g.pendingApprovals = make(map[string]*types.ApprovalRequest)
+	g.chatHistories = make(map[string][]types.ChatMessage)
+	g.lastResults = make(map[string]*types.ExecutionResult)
+	g.addEventLocked("Cluster reset: all actors suspended to GCS, worker pods freed")
+	g.mu.Unlock()
+
+	if g.suspender != nil && len(actorsToSuspend) > 0 {
+		baseCtx := g.ctx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, 5*time.Second)
+		defer cancel()
+
+		var wg sync.WaitGroup
+		for _, id := range actorsToSuspend {
+			wg.Add(1)
+			go func(actorID string) {
+				defer wg.Done()
+				if err := g.suspender.SuspendActor(ctx, g.atespace, actorID); err != nil {
+					g.mu.Lock()
+					g.addEventLocked(fmt.Sprintf("Warning: reset suspend actor %s failed: %v", actorID, err))
+					g.mu.Unlock()
+				}
+			}(id)
+		}
+		wg.Wait()
+	}
+
+	for _, id := range actorsToSuspend {
+		g.BroadcastStateChange(id, types.StateSuspended, "Suspended", "Cluster reset - suspended to GCS")
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":       "ok",
+		"message":      "Cluster reset: all actors suspended and memory cleared",
+		"actors_reset": len(actorsToSuspend),
+	})
+}
+
+// SetSimulationRunner attaches an active simulation runner to the gateway.
+func (g *Gateway) SetSimulationRunner(sr SimulationStopper) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.simRunner = sr
 }
 
 func (g *Gateway) asyncSuspendActor(attendeeID string) {
