@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"log"
 	"net/http"
@@ -26,6 +27,9 @@ import (
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
+
+//go:embed static/*
+var staticFS embed.FS
 
 // Config holds the configuration for the conference edge gateway.
 type Config struct {
@@ -78,6 +82,7 @@ func main() {
 		gateway.WithAtespace(cfg.Atespace),
 		gateway.WithJWTSecret(cfg.JWTSecret),
 		gateway.WithGeminiAPIKey(cfg.GeminiAPIKey),
+		gateway.WithStaticFS(staticFS),
 	}
 
 	gw := gateway.NewGateway(cfg.RouterURL, cfg.StatusURL, opts...)

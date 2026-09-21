@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<!--
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#07090e">
+  <meta name="description" content="Agent Substrate - Interactive Conference Attendee Sandboxed AI Agent">
+  <title>Substrate Agent // Conference Demo</title>
+  <link rel="stylesheet" href="/static/chat.css">
+</head>
+<body>
+  <div id="app" class="app-container">
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="header-main">
+        <div class="brand">
+          <span class="brand-glyph">⬡</span>
+          <span class="brand-title">SUBSTRATE</span>
+          <span class="badge model-badge">Gemini Flash</span>
+        </div>
+        <div class="header-badges">
+          <span id="attendee-badge" class="badge attendee-badge">Attendee #--</span>
+        </div>
+      </div>
+      <!-- Substrate Lifecycle Status Pill -->
+      <div class="status-bar">
+        <div id="status-pill" class="status-pill suspended" title="Substrate Micro-VM Lifecycle State">
+          <span class="status-dot"></span>
+          <span id="status-text" class="status-text">⚡ Suspended in GCS</span>
+          <span id="status-sub" class="status-sub">0 vCPU / 0 MB RAM</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Quick Starter Prompt Chips -->
+    <section class="chips-container" aria-label="Suggested starter prompts">
+      <div class="chips-scroll">
+        <button type="button" class="chip" data-prompt="Analyze sales telemetry, detect outliers, and produce an ASCII histogram">
+          <span class="chip-icon">📊</span> Anomaly Analysis
+        </button>
+        <button type="button" class="chip" data-prompt="Run security vulnerability audit on container sandbox environment">
+          <span class="chip-icon">🔒</span> Security Audit
+        </button>
+        <button type="button" class="chip" data-prompt="Benchmark gVisor CPU and memory allocation throughput">
+          <span class="chip-icon">⚡</span> Benchmark Sandbox
+        </button>
+      </div>
+    </section>
+
+    <!-- Interactive Chat Message Feed -->
+    <main id="chat-feed" class="chat-feed" role="log" aria-live="polite">
+      <!-- Welcome Intro Card -->
+      <div class="chat-message system-message intro-message">
+        <div class="message-meta">
+          <span class="sender-label">⚡ Substrate Daemon</span>
+          <span class="timestamp">Now</span>
+        </div>
+        <div class="message-bubble">
+          <p><strong>Welcome to Agent Substrate.</strong></p>
+          <p>You have been provisioned an isolated stateful agent running in a gVisor container sandbox. When idle, your agent state is snapshotted to Google Cloud Storage at 0 cost.</p>
+          <p class="intro-hint">Select a prompt chip above or type a command below to trigger execution.</p>
+        </div>
+      </div>
+    </main>
+
+    <!-- Fixed Mobile Input Footer -->
+    <footer class="app-footer">
+      <form id="chat-form" class="chat-form" onsubmit="return false;">
+        <div class="input-wrapper">
+          <input
+            type="text"
+            id="prompt-input"
+            class="prompt-input"
+            placeholder="Ask your agent or run code..."
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            maxlength="2000"
+            aria-label="Chat prompt input"
+          />
+          <button type="submit" id="send-btn" class="send-btn" aria-label="Send prompt">
+            <svg class="send-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+      </form>
+    </footer>
+  </div>
+
+  <!-- Human-in-the-Loop Review Card Template -->
+  <template id="approval-card-template">
+    <div class="approval-card" data-approval-id="">
+      <div class="approval-header">
+        <div class="risk-indicator risk-high">
+          <span class="risk-dot"></span>
+          <span class="risk-label">HIGH RISK</span>
+        </div>
+        <span class="approval-lang">python</span>
+      </div>
+      <div class="approval-summary">
+        <h4 class="summary-text">Proposed Execution</h4>
+      </div>
+      <div class="code-preview-container">
+        <div class="code-banner">
+          <span class="code-tag">SANDBOX SCRIPT</span>
+          <span class="code-isolation">gVisor runsc</span>
+        </div>
+        <pre class="code-block"><code class="code-content"></code></pre>
+      </div>
+      <div class="approval-actions">
+        <button type="button" class="action-btn btn-reject">
+          <span class="btn-icon">✕</span> Reject
+        </button>
+        <button type="button" class="action-btn btn-approve">
+          <span class="btn-icon">✓</span> Approve &amp; Execute
+        </button>
+      </div>
+    </div>
+  </template>
+
+  <script src="/static/chat.js"></script>
+</body>
+</html>

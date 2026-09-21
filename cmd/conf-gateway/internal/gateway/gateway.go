@@ -24,11 +24,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,6 +128,15 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithStaticFS sets the static filesystem used to serve web assets.
+func WithStaticFS(staticFS fs.FS) Option {
+	return func(g *Gateway) {
+		if staticFS != nil {
+			g.staticFS = normalizeStaticFS(staticFS)
+		}
+	}
+}
+
 // Gateway manages sessions, reverse proxying to atenet-router, and telemetry aggregation.
 type Gateway struct {
 	routerURL      string
@@ -134,6 +147,7 @@ type Gateway struct {
 	suspender      Suspender
 	statusInterval time.Duration
 	httpClient     *http.Client
+	staticFS       fs.FS
 
 	mux          *http.ServeMux
 	proxy        *httputil.ReverseProxy
@@ -165,6 +179,10 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 
 	for _, opt := range opts {
 		opt(gw)
+	}
+
+	if gw.staticFS == nil {
+		gw.staticFS = normalizeStaticFS(resolveStaticFS())
 	}
 
 	targetURL, err := url.Parse(gw.routerURL)
@@ -240,6 +258,71 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/stage/telemetry", g.handleTelemetry)
 	g.mux.HandleFunc("/api/chat", g.proxyToActor)
 	g.mux.HandleFunc("/api/approve", g.proxyToActor)
+
+	g.mux.HandleFunc("/chat", g.handleChat)
+	g.mux.HandleFunc("/chat/", g.handleChat)
+	if g.staticFS != nil {
+		g.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(g.staticFS))))
+	}
+}
+
+func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if g.staticFS == nil {
+		http.Error(w, "Static filesystem not configured", http.StatusInternalServerError)
+		return
+	}
+	data, err := fs.ReadFile(g.staticFS, "chat.html")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read chat.html: %v", err), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func normalizeStaticFS(sysFS fs.FS) fs.FS {
+	if sysFS == nil {
+		return nil
+	}
+	if _, err := fs.Stat(sysFS, "static/chat.html"); err == nil {
+		if sub, err := fs.Sub(sysFS, "static"); err == nil {
+			return sub
+		}
+	}
+	return sysFS
+}
+
+func resolveStaticFS() fs.FS {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if ok {
+		devPath := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", "..", "static"))
+		if fi, err := os.Stat(devPath); err == nil && fi.IsDir() {
+			if _, err := os.Stat(filepath.Join(devPath, "chat.html")); err == nil {
+				return os.DirFS(devPath)
+			}
+		}
+	}
+
+	candidates := []string{
+		"static",
+		"../static",
+		"../../static",
+		"demos/conference/cmd/conf-gateway/static",
+		"cmd/conf-gateway/static",
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+			if _, err := os.Stat(filepath.Join(c, "chat.html")); err == nil {
+				return os.DirFS(c)
+			}
+		}
+	}
+	return nil
 }
 
 func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {

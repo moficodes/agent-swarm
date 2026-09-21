@@ -1237,3 +1237,96 @@ func TestGateway_CloseWaitsForAsyncSuspension(t *testing.T) {
 		t.Errorf("expected suspend call for %s, got %s", sess.AttendeeID, calls[0].ActorID)
 	}
 }
+
+func TestChatRoute(t *testing.T) {
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// 1. GET /chat returns 200 with HTML content and required DOM elements
+	resp, err := http.Get(ts.URL + "/chat")
+	if err != nil {
+		t.Fatalf("failed to request /chat: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /chat, got %d", resp.StatusCode)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Errorf("expected Content-Type to contain text/html, got %q", contentType)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	body := string(bodyBytes)
+
+	expectedElements := []string{
+		`id="chat-feed"`,
+		`id="prompt-input"`,
+		`id="send-btn"`,
+		`id="status-pill"`,
+		`id="attendee-badge"`,
+		`Gemini Flash`,
+		`Anomaly Analysis`,
+		`Security Audit`,
+		`Benchmark Sandbox`,
+		`approval-card`,
+		`btn-reject`,
+		`btn-approve`,
+	}
+	for _, el := range expectedElements {
+		if !strings.Contains(body, el) {
+			t.Errorf("expected HTML to contain %q, but was missing", el)
+		}
+	}
+
+	// 2. GET /static/chat.js returns 200 with JS content
+	respJS, err := http.Get(ts.URL + "/static/chat.js")
+	if err != nil {
+		t.Fatalf("failed to request /static/chat.js: %v", err)
+	}
+	defer respJS.Body.Close()
+
+	if respJS.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /static/chat.js, got %d", respJS.StatusCode)
+	}
+	jsBytes, _ := io.ReadAll(respJS.Body)
+	jsBody := string(jsBytes)
+	if !strings.Contains(jsBody, "/api/chat") || !strings.Contains(jsBody, "/api/approve") {
+		t.Errorf("expected chat.js to contain /api/chat and /api/approve endpoints")
+	}
+
+	// 3. GET /static/chat.css returns 200 with CSS content
+	respCSS, err := http.Get(ts.URL + "/static/chat.css")
+	if err != nil {
+		t.Fatalf("failed to request /static/chat.css: %v", err)
+	}
+	defer respCSS.Body.Close()
+
+	if respCSS.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /static/chat.css, got %d", respCSS.StatusCode)
+	}
+	cssBytes, _ := io.ReadAll(respCSS.Body)
+	cssBody := string(cssBytes)
+	if !strings.Contains(cssBody, "chat-feed") || !strings.Contains(cssBody, "approval-card") {
+		t.Errorf("expected chat.css to contain chat-feed and approval-card rules")
+	}
+
+	// 4. POST /chat should return 405 Method Not Allowed
+	respPost, err := http.Post(ts.URL+"/chat", "application/json", nil)
+	if err != nil {
+		t.Fatalf("failed to POST /chat: %v", err)
+	}
+	defer respPost.Body.Close()
+
+	if respPost.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected status 405 for POST /chat, got %d", respPost.StatusCode)
+	}
+}
