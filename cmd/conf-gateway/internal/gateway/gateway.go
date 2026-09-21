@@ -514,6 +514,24 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ch := g.broker.Subscribe(attendeeID)
 	defer g.broker.Unsubscribe(attendeeID, ch)
 
+	currentState, exists := g.GetActorState(attendeeID)
+	if !exists {
+		currentState = types.StateSuspended
+	}
+	initialEvent := types.StateChangeEvent{
+		AttendeeID: attendeeID,
+		State:      currentState,
+		Label:      stateToLabel(currentState),
+		Subtext:    stateToSubtext(currentState),
+		Timestamp:  time.Now().Unix(),
+	}
+	if initData, err := json.Marshal(initialEvent); err == nil {
+		if _, err := fmt.Fprintf(w, "event: state_change\ndata: %s\n\n", initData); err != nil {
+			return
+		}
+		flusher.Flush()
+	}
+
 	ctxDone := r.Context().Done()
 	for {
 		select {
@@ -527,11 +545,41 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			if _, err := fmt.Fprintf(w, "event: state_change\ndata: %s\n\n", data); err != nil {
 				return
 			}
 			flusher.Flush()
 		}
+	}
+}
+
+func stateToLabel(state types.ActorLifecycleState) string {
+	switch state {
+	case types.StateThinkingVertexAI:
+		return "🧠 Reasoning on Vertex AI..."
+	case types.StateAwaitingApproval:
+		return "⏸️ Awaiting Approval"
+	case types.StateParked, types.StateParkedEnvoy:
+		return "⏳ Parked in Envoy Buffer"
+	case types.StateRunning, types.StateRunningGVisor:
+		return "🚀 Running in Sandbox"
+	default:
+		return "⚡ Suspended in GCS"
+	}
+}
+
+func stateToSubtext(state types.ActorLifecycleState) string {
+	switch state {
+	case types.StateThinkingVertexAI:
+		return "Gemini 2.5 Flash generating analysis script"
+	case types.StateAwaitingApproval:
+		return "Process frozen in GCS (0 MB RAM used)"
+	case types.StateParked, types.StateParkedEnvoy:
+		return "Queued in Envoy L7 buffer — waiting for worker slot..."
+	case types.StateRunning, types.StateRunningGVisor:
+		return "Executing script inside gVisor container"
+	default:
+		return "Process snapshot written to GCS — 0 vCPU, 0 RAM"
 	}
 }
 

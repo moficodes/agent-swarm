@@ -1628,8 +1628,10 @@ func TestSSEEventStreaming(t *testing.T) {
 						errChan <- err
 						return
 					}
-					eventChan <- ev
-					return
+					if ev.State == types.StateThinkingVertexAI {
+						eventChan <- ev
+						return
+					}
 				}
 			}
 		}()
