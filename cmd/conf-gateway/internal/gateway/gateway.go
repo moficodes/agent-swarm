@@ -29,6 +29,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -142,6 +143,7 @@ type Gateway struct {
 	recentEvents []string
 	parkedCount  int
 
+	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -208,6 +210,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 	gw.routes()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	gw.ctx = ctx
 	gw.cancel = cancel
 	gw.wg.Add(1)
 	go gw.pollStatus(ctx)
@@ -283,6 +286,8 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	copy(eventsCopy, g.recentEvents)
 	parked := g.parkedCount
 	g.mu.RUnlock()
+
+	sort.Strings(runningActors)
 
 	workers := make([]types.WorkerStatus, 2)
 	for i := 0; i < 2; i++ {
@@ -375,12 +380,10 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	resp.ContentLength = int64(len(bodyBytes))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
 
-	isWaitingForApproval := bytes.Contains(bodyBytes, []byte("WAITING_FOR_APPROVAL"))
-	if !isWaitingForApproval {
-		var chatMsg types.ChatMessage
-		if err := json.Unmarshal(bodyBytes, &chatMsg); err == nil && chatMsg.Approval != nil {
-			isWaitingForApproval = true
-		}
+	var isWaitingForApproval bool
+	var chatMsg types.ChatMessage
+	if err := json.Unmarshal(bodyBytes, &chatMsg); err == nil && chatMsg.Approval != nil {
+		isWaitingForApproval = true
 	}
 
 	if isWaitingForApproval {
@@ -389,41 +392,38 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.addEventLocked(fmt.Sprintf("Actor %s awaiting human approval", attendeeID))
 		g.mu.Unlock()
 
-		if g.suspender != nil {
-			atespace := g.atespace
-			suspender := g.suspender
-			go func() {
-				suspendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				if err := suspender.SuspendActor(suspendCtx, atespace, attendeeID); err != nil {
-					g.mu.Lock()
-					g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendeeID, err))
-					g.mu.Unlock()
-				}
-			}()
-		}
+		g.asyncSuspendActor(attendeeID)
 	} else if resp.StatusCode == http.StatusOK {
 		g.mu.Lock()
 		g.activeActors[attendeeID] = types.StateSuspended
 		g.addEventLocked(fmt.Sprintf("Actor %s completed turn - suspended to GCS", attendeeID))
 		g.mu.Unlock()
 
-		if g.suspender != nil {
-			atespace := g.atespace
-			suspender := g.suspender
-			go func() {
-				suspendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				if err := suspender.SuspendActor(suspendCtx, atespace, attendeeID); err != nil {
-					g.mu.Lock()
-					g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendeeID, err))
-					g.mu.Unlock()
-				}
-			}()
-		}
+		g.asyncSuspendActor(attendeeID)
 	}
 
 	return nil
+}
+
+func (g *Gateway) asyncSuspendActor(attendeeID string) {
+	if g.suspender == nil || attendeeID == "" {
+		return
+	}
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		baseCtx := g.ctx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
+		defer cancel()
+		if err := g.suspender.SuspendActor(ctx, g.atespace, attendeeID); err != nil {
+			g.mu.Lock()
+			g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendeeID, err))
+			g.mu.Unlock()
+		}
+	}()
 }
 
 func (g *Gateway) authenticateRequest(r *http.Request) (string, error) {
@@ -436,10 +436,6 @@ func (g *Gateway) authenticateRequest(r *http.Request) (string, error) {
 	}
 
 	if tokenStr == "" {
-		attendeeID := strings.TrimSpace(r.Header.Get("X-Attendee-ID"))
-		if attendeeID != "" {
-			return attendeeID, nil
-		}
 		return "", errors.New("missing authorization token")
 	}
 
@@ -450,6 +446,10 @@ func (g *Gateway) authenticateRequest(r *http.Request) (string, error) {
 
 	if claims.Sub == "" {
 		return "", errors.New("token missing subject")
+	}
+
+	if claims.Exp <= 0 || claims.Exp <= time.Now().Unix() {
+		return "", errors.New("token expired")
 	}
 
 	if reqAttendeeID := r.Header.Get("X-Attendee-ID"); reqAttendeeID != "" {
@@ -513,7 +513,7 @@ func (g *Gateway) VerifyToken(tokenStr string) (*Claims, error) {
 		return nil, fmt.Errorf("invalid token claims: %w", err)
 	}
 
-	if claims.Exp > 0 && claims.Exp <= time.Now().Unix() {
+	if claims.Exp <= 0 || claims.Exp <= time.Now().Unix() {
 		return nil, errors.New("token expired")
 	}
 

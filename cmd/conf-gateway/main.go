@@ -27,7 +27,18 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
-func main() {
+// Config holds the configuration for the conference edge gateway.
+type Config struct {
+	Port         string
+	RouterURL    string
+	StatusURL    string
+	JWTSecret    string
+	GeminiAPIKey string
+	Atespace     string
+}
+
+// LoadConfig loads the configuration from environment variables with defaults.
+func LoadConfig() Config {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8090"
@@ -50,25 +61,41 @@ func main() {
 		atespace = "ate-demo-conf"
 	}
 
+	return Config{
+		Port:         port,
+		RouterURL:    routerURL,
+		StatusURL:    statusURL,
+		JWTSecret:    jwtSecret,
+		GeminiAPIKey: geminiAPIKey,
+		Atespace:     atespace,
+	}
+}
+
+func main() {
+	cfg := LoadConfig()
+
 	opts := []gateway.Option{
-		gateway.WithAtespace(atespace),
-		gateway.WithJWTSecret(jwtSecret),
-		gateway.WithGeminiAPIKey(geminiAPIKey),
+		gateway.WithAtespace(cfg.Atespace),
+		gateway.WithJWTSecret(cfg.JWTSecret),
+		gateway.WithGeminiAPIKey(cfg.GeminiAPIKey),
 	}
 
-	gw := gateway.NewGateway(routerURL, statusURL, opts...)
+	gw := gateway.NewGateway(cfg.RouterURL, cfg.StatusURL, opts...)
 	defer gw.Close()
 
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: gw.Handler(),
+		Addr:              ":" + cfg.Port,
+		Handler:           gw.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
-		log.Printf("Starting conference edge gateway on :%s (router: %s, statusz: %s, atespace: %s)...", port, routerURL, statusURL, atespace)
+		log.Printf("Starting conference edge gateway on :%s (router: %s, statusz: %s, atespace: %s)...", cfg.Port, cfg.RouterURL, cfg.StatusURL, cfg.Atespace)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("gateway server failed: %v", err)
 		}

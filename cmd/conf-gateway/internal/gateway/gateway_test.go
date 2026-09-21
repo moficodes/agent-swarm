@@ -774,19 +774,74 @@ func TestSuspenderFailureTolerance(t *testing.T) {
 	}
 }
 
-func TestProxyRouting_StandaloneAttendeeIDHeader(t *testing.T) {
-	var receivedTargetActor atomic.Pointer[string]
+func TestProxyRouting_ApprovalDetection_SubstringIgnored(t *testing.T) {
+	suspender := &mockSuspender{}
 
+	// Upstream returns WAITING_FOR_APPROVAL substring in content, but Approval field is nil
 	upstreamMux := http.NewServeMux()
 	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
-		hdrActor := r.Header.Get("ate-target-actor")
-		receivedTargetActor.Store(&hdrActor)
-
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(types.ChatMessage{
-			ID:        "msg-standalone-1",
+			ID:        "msg-raw-substring",
 			Sender:    types.SenderAssistant,
-			Content:   "Accepted with standalone X-Attendee-ID",
+			Content:   "Here is how WAITING_FOR_APPROVAL works in our system docs.",
+			Timestamp: time.Now().Unix(),
+			Approval:  nil, // No structured approval!
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithSuspender(suspender),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	sessResp, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	defer sessResp.Body.Close()
+	var sess struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	_ = json.NewDecoder(sessResp.Body).Decode(&sess)
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sess.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	state, ok := gw.GetActorState(sess.AttendeeID)
+	if !ok {
+		t.Fatalf("actor %s not found in activeActors", sess.AttendeeID)
+	}
+	if state != types.StateSuspended {
+		t.Errorf("expected actor %s state %s (normal completed turn), but got %s", sess.AttendeeID, types.StateSuspended, state)
+	}
+}
+
+func TestProxyRouting_RequireValidToken(t *testing.T) {
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-valid-1",
+			Sender:    types.SenderAssistant,
+			Content:   "OK",
 			Timestamp: time.Now().Unix(),
 		})
 	})
@@ -801,7 +856,7 @@ func TestProxyRouting_StandaloneAttendeeIDHeader(t *testing.T) {
 	ts := httptest.NewServer(gw.Handler())
 	defer ts.Close()
 
-	// Send chat request with ONLY X-Attendee-ID header (no Authorization or X-Attendee-Token)
+	// 1. Request with only X-Attendee-ID header (no token) MUST be rejected with 401
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello standalone"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Attendee-ID", "attendee-42")
@@ -812,12 +867,35 @@ func TestProxyRouting_StandaloneAttendeeIDHeader(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 OK for standalone X-Attendee-ID, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for standalone X-Attendee-ID, got %d", resp.StatusCode)
 	}
 
-	if receivedTargetActor.Load() == nil || *receivedTargetActor.Load() != "ate-demo-conf/attendee-42" {
-		t.Errorf("expected ate-target-actor 'ate-demo-conf/attendee-42', got %v", receivedTargetActor.Load())
+	// 2. Request with valid token via X-Attendee-Token should succeed
+	sessResp, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	defer sessResp.Body.Close()
+	var sess struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	_ = json.NewDecoder(sessResp.Body).Decode(&sess)
+
+	reqToken, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello token"}`))
+	reqToken.Header.Set("Content-Type", "application/json")
+	reqToken.Header.Set("X-Attendee-Token", sess.Token)
+	reqToken.Header.Set("X-Attendee-ID", sess.AttendeeID)
+
+	respToken, err := http.DefaultClient.Do(reqToken)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer respToken.Body.Close()
+
+	if respToken.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for valid X-Attendee-Token, got %d", respToken.StatusCode)
 	}
 }
 
@@ -1003,5 +1081,159 @@ func TestProxyRouting_AsyncSuspensionNonBlocking(t *testing.T) {
 	}
 	if calls[0].ActorID != sess.AttendeeID {
 		t.Errorf("expected actor ID %q, got %+v", sess.AttendeeID, calls[0])
+	}
+}
+
+func TestStageTelemetry_DeterministicWorkerSorting(t *testing.T) {
+	hold := make(chan struct{})
+	var enteredCount atomic.Int32
+
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		enteredCount.Add(1)
+		<-hold
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-sort",
+			Sender:    types.SenderAssistant,
+			Content:   "done",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// Provision sessions for 3 attendees
+	tokens := make(map[string]string)
+	for i := 0; i < 3; i++ {
+		resp, err := http.Get(ts.URL + "/api/session")
+		if err != nil {
+			t.Fatalf("failed to get session: %v", err)
+		}
+		var sess struct {
+			AttendeeID string `json:"attendee_id"`
+			Token      string `json:"token"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&sess)
+		_ = resp.Body.Close()
+		tokens[sess.AttendeeID] = sess.Token
+	}
+
+	var reqWg sync.WaitGroup
+	for _, id := range []string{"attendee-03", "attendee-01", "attendee-02"} {
+		reqWg.Add(1)
+		go func(attID, tok string) {
+			defer reqWg.Done()
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hi"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+tok)
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+		}(id, tokens[id])
+	}
+
+	// Wait until all 3 requests are actively being processed upstream
+	deadline := time.Now().Add(2 * time.Second)
+	for enteredCount.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if enteredCount.Load() < 3 {
+		close(hold)
+		reqWg.Wait()
+		t.Fatalf("timed out waiting for 3 requests to enter upstream, got %d", enteredCount.Load())
+	}
+
+	// Check telemetry multiple times: runningActors must be sorted, so Workers[0] is attendee-01 and Workers[1] is attendee-02
+	for i := 0; i < 15; i++ {
+		resp, err := http.Get(ts.URL + "/api/stage/telemetry")
+		if err != nil {
+			close(hold)
+			reqWg.Wait()
+			t.Fatalf("failed to get telemetry: %v", err)
+		}
+		var telem types.StageTelemetry
+		_ = json.NewDecoder(resp.Body).Decode(&telem)
+		_ = resp.Body.Close()
+
+		if len(telem.Workers) < 2 {
+			close(hold)
+			reqWg.Wait()
+			t.Fatalf("expected 2 workers")
+		}
+		if telem.Workers[0].ActiveActor != "attendee-01" || telem.Workers[1].ActiveActor != "attendee-02" {
+			close(hold)
+			reqWg.Wait()
+			t.Fatalf("telemetry not deterministically sorted: worker0=%s, worker1=%s",
+				telem.Workers[0].ActiveActor, telem.Workers[1].ActiveActor)
+		}
+	}
+
+	close(hold)
+	reqWg.Wait()
+}
+
+func TestGateway_CloseWaitsForAsyncSuspension(t *testing.T) {
+	suspender := &mockSuspender{
+		suspendDelay: 60 * time.Millisecond,
+	}
+
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-close-test",
+			Sender:    types.SenderAssistant,
+			Content:   "Finished turn",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithSuspender(suspender),
+	)
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	sessResp, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	var sess struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	_ = json.NewDecoder(sessResp.Body).Decode(&sess)
+	_ = sessResp.Body.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sess.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// Immediately close the gateway. Close() should block until asyncSuspendActor finishes!
+	gw.Close()
+
+	calls := suspender.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected Close() to wait for async suspension to complete, but got %d calls", len(calls))
+	}
+	if calls[0].ActorID != sess.AttendeeID {
+		t.Errorf("expected suspend call for %s, got %s", sess.AttendeeID, calls[0].ActorID)
 	}
 }
