@@ -23,6 +23,9 @@
 #   Step 4: Turn 2 Approval & Sandbox Execution (/api/approve -> exit code 0 & stdout)
 #   Step 5: Audience Burst & Request Parking (concurrent load, 0 dropped/503s, parking check)
 #   Step 6: Telemetry Endpoint (/api/stage/telemetry -> actors, workers, parking)
+#   Step 7: Audience Simulation Engine (/api/simulation -> start/stop lifecycle)
+#   Step 8: Actor Spotlight Inspector API (/api/actor/{id} -> snapshot metadata & execution state)
+#   Step 9: 1-Click Cluster Reset Controller (/api/reset -> parallel suspend sweep & state reset)
 
 set -o errexit -o nounset -o pipefail
 
@@ -31,6 +34,7 @@ cd "${ROOT}"
 
 # Configuration with defaults
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8090}"
+GATEWAY_URL_EXPLICIT=false
 ROUTER_URL="${ROUTER_URL:-http://localhost:8000}"
 STATUS_URL="${STATUS_URL:-http://localhost:4040}"
 CONCURRENCY="${CONCURRENCY:-10}"
@@ -99,10 +103,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gateway-url)
       GATEWAY_URL="$2"
+      GATEWAY_URL_EXPLICIT=true
       shift 2
       ;;
     --gateway-url=*)
       GATEWAY_URL="${1#*=}"
+      GATEWAY_URL_EXPLICIT=true
       shift
       ;;
     --router-url)
@@ -154,7 +160,7 @@ cleanup() {
     kill "${SPAWNED_PIDS[@]}" 2>/dev/null || true
     sleep 0.1
     kill -9 "${SPAWNED_PIDS[@]}" 2>/dev/null || true
-    wait "${SPAWNED_PIDS[@]}" 2>/dev/null || true
+    { wait "${SPAWNED_PIDS[@]}" 2>/dev/null || true; } 2>/dev/null
   fi
   if [[ ${#BURST_PIDS[@]} -gt 0 ]]; then
     for pid in "${BURST_PIDS[@]}"; do
@@ -223,9 +229,11 @@ fi
 
 # Check if conference edge gateway is reachable, or launch mock environment if in mock mode
 IS_GATEWAY_REACHABLE=false
-if curl -s -f --max-time 2 "${GATEWAY_URL}/healthz" >/dev/null 2>&1 && \
-   curl -s -f --max-time 2 "${GATEWAY_URL}/api/session" >/dev/null 2>&1; then
-  IS_GATEWAY_REACHABLE=true
+if [[ "${MOCK_MODE}" != "true" || "${GATEWAY_URL_EXPLICIT}" == "true" ]]; then
+  if curl -s -f --max-time 2 "${GATEWAY_URL}/healthz" >/dev/null 2>&1 && \
+     curl -s -f --max-time 2 "${GATEWAY_URL}/api/session" >/dev/null 2>&1; then
+    IS_GATEWAY_REACHABLE=true
+  fi
 fi
 
 if [[ "${IS_GATEWAY_REACHABLE}" != "true" ]]; then
@@ -273,6 +281,21 @@ class RouterHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK")
+        elif self.path.startswith("/api/actor/"):
+            actor_id = self.path.split("/")[-1]
+            resp = json.dumps({
+                "actor_id": actor_id,
+                "state": "SUSPENDED",
+                "worker_pod": "",
+                "snapshot_location": f"gs://conf-demo-bucket/ate-demo-conf/actors/{actor_id}.snap",
+                "snapshot_size_bytes": 384000,
+                "chat_history": []
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
         else:
             self.send_response(404)
             self.end_headers()
@@ -280,6 +303,15 @@ class RouterHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len) if content_len > 0 else b""
+
+        if self.path == "/api/reset":
+            resp = json.dumps({"status": "ok", "message": "Cluster reset", "actors_reset": 0}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+            return
         
         with self.cv:
             if RouterHandler.active >= 2:
@@ -620,7 +652,145 @@ log_ok "Router Parked Counter     : ${PARKED_COUNT}"
 log_ok "Logged Cluster Events     : ${EVENTS_COUNT} events recorded"
 log_pass "Step 6: Telemetry Endpoint Verified"
 
+# =========================================================================
+# Step 7: Audience Simulation Engine
+# =========================================================================
+log_info "Step 7: Audience Simulation Engine (/api/simulation)"
+SIM_START_PAYLOAD='{"action":"start","count":5}'
+SIM_START_CODE=$(curl -s -o "${TMP_DIR}/sim_start.json" -w "%{http_code}" --max-time 10 -X POST "${GATEWAY_URL}/api/simulation" \
+  -H "Content-Type: application/json" \
+  -d "${SIM_START_PAYLOAD}")
+
+if [[ "${SIM_START_CODE}" != "200" ]]; then
+  log_err "Failed to start simulation (HTTP ${SIM_START_CODE}). Response: $(cat "${TMP_DIR}/sim_start.json" 2>/dev/null || true)"
+  log_fail "Step 7: Audience Simulation Engine"
+  exit 1
+fi
+log_ok "Started audience simulation with count=5 via POST /api/simulation (HTTP 200 OK)"
+
+# Verify GET /api/simulation returns running: true
+SIM_STATUS_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/simulation")
+SIM_RUNNING=$(printf "%s" "${SIM_STATUS_RESP}" | jq -r .running 2>/dev/null || echo false)
+if [[ "${SIM_RUNNING}" != "true" ]]; then
+  log_err "Expected running: true from GET /api/simulation, got '${SIM_RUNNING}'. Response: ${SIM_STATUS_RESP}"
+  log_fail "Step 7: Audience Simulation Engine"
+  exit 1
+fi
+log_ok "GET /api/simulation verified running: true"
+
+# Stop simulation via POST /api/simulation ({"action":"stop"})
+SIM_STOP_PAYLOAD='{"action":"stop"}'
+SIM_STOP_CODE=$(curl -s -o "${TMP_DIR}/sim_stop.json" -w "%{http_code}" --max-time 10 -X POST "${GATEWAY_URL}/api/simulation" \
+  -H "Content-Type: application/json" \
+  -d "${SIM_STOP_PAYLOAD}")
+
+if [[ "${SIM_STOP_CODE}" != "200" ]]; then
+  log_err "Failed to stop simulation (HTTP ${SIM_STOP_CODE}). Response: $(cat "${TMP_DIR}/sim_stop.json" 2>/dev/null || true)"
+  log_fail "Step 7: Audience Simulation Engine"
+  exit 1
+fi
+log_ok "Stopped audience simulation via POST /api/simulation (HTTP 200 OK)"
+
+# Verify GET /api/simulation returns running: false
+SIM_STOPPED_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/simulation")
+SIM_RUNNING_STOPPED=$(printf "%s" "${SIM_STOPPED_RESP}" | jq -r .running 2>/dev/null || echo true)
+if [[ "${SIM_RUNNING_STOPPED}" != "false" ]]; then
+  log_err "Expected running: false from GET /api/simulation, got '${SIM_RUNNING_STOPPED}'. Response: ${SIM_STOPPED_RESP}"
+  log_fail "Step 7: Audience Simulation Engine"
+  exit 1
+fi
+log_ok "GET /api/simulation verified running: false"
+log_pass "Step 7: Audience Simulation Engine Verified"
+
+# =========================================================================
+# Step 8: Actor Spotlight Inspector API
+# =========================================================================
+log_info "Step 8: Actor Spotlight Inspector API (/api/actor/{id})"
+ACTOR_HTTP_CODE=$(curl -s -o "${TMP_DIR}/actor_details.json" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/actor/attendee-01")
+
+if [[ "${ACTOR_HTTP_CODE}" != "200" ]]; then
+  log_err "GET /api/actor/attendee-01 returned HTTP ${ACTOR_HTTP_CODE} (expected 200)"
+  log_fail "Step 8: Actor Spotlight Inspector API"
+  exit 1
+fi
+
+ACTOR_RESP=$(cat "${TMP_DIR}/actor_details.json")
+ACTOR_ID=$(printf "%s" "${ACTOR_RESP}" | jq -r .actor_id 2>/dev/null || true)
+ACTOR_STATE=$(printf "%s" "${ACTOR_RESP}" | jq -r .state 2>/dev/null || true)
+HAS_ACTOR_ID=$(printf "%s" "${ACTOR_RESP}" | jq 'has("actor_id")' 2>/dev/null || echo false)
+HAS_STATE=$(printf "%s" "${ACTOR_RESP}" | jq 'has("state")' 2>/dev/null || echo false)
+HAS_SNAP_LOC=$(printf "%s" "${ACTOR_RESP}" | jq 'has("snapshot_location")' 2>/dev/null || echo false)
+HAS_SNAP_SIZE=$(printf "%s" "${ACTOR_RESP}" | jq 'has("snapshot_size_bytes")' 2>/dev/null || echo false)
+
+if [[ "${HAS_ACTOR_ID}" != "true" || -z "${ACTOR_ID}" || "${ACTOR_ID}" == "null" ]]; then
+  log_err "Missing or null actor_id in /api/actor/attendee-01 response: ${ACTOR_RESP}"
+  log_fail "Step 8: Actor Spotlight Inspector API"
+  exit 1
+fi
+
+if [[ "${HAS_STATE}" != "true" || -z "${ACTOR_STATE}" || "${ACTOR_STATE}" == "null" ]]; then
+  log_err "Missing or null state in /api/actor/attendee-01 response: ${ACTOR_RESP}"
+  log_fail "Step 8: Actor Spotlight Inspector API"
+  exit 1
+fi
+
+if [[ "${HAS_SNAP_LOC}" != "true" ]]; then
+  log_err "Missing snapshot_location in /api/actor/attendee-01 response: ${ACTOR_RESP}"
+  log_fail "Step 8: Actor Spotlight Inspector API"
+  exit 1
+fi
+
+if [[ "${HAS_SNAP_SIZE}" != "true" ]]; then
+  log_err "Missing snapshot_size_bytes in /api/actor/attendee-01 response: ${ACTOR_RESP}"
+  log_fail "Step 8: Actor Spotlight Inspector API"
+  exit 1
+fi
+
+SNAP_LOC=$(printf "%s" "${ACTOR_RESP}" | jq -r .snapshot_location 2>/dev/null || echo "")
+SNAP_SIZE=$(printf "%s" "${ACTOR_RESP}" | jq -r .snapshot_size_bytes 2>/dev/null || echo 0)
+
+log_ok "GET /api/actor/attendee-01 returned HTTP 200 OK"
+log_ok "  actor_id            : ${ACTOR_ID}"
+log_ok "  state               : ${ACTOR_STATE}"
+log_ok "  snapshot_location   : ${SNAP_LOC}"
+log_ok "  snapshot_size_bytes : ${SNAP_SIZE}"
+log_pass "Step 8: Actor Spotlight Inspector API Verified"
+
+# =========================================================================
+# Step 9: 1-Click Cluster Reset Controller
+# =========================================================================
+log_info "Step 9: 1-Click Cluster Reset Controller (/api/reset)"
+RESET_HTTP_CODE=$(curl -s -o "${TMP_DIR}/reset_resp.json" -w "%{http_code}" --max-time 15 -X POST "${GATEWAY_URL}/api/reset")
+
+if [[ "${RESET_HTTP_CODE}" != "200" ]]; then
+  log_err "POST /api/reset returned HTTP ${RESET_HTTP_CODE} (expected 200)"
+  log_fail "Step 9: 1-Click Cluster Reset Controller"
+  exit 1
+fi
+
+RESET_RESP=$(cat "${TMP_DIR}/reset_resp.json")
+RESET_STATUS=$(printf "%s" "${RESET_RESP}" | jq -r .status 2>/dev/null || true)
+if [[ "${RESET_STATUS}" != "ok" ]]; then
+  log_err "POST /api/reset payload status is not 'ok'. Response: ${RESET_RESP}"
+  log_fail "Step 9: 1-Click Cluster Reset Controller"
+  exit 1
+fi
+log_ok "POST /api/reset returned HTTP 200 OK with payload status: ok"
+
+# Asserts GET /api/actor/attendee-01 reports state SUSPENDED
+ACTOR_RESET_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/actor/attendee-01")
+ACTOR_RESET_STATE=$(printf "%s" "${ACTOR_RESET_RESP}" | jq -r .state 2>/dev/null || true)
+
+if [[ "${ACTOR_RESET_STATE}" != "SUSPENDED" ]]; then
+  log_err "GET /api/actor/attendee-01 reported state '${ACTOR_RESET_STATE}' after reset (expected 'SUSPENDED'). Response: ${ACTOR_RESET_RESP}"
+  log_fail "Step 9: 1-Click Cluster Reset Controller"
+  exit 1
+fi
+
+log_ok "GET /api/actor/attendee-01 confirmed actor state is SUSPENDED"
+log_pass "Step 9: 1-Click Cluster Reset Controller Verified"
+
 printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
-printf "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 6 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}\n"
+printf "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 9 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}\n"
 printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
 exit 0

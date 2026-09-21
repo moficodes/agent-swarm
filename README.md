@@ -101,6 +101,24 @@ Attendees prompt their agents to perform real-time telemetry analysis and code e
 - Workloads execute within a hardened **gVisor** boundary, preventing host filesystem tampering or container escapes.
 - All code runs within `/tmp/workspace` with dropped privileges and resource boundaries.
 
+### 6. 1-Click Audience Simulation Engine (`/api/simulation`)
+- **Synthetic Swarm Generation**: For presentations or rehearsals where 50 physical attendees are not present, the speaker can toggle an autonomous virtual attendee engine directly from the `/stage` header (`[▶ Simulate 25]`, `[▶ Simulate 50]`, `[■ Stop]`).
+- **Autonomous Multi-Turn Workloads**: Virtual attendees cycle through realistic prompts (telemetry anomalies, security audits, gVisor benchmarks), wait with simulated human reading delays, and submit human-in-the-loop approvals to generate real burst traffic.
+- **Controlled Lifecycle**: Backed by `POST /api/simulation` (`{"action":"start","count":N}` and `{"action":"stop"}`) and `GET /api/simulation` status reporting.
+
+### 7. Interactive Actor Spotlight & Inspection Drawer (`/api/actor/{id}`)
+- **Deep MicroVM/Sandbox Introspection**: Clicking any badge in the Audience Fleet Matrix slides open the Actor Spotlight Drawer, providing full transparency into the actor's current state.
+- **Cloud Storage Metadata**: Shows the snapshot location in Cloud Storage (`gs://${BUCKET_NAME}/ate-demo-conf/actors/attendee-X.snap`) and exact compressed footprint (e.g., 384 KB).
+- **Execution & Turn History**: Displays the actor's conversation turns, pending human approvals, proposed script code with syntax highlighting, and live sandbox execution metrics (stdout, stderr, exit code, duration in ms).
+
+### 8. Real-Time Server-Sent Events (SSE) State Synchronization (`/api/events`)
+- **Push-Based State Propagation**: The mobile client (`/chat`) connects to `/api/events?attendee_id=...` via standard browser `EventSource`, replacing client-side polling and artificial delays with authentic, server-driven lifecycle events.
+- **Instant Visual Feedback**: The mobile Substrate Transparency Pill dynamically reflects authoritative cluster states in real-time (`THINKING_VERTEX_AI`, `AWAITING_APPROVAL`, `PARKED_ENVOY`, `RUNNING_GVISOR`, `SUSPENDED`).
+
+### 9. 1-Click Cluster Reset Controller (`/api/reset`)
+- **Instant Clean-Slate Recovery**: The `[⟲ Reset All]` button on `/stage` invokes `POST /api/reset` to halt active simulations, wipe pending approvals and chat histories, and issue parallel suspension sweeps across all running or awaiting actors.
+- **Zero Orphaned Workers**: Ensures all actors are safely frozen to GCS (`types.StateSuspended`), freeing worker pods to idle in milliseconds and preparing the cluster for repeated presentation runs.
+
 ---
 
 ## Dual UI Guide
@@ -113,9 +131,12 @@ Optimized for 1080p and 4K conference projector screens with a high-contrast dar
 | Component | Description |
 |---|---|
 | **QR Code Banner** | Prominently displayed QR code linking directly to `/chat` for rapid smartphone onboarding. |
+| **Simulation Controls** | `[▶ Simulate 25]`, `[▶ Simulate 50]`, and `[■ Stop]` buttons in the header to launch or halt autonomous virtual attendee traffic on demand. |
+| **1-Click Cluster Reset** | `[⟲ Reset All]` button in the header triggering immediate parallel suspension of all active actors and clearing cluster state. |
 | **Envoy L7 Parking Lot Gauge** | Real-time gauge polling `statusz` (`parking.active`), visualizing queued requests during audience bursts. |
 | **Hardware Worker Cards** | Displays the real-time execution state of `conf-workers-0` and `conf-workers-1`, including active tenant ID, current task, and live turn timers. |
 | **Audience Fleet Matrix** | Interactive 50–100 badge grid displaying each attendee's real-time lifecycle state: ⚪ **Suspended in GCS**, 🟡 **Parked in Envoy**, 🟢 **Running on Pod**, 🟣 **Awaiting Approval**. |
+| **Actor Spotlight Drawer** | Click any fleet matrix badge (`#badge-attendee-XX`) to slide open a detailed drawer displaying live code, execution stdout/stderr, and GCS snapshot location/size (`GET /api/actor/{id}`). |
 | **Streaming Activity Ticker** | Live bottom ticker logging cluster events, turn durations, and suspension snapshot completions. |
 
 ### 2. Mobile Attendee Chat App (`/chat`)
@@ -126,7 +147,7 @@ A lightweight, mobile-optimized web application for attendee smartphones:
 | **Zero-Friction Auth** | Scanning the QR code mints an ephemeral HS256 JWT via `GET /api/session`, assigning a unique identifier (e.g., `Attendee #14`). |
 | **Quick Chip Prompts** | One-tap starter prompts: `[📊 Outlier Telemetry Analysis]`, `[🔒 Sandbox Vulnerability Scan]`, `[⚡ Benchmark gVisor CPU]`. |
 | **HITL Approval Cards** | Displays proposed Python/Bash code with risk assessment badges (`HIGH RISK: Sandbox Code Execution`), allowing the user to **Approve & Execute** or **Reject**. |
-| **Substrate Transparency Pill** | Real-time badge informing the user of the underlying Substrate state (e.g., *"⚡ Actor suspended in Cloud Storage (0 MB RAM used)"*, *"⏳ Parked in ingress queue — waiting for worker slot..."*). |
+| **Substrate Transparency Pill** | Real-time badge bound to Server-Sent Events (`/api/events`), informing the user of authoritative Substrate states (e.g., *"⚡ Actor suspended in Cloud Storage (0 MB RAM used)"*, *"⏳ Parked in ingress queue — waiting for worker slot..."*). |
 
 ---
 
@@ -143,11 +164,17 @@ A minute-by-minute cue sheet for presenting the demo on stage:
 |        | 2 idle workers and empty  | to get your own isolated agent."  | in SUSPENDED state.  |
 |        | fleet matrix.             |                                   |                      |
 +-----------------------------------------------------------------------------------------------+
-| 01:30  | The Prompt                | "Tap '📊 Outlier Analysis'. Watch | Workers wake <300ms; |
-|        | First 2 workers light up  | how your agent wakes up instantly | Gemini plans code;   |
-|        | green as requests land.   | from cloud storage snapshots."    | emits approval card. |
+| 01:00  | The Virtual Swarm         | "Need a full room? Watch this:    | POST /api/simulation |
+|        | Click [▶ Simulate 25]     | with one click, 25 virtual        | launches background  |
+|        | in stage header.          | attendees start prompting agents  | attendees streaming  |
+|        |                           | across the fleet!"                | real SSE events.     |
 +-----------------------------------------------------------------------------------------------+
-| 02:30  | The Freeze                | "Look at the grid: all 50 agents  | All actors frozen;   |
+| 01:45  | The Prompt & Spotlight    | "Let's inspect Attendee #07. Click| Drawer fetches       |
+|        | Click badge attendee-07   | the badge to open the Spotlight   | /api/actor/attendee-07|
+|        | to open Spotlight drawer. | Inspector with live code and GCS  | showing prompt, code, |
+|        |                           | snapshot metadata."               | and GCS snapshot.    |
++-----------------------------------------------------------------------------------------------+
+| 02:45  | The Freeze                | "Look at the grid: all agents are | All actors frozen;   |
 |        | Fleet turns solid purple; | are purple (Awaiting Approval).   | RAM streamed to GCS; |
 |        | workers return to idle.   | But our pods use 0% CPU and 0 MB! | 0 vCPU, 0 RAM used.  |
 |        |                           | Take your time reading the code." |                      |
@@ -160,6 +187,10 @@ A minute-by-minute cue sheet for presenting the demo on stage:
 |        | Parking meter counts down | Standard K8s would have 503'd.    | 200ms turns; all 50  |
 |        | from 48 to 0 in real-time.| Substrate served all 50 with zero | get live ASCII plots |
 |        |                           | dropped requests!"                | with HTTP 200 OK.    |
++-----------------------------------------------------------------------------------------------+
+| 05:15  | 1-Click Cluster Reset     | "Clicking Reset All suspends every| POST /api/reset      |
+|        | Click [⟲ Reset All]       | active actor back to GCS and frees| parallel-suspends all|
+|        | in stage header.          | the cluster for the next talk."   | actors, clearing pods|
 +-----------------------------------------------------------------------------------------------+
 ```
 
@@ -273,6 +304,9 @@ The automated verification script validates all conference subsystems end-to-end
 4. **Step 4: Turn 2 Approval & Sandbox Execution**: Submits `POST /api/approve` and asserts execution inside the gVisor sandbox, confirming exit code 0 and stdout metrics.
 5. **Step 5: Audience Burst & Request Parking**: Fires concurrent requests across multiple attendees, asserting that request parking is engaged, with **zero dropped packets and zero HTTP 503 errors**.
 6. **Step 6: Telemetry Endpoint**: Verifies `GET /api/stage/telemetry`, checking physical worker slots (`conf-workers-0`, `conf-workers-1`), active actor tracking, and live cluster events.
+7. **Step 7: Audience Simulation Engine**: Verifies `/api/simulation` by starting 5 virtual attendees (`POST /api/simulation` with `action: start`), asserting `GET /api/simulation` reports `running: true`, stopping simulation (`action: stop`), and confirming `running: false`.
+8. **Step 8: Actor Spotlight Inspector API**: Verifies `GET /api/actor/attendee-01`, asserting HTTP 200 OK and validating presence of `actor_id`, `state`, `snapshot_location`, and `snapshot_size_bytes`.
+9. **Step 9: 1-Click Cluster Reset Controller**: Submits `POST /api/reset`, verifies `HTTP 200 OK` with `status: ok`, and asserts `GET /api/actor/attendee-01` transitions to `SUSPENDED`.
 
 ---
 
