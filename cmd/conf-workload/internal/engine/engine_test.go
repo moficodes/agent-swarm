@@ -16,6 +16,7 @@ package engine_test
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,136 @@ func TestSandboxExecutor_Shell(t *testing.T) {
 	}
 	if res.DurationMs < 0 {
 		t.Fatalf("expected DurationMs >= 0, got %d", res.DurationMs)
+	}
+}
+
+func TestSandboxExecutor_Bash(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	workspace := t.TempDir()
+	executor := engine.NewSandboxExecutor(workspace)
+
+	res, err := executor.Execute(ctx, "bash", "echo 'hello from bash'")
+	if err != nil {
+		t.Fatalf("unexpected error executing bash script: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil execution result")
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", res.ExitCode)
+	}
+	if !strings.Contains(res.Stdout, "hello from bash") {
+		t.Fatalf("expected stdout to contain 'hello from bash', got %q", res.Stdout)
+	}
+	if res.DurationMs < 0 {
+		t.Fatalf("expected DurationMs >= 0, got %d", res.DurationMs)
+	}
+}
+
+func TestSandboxExecutor_StderrSeparation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	workspace := t.TempDir()
+	executor := engine.NewSandboxExecutor(workspace)
+
+	// Test shell stderr separation
+	res, err := executor.Execute(ctx, "sh", "echo 'standard output'; echo 'error output' >&2")
+	if err != nil {
+		t.Fatalf("unexpected error executing script: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil execution result")
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", res.ExitCode)
+	}
+	if !strings.Contains(res.Stdout, "standard output") {
+		t.Fatalf("expected stdout to contain 'standard output', got %q", res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "error output") {
+		t.Fatalf("expected stdout to NOT contain 'error output', got %q", res.Stdout)
+	}
+	if !strings.Contains(res.Stderr, "error output") {
+		t.Fatalf("expected stderr to contain 'error output', got %q", res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "standard output") {
+		t.Fatalf("expected stderr to NOT contain 'standard output', got %q", res.Stderr)
+	}
+
+	// Test python stderr separation
+	pyRes, err := executor.Execute(ctx, "python", "import sys\nsys.stdout.write('py-out\\n')\nsys.stderr.write('py-err\\n')")
+	if err != nil {
+		t.Fatalf("unexpected error executing python script: %v", err)
+	}
+	if pyRes == nil {
+		t.Fatal("expected non-nil execution result for python")
+	}
+	if pyRes.ExitCode != 0 {
+		t.Fatalf("expected python exit code 0, got %d", pyRes.ExitCode)
+	}
+	if !strings.Contains(pyRes.Stdout, "py-out") {
+		t.Fatalf("expected python stdout to contain 'py-out', got %q", pyRes.Stdout)
+	}
+	if strings.Contains(pyRes.Stdout, "py-err") {
+		t.Fatalf("expected python stdout to NOT contain 'py-err', got %q", pyRes.Stdout)
+	}
+	if !strings.Contains(pyRes.Stderr, "py-err") {
+		t.Fatalf("expected python stderr to contain 'py-err', got %q", pyRes.Stderr)
+	}
+	if strings.Contains(pyRes.Stderr, "py-out") {
+		t.Fatalf("expected python stderr to NOT contain 'py-out', got %q", pyRes.Stderr)
+	}
+}
+
+func TestSandboxExecutor_NonZeroExitCode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	workspace := t.TempDir()
+	executor := engine.NewSandboxExecutor(workspace)
+
+	res, err := executor.Execute(ctx, "sh", "exit 2")
+	if err != nil {
+		t.Fatalf("unexpected error executing script: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil execution result")
+	}
+	if res.ExitCode != 2 {
+		t.Fatalf("expected exit code 2, got %d", res.ExitCode)
+	}
+}
+
+func TestSandboxExecutor_PythonUniqueFilename(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	workspace := t.TempDir()
+	executor := engine.NewSandboxExecutor(workspace)
+
+	_, err := executor.Execute(ctx, "python", "print('run 1')")
+	if err != nil {
+		t.Fatalf("unexpected error executing python script: %v", err)
+	}
+	_, err = executor.Execute(ctx, "python", "print('run 2')")
+	if err != nil {
+		t.Fatalf("unexpected error executing python script: %v", err)
+	}
+
+	files, err := os.ReadDir(workspace)
+	if err != nil {
+		t.Fatalf("failed to read workspace dir: %v", err)
+	}
+	if len(files) < 2 {
+		t.Fatalf("expected at least 2 distinct script files, got %d", len(files))
+	}
+	for _, f := range files {
+		if !strings.HasPrefix(f.Name(), "script_") || !strings.HasSuffix(f.Name(), ".py") {
+			t.Errorf("expected script file to match script_*.py, got %q", f.Name())
+		}
 	}
 }
 

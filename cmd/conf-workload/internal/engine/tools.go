@@ -15,6 +15,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -46,7 +47,8 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 
 	switch lang {
 	case "python", "py", "python3":
-		scriptPath := filepath.Join(s.WorkspaceDir, "run.py")
+		scriptName := fmt.Sprintf("script_%d.py", time.Now().UnixNano())
+		scriptPath := filepath.Join(s.WorkspaceDir, scriptName)
 		if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 			return nil, fmt.Errorf("failed to write script: %w", err)
 		}
@@ -57,19 +59,30 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 			}
 		}
 		cmd = exec.CommandContext(ctx, pythonBin, scriptPath)
-	case "sh", "bash":
+	case "bash":
+		bashBin := "bash"
+		if _, err := exec.LookPath("bash"); err != nil {
+			bashBin = "/bin/sh"
+		}
+		cmd = exec.CommandContext(ctx, bashBin, "-c", script)
+	case "sh":
 		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", script)
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
 
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 	cmd.Dir = s.WorkspaceDir
-	out, err := cmd.CombinedOutput()
+
+	err := cmd.Run()
 	duration := time.Since(start).Milliseconds()
 
 	if ctx.Err() != nil {
 		return &types.ExecutionResult{
-			Stdout:     string(out),
+			Stdout:     stdoutBuf.String(),
+			Stderr:     stderrBuf.String(),
 			ExitCode:   -1,
 			DurationMs: duration,
 		}, fmt.Errorf("execution context error: %w", ctx.Err())
@@ -85,7 +98,8 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 	}
 
 	return &types.ExecutionResult{
-		Stdout:     string(out),
+		Stdout:     stdoutBuf.String(),
+		Stderr:     stderrBuf.String(),
 		ExitCode:   exitCode,
 		DurationMs: duration,
 	}, nil
