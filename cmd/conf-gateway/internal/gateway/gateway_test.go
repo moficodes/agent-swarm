@@ -1,0 +1,755 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package gateway_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+)
+
+// mockSuspender records suspension invocations for assertions.
+type mockSuspender struct {
+	mu           sync.Mutex
+	invocations  []suspendCall
+	suspendDelay time.Duration
+}
+
+type suspendCall struct {
+	Atespace string
+	ActorID  string
+}
+
+func (m *mockSuspender) SuspendActor(ctx context.Context, atespace, actorID string) error {
+	if m.suspendDelay > 0 {
+		time.Sleep(m.suspendDelay)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.invocations = append(m.invocations, suspendCall{
+		Atespace: atespace,
+		ActorID:  actorID,
+	})
+	return nil
+}
+
+func (m *mockSuspender) getCalls() []suspendCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	res := make([]suspendCall, len(m.invocations))
+	copy(res, m.invocations)
+	return res
+}
+
+func TestSessionMinting(t *testing.T) {
+	secret := "test-secret-12345"
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gateway.WithJWTSecret(secret),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// 1. Verify session generation and sequential IDs
+	resp1, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to request /api/session: %v", err)
+	}
+	defer resp1.Body.Close()
+
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp1.StatusCode)
+	}
+
+	var sess1 struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	if err := json.NewDecoder(resp1.Body).Decode(&sess1); err != nil {
+		t.Fatalf("failed to decode session response: %v", err)
+	}
+
+	if sess1.AttendeeID != "attendee-01" {
+		t.Errorf("expected attendee_id 'attendee-01', got %q", sess1.AttendeeID)
+	}
+	if sess1.Token == "" {
+		t.Fatalf("expected non-empty token")
+	}
+
+	// Verify token validity with gateway verification method
+	claims, err := gw.VerifyToken(sess1.Token)
+	if err != nil {
+		t.Fatalf("token verification failed: %v", err)
+	}
+	if claims.Sub != "attendee-01" {
+		t.Errorf("expected claims.Sub 'attendee-01', got %q", claims.Sub)
+	}
+	if claims.Exp <= time.Now().Unix() {
+		t.Errorf("expected future expiration, got %d", claims.Exp)
+	}
+
+	// 2. Verify second session produces sequential ID attendee-02
+	resp2, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to request second session: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	var sess2 struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&sess2); err != nil {
+		t.Fatalf("failed to decode second session: %v", err)
+	}
+	if sess2.AttendeeID != "attendee-02" {
+		t.Errorf("expected attendee_id 'attendee-02', got %q", sess2.AttendeeID)
+	}
+
+	// 3. Verify tampered token fails verification
+	tampered := sess1.Token + "extra"
+	if _, err := gw.VerifyToken(tampered); err == nil {
+		t.Errorf("expected error verifying tampered token, got nil")
+	}
+
+	// 4. Verify token signed with different secret fails
+	gwOther := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gateway.WithJWTSecret("wrong-secret"),
+	)
+	defer gwOther.Close()
+	if _, err := gwOther.VerifyToken(sess1.Token); err == nil {
+		t.Errorf("expected error verifying token with wrong secret, got nil")
+	}
+}
+
+func TestStageTelemetry(t *testing.T) {
+	// Mock statusz server
+	var parkingActive atomic.Int64
+	parkingActive.Store(7)
+
+	statuszMux := http.NewServeMux()
+	statuszMux.HandleFunc("/statusz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"parking": map[string]any{
+				"active": parkingActive.Load(),
+			},
+		})
+	})
+	statusSrv := httptest.NewServer(statuszMux)
+	defer statusSrv.Close()
+
+	gw := gateway.NewGateway("http://localhost:8000", statusSrv.URL,
+		gateway.WithStatusInterval(20*time.Millisecond),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// Wait for poller to run at least one tick
+	deadline := time.Now().Add(2 * time.Second)
+	var telem types.StageTelemetry
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(ts.URL + "/api/stage/telemetry")
+		if err != nil {
+			t.Fatalf("failed to get telemetry: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&telem); err != nil {
+			t.Fatalf("failed to decode telemetry: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if telem.ParkedRequests == 7 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if telem.ParkedRequests != 7 {
+		t.Fatalf("expected parked_requests=7, got %d", telem.ParkedRequests)
+	}
+
+	if len(telem.Workers) == 0 {
+		t.Errorf("expected worker status entries in telemetry")
+	}
+	if telem.Actors == nil {
+		t.Errorf("expected non-nil actors map")
+	}
+	if telem.RecentEvents == nil {
+		t.Errorf("expected non-nil recent_events slice")
+	}
+
+	// Update parking active and ensure polling reflects it
+	parkingActive.Store(23)
+	updated := false
+	for time.Now().Before(time.Now().Add(2 * time.Second)) {
+		resp, err := http.Get(ts.URL + "/api/stage/telemetry")
+		if err != nil {
+			t.Fatalf("failed to get telemetry: %v", err)
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&telem); err != nil {
+			t.Fatalf("failed to decode telemetry: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if telem.ParkedRequests == 23 {
+			updated = true
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if !updated {
+		t.Errorf("expected telemetry parked_requests to update to 23, got %d", telem.ParkedRequests)
+	}
+}
+
+func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
+	suspender := &mockSuspender{}
+	secretKey := "gemini-api-key-xyz"
+	atespace := "ate-demo-conf"
+
+	var receivedTargetActor atomic.Pointer[string]
+	var receivedAPIKey atomic.Pointer[string]
+	var receivedBody atomic.Pointer[string]
+
+	// Upstream router/workload mock
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		hdrActor := r.Header.Get("ate-target-actor")
+		hdrKey := r.Header.Get("X-Gemini-API-Key")
+		bodyBytes, _ := io.ReadAll(r.Body)
+
+		sActor := hdrActor
+		sKey := hdrKey
+		sBody := string(bodyBytes)
+		receivedTargetActor.Store(&sActor)
+		receivedAPIKey.Store(&sKey)
+		receivedBody.Store(&sBody)
+
+		// Check if request is asking for approval
+		if strings.Contains(sBody, "need-approval") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{
+				ID:        "msg-wait-1",
+				Sender:    types.SenderAssistant,
+				Content:   "WAITING_FOR_APPROVAL: review proposed script",
+				Timestamp: time.Now().Unix(),
+				Approval: &types.ApprovalRequest{
+					ApprovalID: "app-123",
+					Summary:    "Run telemetry analysis",
+					Code:       "print(42)",
+					Language:   "python",
+					RiskLevel:  types.RiskHigh,
+				},
+			})
+			return
+		}
+
+		// Normal chat response
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-normal-1",
+			Sender:    types.SenderAssistant,
+			Content:   "Normal analysis complete.",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+
+	upstreamMux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		hdrActor := r.Header.Get("ate-target-actor")
+		hdrKey := r.Header.Get("X-Gemini-API-Key")
+		bodyBytes, _ := io.ReadAll(r.Body)
+
+		sActor := hdrActor
+		sKey := hdrKey
+		sBody := string(bodyBytes)
+		receivedTargetActor.Store(&sActor)
+		receivedAPIKey.Store(&sKey)
+		receivedBody.Store(&sBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-approved-1",
+			Sender:    types.SenderAssistant,
+			Content:   "Execution completed in 24ms (exit code 0):\n42",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithAtespace(atespace),
+		gateway.WithGeminiAPIKey(secretKey),
+		gateway.WithSuspender(suspender),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// Provision session for attendee-01
+	sessResp, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	defer sessResp.Body.Close()
+	var sess struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	_ = json.NewDecoder(sessResp.Body).Decode(&sess)
+
+	// Case 1: Chat request triggering WAITING_FOR_APPROVAL
+	chatReqBody := `{"message":"need-approval for calculation"}`
+	req1, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewBufferString(chatReqBody))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer "+sess.Token)
+
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("failed to send chat request: %v", err)
+	}
+	defer resp1.Body.Close()
+
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp1.StatusCode)
+	}
+
+	var chatResp types.ChatMessage
+	if err := json.NewDecoder(resp1.Body).Decode(&chatResp); err != nil {
+		t.Fatalf("failed to decode chat response: %v", err)
+	}
+	if chatResp.Approval == nil || chatResp.Approval.ApprovalID != "app-123" {
+		t.Errorf("expected approval payload with ID app-123, got %+v", chatResp.Approval)
+	}
+
+	// Verify headers injected to upstream
+	if receivedTargetActor.Load() == nil || *receivedTargetActor.Load() != "ate-demo-conf/attendee-01" {
+		t.Errorf("expected ate-target-actor 'ate-demo-conf/attendee-01', got %v", receivedTargetActor.Load())
+	}
+	if receivedAPIKey.Load() == nil || *receivedAPIKey.Load() != secretKey {
+		t.Errorf("expected X-Gemini-API-Key %q, got %v", secretKey, receivedAPIKey.Load())
+	}
+
+	// Verify suspension hook was called for attendee-01
+	calls := suspender.getCalls()
+	if len(calls) == 0 {
+		t.Fatalf("expected suspension hook to be called on WAITING_FOR_APPROVAL")
+	}
+	lastCall := calls[len(calls)-1]
+	if lastCall.Atespace != atespace || lastCall.ActorID != "attendee-01" {
+		t.Errorf("expected suspendCall{%q, 'attendee-01'}, got %+v", atespace, lastCall)
+	}
+
+	// Verify actor state is StateAwaitingApproval
+	telemResp, err := http.Get(ts.URL + "/api/stage/telemetry")
+	if err != nil {
+		t.Fatalf("failed to get telemetry: %v", err)
+	}
+	var telem types.StageTelemetry
+	_ = json.NewDecoder(telemResp.Body).Decode(&telem)
+	_ = telemResp.Body.Close()
+
+	if state, ok := telem.Actors["attendee-01"]; !ok || state != types.StateAwaitingApproval {
+		t.Errorf("expected actor attendee-01 state %s, got %s (present: %v)", types.StateAwaitingApproval, state, ok)
+	}
+
+	// Case 2: Approve request completion
+	approveReqBody := `{"approval_id":"app-123","decision":"APPROVE"}`
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", bytes.NewBufferString(approveReqBody))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+sess.Token)
+
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("failed to send approve request: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp2.StatusCode)
+	}
+
+	// Verify suspension called upon completion
+	callsAfterApprove := suspender.getCalls()
+	if len(callsAfterApprove) < 2 {
+		t.Fatalf("expected suspension hook to be called after approval completion")
+	}
+	lastApproveCall := callsAfterApprove[len(callsAfterApprove)-1]
+	if lastApproveCall.ActorID != "attendee-01" {
+		t.Errorf("expected suspend call for attendee-01, got %+v", lastApproveCall)
+	}
+
+	// Verify actor state transitioned to StateSuspended
+	telemResp2, err := http.Get(ts.URL + "/api/stage/telemetry")
+	if err != nil {
+		t.Fatalf("failed to get telemetry after approve: %v", err)
+	}
+	var telem2 types.StageTelemetry
+	_ = json.NewDecoder(telemResp2.Body).Decode(&telem2)
+	_ = telemResp2.Body.Close()
+
+	if state, ok := telem2.Actors["attendee-01"]; !ok || state != types.StateSuspended {
+		t.Errorf("expected actor attendee-01 state %s, got %s", types.StateSuspended, state)
+	}
+}
+
+func TestProxyRouting_Authentication(t *testing.T) {
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gateway.WithJWTSecret("secret-auth-test"),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// 1. Missing Authorization returns 401
+	req1, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
+	req1.Header.Set("Content-Type", "application/json")
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp1.Body.Close()
+	if resp1.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for missing auth, got %d", resp1.StatusCode)
+	}
+
+	// 2. Invalid/Malformed Bearer token returns 401
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer invalid.jwt.token")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for invalid token, got %d", resp2.StatusCode)
+	}
+
+	// 3. Token with mismatched X-Attendee-ID returns 401
+	sessResp, _ := http.Get(ts.URL + "/api/session")
+	var sess struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	_ = json.NewDecoder(sessResp.Body).Decode(&sess)
+	_ = sessResp.Body.Close()
+
+	req3, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
+	req3.Header.Set("Content-Type", "application/json")
+	req3.Header.Set("Authorization", "Bearer "+sess.Token)
+	req3.Header.Set("X-Attendee-ID", "attendee-99") // mismatch!
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for mismatched X-Attendee-ID, got %d", resp3.StatusCode)
+	}
+}
+
+func TestGateway_ConcurrencySafety(t *testing.T) {
+	statuszMux := http.NewServeMux()
+	statuszMux.HandleFunc("/statusz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"parking": map[string]any{"active": 3},
+		})
+	})
+	statusSrv := httptest.NewServer(statuszMux)
+	defer statusSrv.Close()
+
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-concurrent",
+			Sender:    types.SenderAssistant,
+			Content:   "OK",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+	upstreamMux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-concurrent-app",
+			Sender:    types.SenderAssistant,
+			Content:   "Approved OK",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	suspender := &mockSuspender{}
+	gw := gateway.NewGateway(upstreamSrv.URL, statusSrv.URL,
+		gateway.WithStatusInterval(10*time.Millisecond),
+		gateway.WithSuspender(suspender),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	const numWorkers = 10
+	const numIterations = 20
+
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	for i := 0; i < numWorkers; i++ {
+		go func(workerID int) {
+			defer wg.Done()
+			client := &http.Client{Timeout: 5 * time.Second}
+
+			for j := 0; j < numIterations; j++ {
+				// 1. Session mint
+				sResp, err := client.Get(ts.URL + "/api/session")
+				if err != nil {
+					t.Errorf("worker %d session request failed: %v", workerID, err)
+					return
+				}
+				var sess struct {
+					AttendeeID string `json:"attendee_id"`
+					Token      string `json:"token"`
+				}
+				_ = json.NewDecoder(sResp.Body).Decode(&sess)
+				_ = sResp.Body.Close()
+
+				// 2. Chat proxy
+				reqChat, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"ping"}`))
+				reqChat.Header.Set("Content-Type", "application/json")
+				reqChat.Header.Set("Authorization", "Bearer "+sess.Token)
+				cResp, err := client.Do(reqChat)
+				if err != nil {
+					t.Errorf("worker %d chat proxy failed: %v", workerID, err)
+					return
+				}
+				_ = cResp.Body.Close()
+
+				// 3. Approve proxy
+				reqApp, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"app-1","decision":"APPROVE"}`))
+				reqApp.Header.Set("Content-Type", "application/json")
+				reqApp.Header.Set("Authorization", "Bearer "+sess.Token)
+				aResp, err := client.Do(reqApp)
+				if err != nil {
+					t.Errorf("worker %d approve proxy failed: %v", workerID, err)
+					return
+				}
+				_ = aResp.Body.Close()
+
+				// 4. Telemetry
+				tResp, err := client.Get(ts.URL + "/api/stage/telemetry")
+				if err != nil {
+					t.Errorf("worker %d telemetry failed: %v", workerID, err)
+					return
+				}
+				var telem types.StageTelemetry
+				_ = json.NewDecoder(tResp.Body).Decode(&telem)
+				_ = tResp.Body.Close()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+func TestProxyRouting_ExpiredToken(t *testing.T) {
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gateway.WithJWTSecret("secret-expired-test"),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// Mint token and manually construct expired token
+	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+	// Expired payload in past: {"sub":"attendee-01","exp":1000}
+	payload := "eyJzdWIiOiJhdHRlbmRlZS0wMSIsImV4cCI6MTAwMH0"
+	tamperedToken := header + "." + payload + "." + "invalid-sig"
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tamperedToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for expired/invalid token, got %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPMethodValidation(t *testing.T) {
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// 1. POST to /api/session should return 405 Method Not Allowed
+	resp1, err := http.Post(ts.URL+"/api/session", "application/json", nil)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp1.Body.Close()
+	if resp1.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for POST /api/session, got %d", resp1.StatusCode)
+	}
+
+	// 2. POST to /api/stage/telemetry should return 405 Method Not Allowed
+	resp2, err := http.Post(ts.URL+"/api/stage/telemetry", "application/json", nil)
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for POST /api/stage/telemetry, got %d", resp2.StatusCode)
+	}
+
+	// 3. GET to /api/chat should return 405 Method Not Allowed
+	resp3, err := http.Get(ts.URL + "/api/chat")
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for GET /api/chat, got %d", resp3.StatusCode)
+	}
+
+	// 4. GET to /api/approve should return 405 Method Not Allowed
+	resp4, err := http.Get(ts.URL + "/api/approve")
+	if err != nil {
+		t.Fatalf("failed request: %v", err)
+	}
+	defer resp4.Body.Close()
+	if resp4.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for GET /api/approve, got %d", resp4.StatusCode)
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("failed to request /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK for /healthz, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "OK" {
+		t.Errorf("expected body 'OK', got %q", string(body))
+	}
+}
+
+func TestSuspenderFailureTolerance(t *testing.T) {
+	failingSuspender := gateway.SuspendFunc(func(ctx context.Context, atespace, actorID string) error {
+		return errors.New("simulated kubectl-ate network failure")
+	})
+
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-resilient-1",
+			Sender:    types.SenderAssistant,
+			Content:   "Processed despite suspender error",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithSuspender(failingSuspender),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	sessResp, _ := http.Get(ts.URL + "/api/session")
+	var sess struct {
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(sessResp.Body).Decode(&sess)
+	_ = sessResp.Body.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sess.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Client still receives 200 OK chat response
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 despite suspender failure, got %d", resp.StatusCode)
+	}
+
+	// Telemetry contains warning event
+	telemResp, _ := http.Get(ts.URL + "/api/stage/telemetry")
+	var telem types.StageTelemetry
+	_ = json.NewDecoder(telemResp.Body).Decode(&telem)
+	_ = telemResp.Body.Close()
+
+	foundWarning := false
+	for _, ev := range telem.RecentEvents {
+		if strings.Contains(ev, "Warning: suspend actor") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Errorf("expected warning event logged in telemetry, events: %+v", telem.RecentEvents)
+	}
+}
