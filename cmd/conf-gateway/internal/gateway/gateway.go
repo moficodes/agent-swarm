@@ -179,6 +179,7 @@ type Gateway struct {
 	staticFS       fs.FS
 	maxActors      int
 	aiClient       *ai.GeminiClient
+	broker         *EventBroker
 
 	mux              *http.ServeMux
 	proxy            *httputil.ReverseProxy
@@ -205,6 +206,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		suspender:        &commandSuspender{},
 		statusInterval:   500 * time.Millisecond,
 		httpClient:       &http.Client{Timeout: 5 * time.Second},
+		broker:           NewEventBroker(),
 		mux:              http.NewServeMux(),
 		activeActors:     make(map[string]types.ActorLifecycleState),
 		pendingApprovals: make(map[string]*types.ApprovalRequest),
@@ -244,6 +246,9 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			attendeeID, _ := req.Context().Value(attendeeContextKey{}).(string)
 			gw.setActorState(attendeeID, types.StateSuspended)
+			if attendeeID != "" {
+				gw.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Proxy error - suspended to GCS")
+			}
 			gw.mu.Lock()
 			if attendeeID != "" {
 				gw.addEventLocked(fmt.Sprintf("Router proxy error for %s: %v", attendeeID, err))
@@ -287,6 +292,7 @@ func (g *Gateway) routes() {
 		_, _ = w.Write([]byte("OK"))
 	})
 	g.mux.HandleFunc("/api/session", g.handleSession)
+	g.mux.HandleFunc("/api/events", g.handleEvents)
 	g.mux.HandleFunc("/api/stage/telemetry", g.handleTelemetry)
 	if g.aiClient != nil {
 		g.mux.HandleFunc("/api/chat", g.handleChatRequest)
@@ -438,7 +444,7 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	var runningActors []string
 	for k, v := range g.activeActors {
 		actorsCopy[k] = v
-		if v == types.StateRunning {
+		if v == types.StateRunning || v == types.StateRunningGVisor || v == types.StateThinkingVertexAI {
 			runningActors = append(runningActors, k)
 		}
 	}
@@ -480,6 +486,55 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(telem)
 }
 
+func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	attendeeID := r.URL.Query().Get("attendee_id")
+	if attendeeID == "" {
+		http.Error(w, "attendee_id query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ch := g.broker.Subscribe(attendeeID)
+	defer g.broker.Unsubscribe(attendeeID, ch)
+
+	ctxDone := r.Context().Done()
+	for {
+		select {
+		case <-ctxDone:
+			return
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
 func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -499,7 +554,7 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.mu.Lock()
-	g.activeActors[attendeeID] = types.StateRunning
+	g.activeActors[attendeeID] = types.StateThinkingVertexAI
 	g.addEventLocked(fmt.Sprintf("Attendee %s analyzing prompt with Vertex AI", attendeeID))
 	userMsg := types.ChatMessage{
 		ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
@@ -511,6 +566,8 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 	historyCopy := make([]types.ChatMessage, len(g.chatHistories[attendeeID]))
 	copy(historyCopy, g.chatHistories[attendeeID])
 	g.mu.Unlock()
+
+	g.BroadcastStateChange(attendeeID, types.StateThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -530,6 +587,12 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], *assistantMsg)
 	g.mu.Unlock()
+
+	if assistantMsg.Approval != nil {
+		g.BroadcastStateChange(attendeeID, types.StateAwaitingApproval, "Awaiting Approval", assistantMsg.Approval.Summary)
+	} else {
+		g.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Turn completed - suspended to GCS")
+	}
 
 	// Zero-cost suspension while attendee reviews code or when turn is complete
 	g.asyncSuspendActor(attendeeID)
@@ -573,9 +636,11 @@ func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 		req.Language = app.Language
 		delete(g.pendingApprovals, attendeeID)
 	}
-	g.activeActors[attendeeID] = types.StateRunning
+	g.activeActors[attendeeID] = types.StateRunningGVisor
 	g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: executing in gVisor", attendeeID, req.ApprovalID))
 	g.mu.Unlock()
+
+	g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing code in gVisor sandbox")
 
 	// Forward the approval with code to the actor via reverse proxy!
 	updatedBody, _ := json.Marshal(req)
@@ -602,9 +667,19 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.mu.Lock()
-	g.activeActors[attendeeID] = types.StateRunning
+	if r.URL.Path == "/api/approve" {
+		g.activeActors[attendeeID] = types.StateRunningGVisor
+	} else {
+		g.activeActors[attendeeID] = types.StateRunning
+	}
 	g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
 	g.mu.Unlock()
+
+	if r.URL.Path == "/api/approve" {
+		g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing in gVisor sandbox")
+	} else {
+		g.BroadcastStateChange(attendeeID, types.StateRunning, "Running", "Executing request")
+	}
 
 	ctx := context.WithValue(r.Context(), attendeeContextKey{}, attendeeID)
 	outReq := r.WithContext(ctx)
@@ -629,6 +704,34 @@ func (g *Gateway) GetActorState(attendeeID string) (types.ActorLifecycleState, b
 	return st, ok
 }
 
+// BroadcastStateChange publishes an actor lifecycle transition to subscribers and updates active state.
+func (g *Gateway) BroadcastStateChange(attendeeID string, state types.ActorLifecycleState, label, subtext string) {
+	if attendeeID == "" {
+		return
+	}
+	g.mu.Lock()
+	g.activeActors[attendeeID] = state
+	g.mu.Unlock()
+
+	if g.broker != nil {
+		g.broker.Publish(types.StateChangeEvent{
+			AttendeeID: attendeeID,
+			State:      state,
+			Label:      label,
+			Subtext:    subtext,
+			Timestamp:  time.Now().Unix(),
+		})
+	}
+}
+
+// SubscriberCount returns the current number of active SSE subscribers for an attendee.
+func (g *Gateway) SubscriberCount(attendeeID string) int {
+	if g.broker == nil {
+		return 0
+	}
+	return g.broker.SubscriberCount(attendeeID)
+}
+
 func (g *Gateway) modifyResponse(resp *http.Response) error {
 	attendeeID, _ := resp.Request.Context().Value(attendeeContextKey{}).(string)
 	if attendeeID == "" {
@@ -637,6 +740,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 
 	if resp.StatusCode >= 400 {
 		g.setActorState(attendeeID, types.StateSuspended)
+		g.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Error response - suspended to GCS")
 		return nil
 	}
 
@@ -661,6 +765,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.addEventLocked(fmt.Sprintf("Actor %s awaiting human approval", attendeeID))
 		g.mu.Unlock()
 
+		g.BroadcastStateChange(attendeeID, types.StateAwaitingApproval, "Awaiting Approval", "Awaiting human approval")
 		g.asyncSuspendActor(attendeeID)
 	} else if resp.StatusCode == http.StatusOK {
 		g.mu.Lock()
@@ -668,6 +773,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.addEventLocked(fmt.Sprintf("Actor %s completed turn - suspended to GCS", attendeeID))
 		g.mu.Unlock()
 
+		g.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Turn completed - suspended to GCS")
 		g.asyncSuspendActor(attendeeID)
 	}
 

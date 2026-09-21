@@ -15,10 +15,12 @@
 package gateway_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1547,4 +1549,196 @@ func TestStageRoute(t *testing.T) {
 	if respPostSlash.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405 for POST /stage/, got %d", respPostSlash.StatusCode)
 	}
+}
+
+func TestSSEEventStreaming(t *testing.T) {
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	t.Run("MissingAttendeeID", func(t *testing.T) {
+		// Reject missing attendee_id with 400
+		resp, err := http.Get(ts.URL + "/api/events")
+		if err != nil {
+			t.Fatalf("failed to request /api/events: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected 400 for missing attendee_id, got %d", resp.StatusCode)
+		}
+
+		// Reject empty attendee_id with 400
+		respEmpty, err := http.Get(ts.URL + "/api/events?attendee_id=")
+		if err != nil {
+			t.Fatalf("failed to request /api/events?attendee_id=: %v", err)
+		}
+		defer respEmpty.Body.Close()
+		if respEmpty.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected 400 for empty attendee_id, got %d", respEmpty.StatusCode)
+		}
+	})
+
+	t.Run("EstablishAndReceive", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-01", nil)
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to connect to SSE stream: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+			t.Errorf("expected Content-Type text/event-stream, got %q", ct)
+		}
+		if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+			t.Errorf("expected Cache-Control no-cache, got %q", cc)
+		}
+
+		reader := bufio.NewReader(resp.Body)
+
+		// Broadcast event for attendee-01
+		gw.BroadcastStateChange("attendee-01", types.StateThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
+
+		// Read event line
+		eventChan := make(chan types.StateChangeEvent, 1)
+		errChan := make(chan error, 1)
+
+		go func() {
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					errChan <- err
+					return
+				}
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "data:") {
+					dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+					var ev types.StateChangeEvent
+					if err := json.Unmarshal([]byte(dataStr), &ev); err != nil {
+						errChan <- err
+						return
+					}
+					eventChan <- ev
+					return
+				}
+			}
+		}()
+
+		select {
+		case ev := <-eventChan:
+			if ev.AttendeeID != "attendee-01" {
+				t.Errorf("expected attendee_id attendee-01, got %q", ev.AttendeeID)
+			}
+			if ev.State != types.StateThinkingVertexAI {
+				t.Errorf("expected state %s, got %s", types.StateThinkingVertexAI, ev.State)
+			}
+			if ev.Label != "Thinking..." {
+				t.Errorf("expected label 'Thinking...', got %q", ev.Label)
+			}
+			if ev.Subtext != "Reasoning on Vertex AI" {
+				t.Errorf("expected subtext 'Reasoning on Vertex AI', got %q", ev.Subtext)
+			}
+			if ev.Timestamp <= 0 {
+				t.Errorf("expected positive timestamp, got %d", ev.Timestamp)
+			}
+		case err := <-errChan:
+			t.Fatalf("error reading SSE stream: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for SSE event")
+		}
+	})
+
+	t.Run("CleanDisconnect", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-disconnect", nil)
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to connect: %v", err)
+		}
+		defer resp.Body.Close()
+
+		// Verify subscribed
+		if count := gw.SubscriberCount("attendee-disconnect"); count != 1 {
+			t.Fatalf("expected 1 subscriber before disconnect, got %d", count)
+		}
+
+		// Cancel request context (client disconnect)
+		cancel()
+
+		// Wait for subscriber count to become 0
+		deadline := time.Now().Add(2 * time.Second)
+		cleanedUp := false
+		for time.Now().Before(deadline) {
+			if gw.SubscriberCount("attendee-disconnect") == 0 {
+				cleanedUp = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		if !cleanedUp {
+			t.Errorf("expected subscriber to be cleaned up after disconnect, count: %d",
+				gw.SubscriberCount("attendee-disconnect"))
+		}
+	})
+
+	t.Run("ConcurrencySafety", func(t *testing.T) {
+		const numClients = 10
+		const numBroadcasts = 20
+
+		var wg sync.WaitGroup
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		for i := 0; i < numClients; i++ {
+			wg.Add(1)
+			attendeeID := fmt.Sprintf("attendee-conc-%d", i%3)
+			go func(attID string) {
+				defer wg.Done()
+				clientCtx, clientCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+				defer clientCancel()
+
+				req, err := http.NewRequestWithContext(clientCtx, http.MethodGet, ts.URL+"/api/events?attendee_id="+attID, nil)
+				if err != nil {
+					return
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					return
+				}
+				defer resp.Body.Close()
+
+				reader := bufio.NewReader(resp.Body)
+				for {
+					_, err := reader.ReadString('\n')
+					if err != nil {
+						return
+					}
+				}
+			}(attendeeID)
+		}
+
+		// Concurrently broadcast
+		for b := 0; b < numBroadcasts; b++ {
+			attID := fmt.Sprintf("attendee-conc-%d", b%3)
+			gw.BroadcastStateChange(attID, types.StateRunningGVisor, "Running", "Executing")
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		wg.Wait()
+	})
 }
