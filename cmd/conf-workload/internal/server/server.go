@@ -259,8 +259,14 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	output := ""
 	if err != nil {
 		output = fmt.Sprintf("Execution error: %v", err)
+		if res != nil && (res.Stderr != "" || res.ExitCode != 0) {
+			output += fmt.Sprintf("\nStderr:\n%s", res.Stderr)
+		}
 	} else {
 		output = fmt.Sprintf("Execution completed in %dms (exit code %d):\n\n%s", res.DurationMs, res.ExitCode, res.Stdout)
+		if res.Stderr != "" || res.ExitCode != 0 {
+			output += fmt.Sprintf("\nStderr:\n%s", res.Stderr)
+		}
 	}
 
 	resultMsg := types.ChatMessage{
