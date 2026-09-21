@@ -51,9 +51,11 @@ type Suspender interface {
 	SuspendActor(ctx context.Context, atespace, actorID string) error
 }
 
-// SimulationStopper halts an active simulation runner.
-type SimulationStopper interface {
+// SimulationController defines the interface for managing background audience simulations.
+type SimulationController interface {
+	Start(count int) error
 	Stop()
+	Status() (bool, int)
 }
 
 // SuspendFunc adapts a function to the Suspender interface.
@@ -162,6 +164,15 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithSimulationController sets the simulation controller for the gateway.
+func WithSimulationController(sc SimulationController) Option {
+	return func(g *Gateway) {
+		if sc != nil {
+			g.simController = sc
+		}
+	}
+}
+
 // WithStaticFS sets the static filesystem used to serve web assets.
 func WithStaticFS(staticFS fs.FS) Option {
 	return func(g *Gateway) {
@@ -196,8 +207,7 @@ type Gateway struct {
 	lastResults      map[string]*types.ExecutionResult
 	recentEvents     []string
 	parkedCount      int
-	simRunner        *SimulationRunner
-	customStopper    SimulationStopper
+	simController    SimulationController
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -228,7 +238,9 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		opt(gw)
 	}
 
-	gw.simRunner = NewSimulationRunner(gw)
+	if gw.simController == nil {
+		gw.simController = NewSimulationRunner(gw)
+	}
 
 	if gw.staticFS == nil {
 		gw.staticFS = normalizeStaticFS(resolveStaticFS())
@@ -287,14 +299,10 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 // Close gracefully stops the background polling routine.
 func (g *Gateway) Close() {
 	g.mu.Lock()
-	runner := g.simRunner
-	custom := g.customStopper
+	sc := g.simController
 	g.mu.Unlock()
-	if runner != nil {
-		runner.Stop()
-	}
-	if custom != nil {
-		custom.Stop()
+	if sc != nil {
+		sc.Stop()
 	}
 
 	if g.cancel != nil {
@@ -1043,15 +1051,11 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.mu.Lock()
-	runner := g.simRunner
-	custom := g.customStopper
+	sc := g.simController
 	g.mu.Unlock()
 
-	if runner != nil {
-		runner.Stop()
-	}
-	if custom != nil {
-		custom.Stop()
+	if sc != nil {
+		sc.Stop()
 	}
 
 	g.mu.Lock()
@@ -1106,23 +1110,34 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SetSimulationRunner attaches an active simulation runner to the gateway.
-func (g *Gateway) SetSimulationRunner(sr SimulationStopper) {
+// SetSimulationController attaches an active simulation controller to the gateway.
+func (g *Gateway) SetSimulationController(sc SimulationController) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if realRunner, ok := sr.(*SimulationRunner); ok {
-		g.simRunner = realRunner
-		g.customStopper = nil
-	} else {
-		g.customStopper = sr
-	}
+	g.simController = sc
 }
 
-// SimulationRunner returns the active simulation runner.
+// SetSimulationRunner attaches an active simulation controller to the gateway.
+// Deprecated: use SetSimulationController instead.
+func (g *Gateway) SetSimulationRunner(sc SimulationController) {
+	g.SetSimulationController(sc)
+}
+
+// SimulationController returns the active simulation controller.
+func (g *Gateway) SimulationController() SimulationController {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.simController
+}
+
+// SimulationRunner returns the active simulation runner if it implements *SimulationRunner.
 func (g *Gateway) SimulationRunner() *SimulationRunner {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.simRunner
+	if sr, ok := g.simController.(*SimulationRunner); ok {
+		return sr
+	}
+	return nil
 }
 
 func (g *Gateway) handleSimulation(w http.ResponseWriter, r *http.Request) {
@@ -1134,12 +1149,12 @@ func (g *Gateway) handleSimulation(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 		g.mu.RLock()
-		runner := g.simRunner
+		sc := g.simController
 		g.mu.RUnlock()
 
 		running, count := false, 0
-		if runner != nil {
-			running, count = runner.Status()
+		if sc != nil {
+			running, count = sc.Status()
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1166,13 +1181,13 @@ func (g *Gateway) handleSimulation(w http.ResponseWriter, r *http.Request) {
 		switch req.Action {
 		case "start":
 			g.mu.Lock()
-			if g.simRunner == nil {
-				g.simRunner = NewSimulationRunner(g)
+			if g.simController == nil {
+				g.simController = NewSimulationRunner(g)
 			}
-			runner := g.simRunner
+			sc := g.simController
 			g.mu.Unlock()
 
-			if err := runner.Start(req.Count); err != nil {
+			if err := sc.Start(req.Count); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -1190,11 +1205,11 @@ func (g *Gateway) handleSimulation(w http.ResponseWriter, r *http.Request) {
 
 		case "stop":
 			g.mu.Lock()
-			runner := g.simRunner
+			sc := g.simController
 			g.mu.Unlock()
 
-			if runner != nil {
-				runner.Stop()
+			if sc != nil {
+				sc.Stop()
 			}
 
 			g.mu.Lock()

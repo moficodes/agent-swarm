@@ -19,8 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,21 +39,44 @@ var simulationPrompts = []string{
 	"Verify isolation boundaries for tenant workloads",
 }
 
+// SimulationOption configures SimulationRunner.
+type SimulationOption func(*SimulationRunner)
+
+// WithSimulationDelays sets the reading delay and loop delay for virtual attendees.
+func WithSimulationDelays(readingDelay, loopDelay time.Duration) SimulationOption {
+	return func(s *SimulationRunner) {
+		if readingDelay >= 0 {
+			s.readingDelay = readingDelay
+		}
+		if loopDelay >= 0 {
+			s.loopDelay = loopDelay
+		}
+	}
+}
+
 // SimulationRunner manages background virtual attendees interacting with the conference gateway.
 type SimulationRunner struct {
-	gw      *Gateway
-	mu      sync.RWMutex
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	running bool
-	count   int
+	gw           *Gateway
+	mu           sync.RWMutex
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	running      bool
+	count        int
+	readingDelay time.Duration
+	loopDelay    time.Duration
 }
 
 // NewSimulationRunner constructs a SimulationRunner bound to the provided Gateway.
-func NewSimulationRunner(gw *Gateway) *SimulationRunner {
-	return &SimulationRunner{
-		gw: gw,
+func NewSimulationRunner(gw *Gateway, opts ...SimulationOption) *SimulationRunner {
+	s := &SimulationRunner{
+		gw:           gw,
+		readingDelay: 2 * time.Second,
+		loopDelay:    3 * time.Second,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Start begins the audience simulation with the specified number of virtual attendees.
@@ -63,6 +89,14 @@ func (s *SimulationRunner) Start(count int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var baseCtx context.Context
+	if s.gw != nil {
+		baseCtx = s.gw.ctx
+	}
+	if baseCtx != nil && baseCtx.Err() != nil {
+		return fmt.Errorf("cannot start simulation: gateway is closed: %w", baseCtx.Err())
+	}
+
 	if s.running {
 		if s.cancel != nil {
 			s.cancel()
@@ -73,7 +107,6 @@ func (s *SimulationRunner) Start(count int) error {
 		s.cancel = nil
 	}
 
-	baseCtx := s.gw.ctx
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
@@ -82,10 +115,12 @@ func (s *SimulationRunner) Start(count int) error {
 	s.running = true
 	s.count = count
 
+	rDelay := s.readingDelay
+	lDelay := s.loopDelay
 	for i := 0; i < count; i++ {
 		attendeeID := fmt.Sprintf("attendee-%02d", i+1)
 		s.wg.Add(1)
-		go s.runAttendee(ctx, attendeeID, i)
+		go s.runAttendee(ctx, attendeeID, i, rDelay, lDelay)
 	}
 
 	return nil
@@ -115,7 +150,21 @@ func (s *SimulationRunner) Status() (bool, int) {
 	return s.running, s.count
 }
 
-func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, offset int) {
+func (s *SimulationRunner) jitter(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	maxJitterMs := 500
+	if base < time.Second {
+		maxJitterMs = int(base.Milliseconds())
+	}
+	if maxJitterMs <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Intn(maxJitterMs)) * time.Millisecond
+}
+
+func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, offset int, rDelay, lDelay time.Duration) {
 	defer s.wg.Done()
 
 	token := s.gw.MintToken(attendeeID)
@@ -151,19 +200,25 @@ func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, o
 		}
 
 		if chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(30 * time.Millisecond):
+			sleepDur := rDelay + s.jitter(rDelay)
+			if sleepDur > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(sleepDur):
+				}
 			}
 
 			_ = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
 		}
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(80 * time.Millisecond):
+		sleepDur := lDelay + s.jitter(lDelay)
+		if sleepDur > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(sleepDur):
+			}
 		}
 	}
 }
@@ -192,6 +247,10 @@ func (s *SimulationRunner) sendChat(ctx context.Context, attendeeID, token, prom
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(res.Body)
+		if len(respBody) > 0 {
+			return nil, fmt.Errorf("chat request failed with status %d: %s", res.StatusCode, strings.TrimSpace(string(respBody)))
+		}
 		return nil, fmt.Errorf("chat request failed with status %d", res.StatusCode)
 	}
 
@@ -224,9 +283,13 @@ func (s *SimulationRunner) sendApprove(ctx context.Context, attendeeID, token, a
 	s.gw.Handler().ServeHTTP(rec, req)
 
 	res := rec.Result()
-	_ = res.Body.Close()
+	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(res.Body)
+		if len(respBody) > 0 {
+			return fmt.Errorf("approve request failed with status %d: %s", res.StatusCode, strings.TrimSpace(string(respBody)))
+		}
 		return fmt.Errorf("approve request failed with status %d", res.StatusCode)
 	}
 	return nil

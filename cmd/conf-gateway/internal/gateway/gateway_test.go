@@ -79,12 +79,20 @@ func (m *mockSuspender) waitForCalls(n int, timeout time.Duration) []suspendCall
 	return m.getCalls()
 }
 
-type mockSimulationRunner struct {
+type mockSimulationController struct {
 	stopped atomic.Bool
 }
 
-func (m *mockSimulationRunner) Stop() {
+func (m *mockSimulationController) Start(count int) error {
+	return nil
+}
+
+func (m *mockSimulationController) Stop() {
 	m.stopped.Store(true)
+}
+
+func (m *mockSimulationController) Status() (bool, int) {
+	return !m.stopped.Load(), 0
 }
 
 func TestSessionMinting(t *testing.T) {
@@ -2263,8 +2271,8 @@ func TestResetEndpoint(t *testing.T) {
 	})
 
 	t.Run("HaltsSimulationRunner", func(t *testing.T) {
-		runner := &mockSimulationRunner{}
-		gw.SetSimulationRunner(runner)
+		runner := &mockSimulationController{}
+		gw.SetSimulationController(runner)
 
 		resp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
 		if err != nil {
@@ -2371,6 +2379,9 @@ func TestSimulationEndpoint(t *testing.T) {
 		gateway.WithSuspender(suspender),
 	)
 	defer gw.Close()
+
+	simRunner := gateway.NewSimulationRunner(gw, gateway.WithSimulationDelays(20*time.Millisecond, 40*time.Millisecond))
+	gw.SetSimulationController(simRunner)
 
 	ts := httptest.NewServer(gw.Handler())
 	defer ts.Close()
@@ -2529,6 +2540,117 @@ func TestSimulationEndpoint(t *testing.T) {
 
 		if getStopStatus.Running || getStopStatus.Count != 0 {
 			t.Errorf("expected GET after stop running=false, count=0, got %+v", getStopStatus)
+		}
+	})
+
+	t.Run("ConsecutiveStarts", func(t *testing.T) {
+		// 1. Start simulation with count 3
+		resp1, err := http.Post(ts.URL+"/api/simulation", "application/json", strings.NewReader(`{"action":"start","count":3}`))
+		if err != nil {
+			t.Fatalf("failed to start simulation with count 3: %v", err)
+		}
+		defer resp1.Body.Close()
+		if resp1.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp1.StatusCode)
+		}
+		var status1 struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		if err := json.NewDecoder(resp1.Body).Decode(&status1); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if !status1.Running || status1.Count != 3 {
+			t.Errorf("expected running=true, count=3, got %+v", status1)
+		}
+
+		// Verify via GET
+		getResp1, err := http.Get(ts.URL + "/api/simulation")
+		if err != nil {
+			t.Fatalf("failed to GET simulation status: %v", err)
+		}
+		var getStatus1 struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		_ = json.NewDecoder(getResp1.Body).Decode(&getStatus1)
+		_ = getResp1.Body.Close()
+		if !getStatus1.Running || getStatus1.Count != 3 {
+			t.Errorf("expected GET status running=true, count=3, got %+v", getStatus1)
+		}
+
+		// 2. Immediately start simulation with count 6 without explicit stop (consecutive start replaces previous cleanly)
+		resp2, err := http.Post(ts.URL+"/api/simulation", "application/json", strings.NewReader(`{"action":"start","count":6}`))
+		if err != nil {
+			t.Fatalf("failed consecutive start simulation with count 6: %v", err)
+		}
+		defer resp2.Body.Close()
+		if resp2.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp2.StatusCode)
+		}
+		var status2 struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		if err := json.NewDecoder(resp2.Body).Decode(&status2); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if !status2.Running || status2.Count != 6 {
+			t.Errorf("expected running=true, count=6, got %+v", status2)
+		}
+
+		// Verify via GET that count updated to 6
+		getResp2, err := http.Get(ts.URL + "/api/simulation")
+		if err != nil {
+			t.Fatalf("failed to GET simulation status after consecutive start: %v", err)
+		}
+		var getStatus2 struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		_ = json.NewDecoder(getResp2.Body).Decode(&getStatus2)
+		_ = getResp2.Body.Close()
+		if !getStatus2.Running || getStatus2.Count != 6 {
+			t.Errorf("expected GET status running=true, count=6, got %+v", getStatus2)
+		}
+
+		// 3. Stop simulation cleanly
+		respStop, err := http.Post(ts.URL+"/api/simulation", "application/json", strings.NewReader(`{"action":"stop"}`))
+		if err != nil {
+			t.Fatalf("failed to stop simulation: %v", err)
+		}
+		_ = respStop.Body.Close()
+		if respStop.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200 for stop, got %d", respStop.StatusCode)
+		}
+
+		// Verify via GET that simulation is stopped
+		getRespStop, err := http.Get(ts.URL + "/api/simulation")
+		if err != nil {
+			t.Fatalf("failed to GET simulation status after stop: %v", err)
+		}
+		var getStopStatus struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		_ = json.NewDecoder(getRespStop.Body).Decode(&getStopStatus)
+		_ = getRespStop.Body.Close()
+		if getStopStatus.Running || getStopStatus.Count != 0 {
+			t.Errorf("expected running=false, count=0, got %+v", getStopStatus)
+		}
+	})
+
+	t.Run("ClosedGatewayGuard", func(t *testing.T) {
+		gwClosed := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+		runnerClosed := gateway.NewSimulationRunner(gwClosed)
+		gwClosed.Close()
+
+		err := runnerClosed.Start(5)
+		if err == nil {
+			t.Fatalf("expected error starting simulation on closed gateway, got nil")
+		}
+		if !strings.Contains(err.Error(), "gateway is closed") {
+			t.Errorf("expected error message to contain 'gateway is closed', got: %v", err)
 		}
 	})
 
