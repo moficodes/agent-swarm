@@ -191,6 +191,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		ModifyResponse: gw.modifyResponse,
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			attendeeID, _ := req.Context().Value(attendeeContextKey{}).(string)
+			gw.setActorState(attendeeID, types.StateSuspended)
 			gw.mu.Lock()
 			if attendeeID != "" {
 				gw.addEventLocked(fmt.Sprintf("Router proxy error for %s: %v", attendeeID, err))
@@ -337,9 +338,31 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	g.proxy.ServeHTTP(w, outReq)
 }
 
+func (g *Gateway) setActorState(attendeeID string, state types.ActorLifecycleState) {
+	if attendeeID == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.activeActors[attendeeID] = state
+}
+
+// GetActorState returns the lifecycle state of an actor.
+func (g *Gateway) GetActorState(attendeeID string) (types.ActorLifecycleState, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	st, ok := g.activeActors[attendeeID]
+	return st, ok
+}
+
 func (g *Gateway) modifyResponse(resp *http.Response) error {
 	attendeeID, _ := resp.Request.Context().Value(attendeeContextKey{}).(string)
 	if attendeeID == "" {
+		return nil
+	}
+
+	if resp.StatusCode >= 400 {
+		g.setActorState(attendeeID, types.StateSuspended)
 		return nil
 	}
 
@@ -367,13 +390,17 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.mu.Unlock()
 
 		if g.suspender != nil {
-			suspendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := g.suspender.SuspendActor(suspendCtx, g.atespace, attendeeID); err != nil {
-				g.mu.Lock()
-				g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendeeID, err))
-				g.mu.Unlock()
-			}
+			atespace := g.atespace
+			suspender := g.suspender
+			go func() {
+				suspendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := suspender.SuspendActor(suspendCtx, atespace, attendeeID); err != nil {
+					g.mu.Lock()
+					g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendeeID, err))
+					g.mu.Unlock()
+				}
+			}()
 		}
 	} else if resp.StatusCode == http.StatusOK {
 		g.mu.Lock()
@@ -382,13 +409,17 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.mu.Unlock()
 
 		if g.suspender != nil {
-			suspendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := g.suspender.SuspendActor(suspendCtx, g.atespace, attendeeID); err != nil {
-				g.mu.Lock()
-				g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendeeID, err))
-				g.mu.Unlock()
-			}
+			atespace := g.atespace
+			suspender := g.suspender
+			go func() {
+				suspendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := suspender.SuspendActor(suspendCtx, atespace, attendeeID); err != nil {
+					g.mu.Lock()
+					g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendeeID, err))
+					g.mu.Unlock()
+				}
+			}()
 		}
 	}
 
@@ -405,6 +436,10 @@ func (g *Gateway) authenticateRequest(r *http.Request) (string, error) {
 	}
 
 	if tokenStr == "" {
+		attendeeID := strings.TrimSpace(r.Header.Get("X-Attendee-ID"))
+		if attendeeID != "" {
+			return attendeeID, nil
+		}
 		return "", errors.New("missing authorization token")
 	}
 

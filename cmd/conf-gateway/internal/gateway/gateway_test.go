@@ -65,6 +65,18 @@ func (m *mockSuspender) getCalls() []suspendCall {
 	return res
 }
 
+func (m *mockSuspender) waitForCalls(n int, timeout time.Duration) []suspendCall {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		calls := m.getCalls()
+		if len(calls) >= n {
+			return calls
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return m.getCalls()
+}
+
 func TestSessionMinting(t *testing.T) {
 	secret := "test-secret-12345"
 	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
@@ -364,7 +376,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	}
 
 	// Verify suspension hook was called for attendee-01
-	calls := suspender.getCalls()
+	calls := suspender.waitForCalls(1, 2*time.Second)
 	if len(calls) == 0 {
 		t.Fatalf("expected suspension hook to be called on WAITING_FOR_APPROVAL")
 	}
@@ -403,7 +415,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	}
 
 	// Verify suspension called upon completion
-	callsAfterApprove := suspender.getCalls()
+	callsAfterApprove := suspender.waitForCalls(2, 2*time.Second)
 	if len(callsAfterApprove) < 2 {
 		t.Fatalf("expected suspension hook to be called after approval completion")
 	}
@@ -737,19 +749,259 @@ func TestSuspenderFailureTolerance(t *testing.T) {
 	}
 
 	// Telemetry contains warning event
-	telemResp, _ := http.Get(ts.URL + "/api/stage/telemetry")
-	var telem types.StageTelemetry
-	_ = json.NewDecoder(telemResp.Body).Decode(&telem)
-	_ = telemResp.Body.Close()
-
 	foundWarning := false
-	for _, ev := range telem.RecentEvents {
-		if strings.Contains(ev, "Warning: suspend actor") {
-			foundWarning = true
+	deadline := time.Now().Add(2 * time.Second)
+	var telem types.StageTelemetry
+	for time.Now().Before(deadline) {
+		telemResp, err := http.Get(ts.URL + "/api/stage/telemetry")
+		if err == nil {
+			_ = json.NewDecoder(telemResp.Body).Decode(&telem)
+			_ = telemResp.Body.Close()
+			for _, ev := range telem.RecentEvents {
+				if strings.Contains(ev, "Warning: suspend actor") {
+					foundWarning = true
+					break
+				}
+			}
+		}
+		if foundWarning {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !foundWarning {
 		t.Errorf("expected warning event logged in telemetry, events: %+v", telem.RecentEvents)
+	}
+}
+
+func TestProxyRouting_StandaloneAttendeeIDHeader(t *testing.T) {
+	var receivedTargetActor atomic.Pointer[string]
+
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		hdrActor := r.Header.Get("ate-target-actor")
+		receivedTargetActor.Store(&hdrActor)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-standalone-1",
+			Sender:    types.SenderAssistant,
+			Content:   "Accepted with standalone X-Attendee-ID",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithAtespace("ate-demo-conf"),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// Send chat request with ONLY X-Attendee-ID header (no Authorization or X-Attendee-Token)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello standalone"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Attendee-ID", "attendee-42")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for standalone X-Attendee-ID, got %d", resp.StatusCode)
+	}
+
+	if receivedTargetActor.Load() == nil || *receivedTargetActor.Load() != "ate-demo-conf/attendee-42" {
+		t.Errorf("expected ate-target-actor 'ate-demo-conf/attendee-42', got %v", receivedTargetActor.Load())
+	}
+}
+
+func TestProxyRouting_ProxyErrorResetsActorState(t *testing.T) {
+	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := deadServer.URL
+	deadServer.Close()
+
+	gw := gateway.NewGateway(deadURL, "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	sessResp, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	defer sessResp.Body.Close()
+
+	var sess struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	if err := json.NewDecoder(sessResp.Body).Decode(&sess); err != nil {
+		t.Fatalf("failed to decode session: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sess.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected request error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 Bad Gateway, got %d", resp.StatusCode)
+	}
+
+	telemResp, err := http.Get(ts.URL + "/api/stage/telemetry")
+	if err != nil {
+		t.Fatalf("failed to get telemetry: %v", err)
+	}
+	defer telemResp.Body.Close()
+
+	var telem types.StageTelemetry
+	if err := json.NewDecoder(telemResp.Body).Decode(&telem); err != nil {
+		t.Fatalf("failed to decode telemetry: %v", err)
+	}
+
+	if state, ok := telem.Actors[sess.AttendeeID]; !ok || state != types.StateSuspended {
+		t.Errorf("expected actor %s state %s after proxy error, got %s (present: %v)",
+			sess.AttendeeID, types.StateSuspended, state, ok)
+	}
+}
+
+func TestProxyRouting_UpstreamErrorStatusResetsActorState(t *testing.T) {
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Internal Worker Crash", http.StatusInternalServerError)
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	sessResp, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	defer sessResp.Body.Close()
+
+	var sess struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	if err := json.NewDecoder(sessResp.Body).Decode(&sess); err != nil {
+		t.Fatalf("failed to decode session: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"trigger error"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sess.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", resp.StatusCode)
+	}
+
+	telemResp, err := http.Get(ts.URL + "/api/stage/telemetry")
+	if err != nil {
+		t.Fatalf("failed to get telemetry: %v", err)
+	}
+	defer telemResp.Body.Close()
+
+	var telem types.StageTelemetry
+	if err := json.NewDecoder(telemResp.Body).Decode(&telem); err != nil {
+		t.Fatalf("failed to decode telemetry: %v", err)
+	}
+
+	if state, ok := telem.Actors[sess.AttendeeID]; !ok || state != types.StateSuspended {
+		t.Errorf("expected actor %s state %s after upstream 500 error, got %s (present: %v)",
+			sess.AttendeeID, types.StateSuspended, state, ok)
+	}
+}
+
+func TestProxyRouting_AsyncSuspensionNonBlocking(t *testing.T) {
+	suspender := &mockSuspender{
+		suspendDelay: 150 * time.Millisecond,
+	}
+
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-async-1",
+			Sender:    types.SenderAssistant,
+			Content:   "Done",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithSuspender(suspender),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	sessResp, err := http.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+	defer sessResp.Body.Close()
+
+	var sess struct {
+		AttendeeID string `json:"attendee_id"`
+		Token      string `json:"token"`
+	}
+	if err := json.NewDecoder(sessResp.Body).Decode(&sess); err != nil {
+		t.Fatalf("failed to decode session: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"ping"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sess.Token)
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	duration := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	if duration >= 140*time.Millisecond {
+		t.Errorf("expected async suspension not to block HTTP response, but request took %v", duration)
+	}
+
+	calls := suspender.waitForCalls(1, 1*time.Second)
+	if len(calls) == 0 {
+		t.Fatalf("expected async suspension call to complete in background")
+	}
+	if calls[0].ActorID != sess.AttendeeID {
+		t.Errorf("expected actor ID %q, got %+v", sess.AttendeeID, calls[0])
 	}
 }
