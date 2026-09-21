@@ -16,8 +16,11 @@ package engine_test
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,27 +185,117 @@ func TestSandboxExecutor_PythonUniqueFilename(t *testing.T) {
 	workspace := t.TempDir()
 	executor := engine.NewSandboxExecutor(workspace)
 
-	_, err := executor.Execute(ctx, "python", "print('run 1')")
+	// Verify sequential executions generate distinct files and assert the script exists during execution.
+	res1, err := executor.Execute(ctx, "python", "import os\nprint(__file__)\nassert os.path.exists(__file__)")
 	if err != nil {
-		t.Fatalf("unexpected error executing python script: %v", err)
+		t.Fatalf("unexpected error executing python script sequentially: %v", err)
 	}
-	_, err = executor.Execute(ctx, "python", "print('run 2')")
+	res2, err := executor.Execute(ctx, "python", "import os\nprint(__file__)\nassert os.path.exists(__file__)")
 	if err != nil {
-		t.Fatalf("unexpected error executing python script: %v", err)
+		t.Fatalf("unexpected error executing python script sequentially: %v", err)
+	}
+	path1 := strings.TrimSpace(res1.Stdout)
+	path2 := strings.TrimSpace(res2.Stdout)
+	if path1 == path2 {
+		t.Fatalf("sequential python executions collided on same filename: %q", path1)
 	}
 
+	// Verify concurrent python executions don't collide.
+	const numRuns = 5
+	var wg sync.WaitGroup
+	filenames := make(chan string, numRuns)
+	errCh := make(chan error, numRuns)
+
+	for i := 0; i < numRuns; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := executor.Execute(ctx, "python", "import os\nprint(__file__)\nassert os.path.exists(__file__)")
+			if err != nil {
+				errCh <- fmt.Errorf("unexpected execution error: %w", err)
+				return
+			}
+			if res.ExitCode != 0 {
+				errCh <- fmt.Errorf("expected exit code 0, got %d (stderr: %s)", res.ExitCode, res.Stderr)
+				return
+			}
+			filenames <- strings.TrimSpace(res.Stdout)
+		}()
+	}
+
+	wg.Wait()
+	close(filenames)
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatal(err)
+	}
+
+	seen := make(map[string]bool)
+	seen[path1] = true
+	seen[path2] = true
+
+	for path := range filenames {
+		base := filepath.Base(path)
+		if !strings.HasPrefix(base, "script_") || !strings.HasSuffix(base, ".py") {
+			t.Errorf("expected script file to match script_*.py, got %q", base)
+		}
+		if seen[path] {
+			t.Errorf("detected collision with script file: %q", path)
+		}
+		seen[path] = true
+	}
+
+	if len(seen) != numRuns+2 {
+		t.Fatalf("expected %d distinct script filenames, got %d", numRuns+2, len(seen))
+	}
+
+	// Verify that script files are cleaned up after execution completes.
 	files, err := os.ReadDir(workspace)
 	if err != nil {
 		t.Fatalf("failed to read workspace dir: %v", err)
 	}
-	if len(files) < 2 {
-		t.Fatalf("expected at least 2 distinct script files, got %d", len(files))
+	if len(files) != 0 {
+		t.Fatalf("expected workspace to be cleaned up, got %d files remaining", len(files))
 	}
-	for _, f := range files {
-		if !strings.HasPrefix(f.Name(), "script_") || !strings.HasSuffix(f.Name(), ".py") {
-			t.Errorf("expected script file to match script_*.py, got %q", f.Name())
+}
+
+func TestSandboxExecutor_ProcessStartupFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	t.Run("invalid binary path", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		workspace := t.TempDir()
+		executor := engine.NewSandboxExecutor(workspace)
+
+		res, err := executor.Execute(ctx, "python", "print('hello')")
+		if err == nil {
+			t.Fatal("expected error for missing python binary, got nil")
 		}
-	}
+		if res != nil {
+			t.Fatalf("expected nil result on startup failure, got %+v", res)
+		}
+		if !strings.Contains(err.Error(), "failed to start process") {
+			t.Fatalf("expected error to contain 'failed to start process', got: %v", err)
+		}
+	})
+
+	t.Run("invalid working directory", func(t *testing.T) {
+		nonexistentDir := filepath.Join(t.TempDir(), "nonexistent")
+		executor := &engine.SandboxExecutor{WorkspaceDir: nonexistentDir}
+
+		res, err := executor.Execute(ctx, "sh", "echo hello")
+		if err == nil {
+			t.Fatal("expected error for nonexistent working directory, got nil")
+		}
+		if res != nil {
+			t.Fatalf("expected nil result on startup failure, got %+v", res)
+		}
+		if !strings.Contains(err.Error(), "failed to start process") {
+			t.Fatalf("expected error to contain 'failed to start process', got: %v", err)
+		}
+	})
 }
 
 func TestSandboxExecutor_Timeout(t *testing.T) {

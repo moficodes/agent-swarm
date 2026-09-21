@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
@@ -47,18 +46,27 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 
 	switch lang {
 	case "python", "py", "python3":
-		scriptName := fmt.Sprintf("script_%d.py", time.Now().UnixNano())
-		scriptPath := filepath.Join(s.WorkspaceDir, scriptName)
-		if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		tmpFile, err := os.CreateTemp(s.WorkspaceDir, "script_*.py")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create script file: %w", err)
+		}
+		defer os.Remove(tmpFile.Name())
+
+		if _, err := tmpFile.WriteString(script); err != nil {
+			_ = tmpFile.Close()
 			return nil, fmt.Errorf("failed to write script: %w", err)
 		}
+		if err := tmpFile.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close script file: %w", err)
+		}
+
 		pythonBin := "python3"
 		if _, err := exec.LookPath("python3"); err != nil {
 			if _, err := exec.LookPath("python"); err == nil {
 				pythonBin = "python"
 			}
 		}
-		cmd = exec.CommandContext(ctx, pythonBin, scriptPath)
+		cmd = exec.CommandContext(ctx, pythonBin, tmpFile.Name())
 	case "bash":
 		bashBin := "bash"
 		if _, err := exec.LookPath("bash"); err != nil {
@@ -93,7 +101,7 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			exitCode = 1
+			return nil, fmt.Errorf("failed to start process: %w", err)
 		}
 	}
 
