@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload/internal/server"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
@@ -104,7 +105,7 @@ func TestChat_MockMode(t *testing.T) {
 func TestChat_MockedGeminiHTTPTransport(t *testing.T) {
 	// Mock Gemini REST API endpoint
 	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.URL.Query().Get("key")
+		apiKey := r.Header.Get("x-goog-api-key")
 		if apiKey != "test-gemini-key" {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -1014,6 +1015,407 @@ func TestGeminiClient_PreventDuplicateUserPrompt(t *testing.T) {
 		}
 		if contents[2].Parts[0].Text != "New question" {
 			t.Errorf("expected last content to be 'New question', got %q", contents[2].Parts[0].Text)
+		}
+	})
+}
+
+func TestGeminiClient_ConsecutiveSameRoleHistoryMerging(t *testing.T) {
+	var capturedContents []server.Content
+	var mu sync.Mutex
+
+	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		var reqBody server.GenerateContentRequest
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		capturedContents = reqBody.Contents
+		mu.Unlock()
+
+		resp := map[string]any{
+			"candidates": []map[string]any{
+				{
+					"content": map[string]any{
+						"role": "model",
+						"parts": []map[string]any{
+							{"text": "Merged turns acknowledged."},
+						},
+					},
+					"finishReason": "STOP",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer geminiServer.Close()
+
+	client := server.NewGeminiClient(
+		server.WithBaseURL(geminiServer.URL),
+		server.WithModel("gemini-2.5-flash"),
+	)
+
+	t.Run("consecutive user and system turns merged into single user content with multiple parts", func(t *testing.T) {
+		history := []types.ChatMessage{
+			{Sender: types.SenderUser, Content: "Run initial analysis"},
+			{Sender: types.SenderAssistant, Content: "Proposed script for approval"},
+			{Sender: types.SenderSystem, Content: "Execution rejected by attendee. Operation canceled."},
+		}
+		_, err := client.GenerateContent(context.Background(), "test-key", history, "Please do something else instead")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		mu.Lock()
+		contents := capturedContents
+		mu.Unlock()
+
+		// Expected alternating roles: user, model, user (system rejection + new prompt merged)
+		if len(contents) != 3 {
+			t.Fatalf("expected 3 contents, got %d", len(contents))
+		}
+		if contents[0].Role != "user" || len(contents[0].Parts) != 1 || contents[0].Parts[0].Text != "Run initial analysis" {
+			t.Errorf("contents[0] mismatch: %+v", contents[0])
+		}
+		if contents[1].Role != "model" || len(contents[1].Parts) != 1 || contents[1].Parts[0].Text != "Proposed script for approval" {
+			t.Errorf("contents[1] mismatch: %+v", contents[1])
+		}
+		if contents[2].Role != "user" {
+			t.Errorf("expected role 'user', got %q", contents[2].Role)
+		}
+		if len(contents[2].Parts) != 2 {
+			t.Fatalf("expected 2 parts merged in contents[2], got %d", len(contents[2].Parts))
+		}
+		if contents[2].Parts[0].Text != "Execution rejected by attendee. Operation canceled." {
+			t.Errorf("part 0 mismatch: %q", contents[2].Parts[0].Text)
+		}
+		if contents[2].Parts[1].Text != "Please do something else instead" {
+			t.Errorf("part 1 mismatch: %q", contents[2].Parts[1].Text)
+		}
+	})
+
+	t.Run("consecutive assistant turns merged into single model content with multiple parts", func(t *testing.T) {
+		history := []types.ChatMessage{
+			{Sender: types.SenderUser, Content: "Execute task"},
+			{Sender: types.SenderAssistant, Content: "Analysis plan"},
+			{Sender: types.SenderAssistant, Content: "Execution completed in 42ms:\noutput"},
+		}
+		_, err := client.GenerateContent(context.Background(), "test-key", history, "What were the results?")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		mu.Lock()
+		contents := capturedContents
+		mu.Unlock()
+
+		// Expected:
+		// 0: user ("Execute task")
+		// 1: model (merged: "Analysis plan" + "Execution completed in 42ms:\noutput")
+		// 2: user ("What were the results?")
+		if len(contents) != 3 {
+			t.Fatalf("expected 3 contents, got %d", len(contents))
+		}
+		if contents[0].Role != "user" {
+			t.Errorf("contents[0] expected role 'user', got %q", contents[0].Role)
+		}
+		if contents[1].Role != "model" {
+			t.Errorf("contents[1] expected role 'model', got %q", contents[1].Role)
+		}
+		if len(contents[1].Parts) != 2 {
+			t.Fatalf("expected 2 parts in model content, got %d", len(contents[1].Parts))
+		}
+		if contents[1].Parts[0].Text != "Analysis plan" {
+			t.Errorf("part 0 mismatch: %q", contents[1].Parts[0].Text)
+		}
+		if contents[1].Parts[1].Text != "Execution completed in 42ms:\noutput" {
+			t.Errorf("part 1 mismatch: %q", contents[1].Parts[1].Text)
+		}
+		if contents[2].Role != "user" {
+			t.Errorf("contents[2] expected role 'user', got %q", contents[2].Role)
+		}
+	})
+
+	t.Run("strict alternating roles check across any history", func(t *testing.T) {
+		history := []types.ChatMessage{
+			{Sender: types.SenderUser, Content: "msg 1"},
+			{Sender: types.SenderUser, Content: "msg 2"},
+			{Sender: types.SenderAssistant, Content: "resp 1"},
+			{Sender: types.SenderAssistant, Content: "resp 2"},
+			{Sender: types.SenderSystem, Content: "notice 1"},
+			{Sender: types.SenderUser, Content: "msg 3"},
+		}
+		_, err := client.GenerateContent(context.Background(), "test-key", history, "msg 4")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		mu.Lock()
+		contents := capturedContents
+		mu.Unlock()
+
+		for i := 1; i < len(contents); i++ {
+			if contents[i].Role == contents[i-1].Role {
+				t.Fatalf("consecutive same role %q found at index %d and %d", contents[i].Role, i-1, i)
+			}
+		}
+	})
+}
+
+func TestGeminiClient_ContextCancellation(t *testing.T) {
+	client := server.NewGeminiClient(
+		server.WithBaseURL("https://example.com"),
+		server.WithModel("gemini-2.5-flash"),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	msg, err := client.GenerateContent(ctx, "test-key", nil, "test prompt")
+	if err == nil {
+		t.Fatalf("expected error from canceled context, got nil error with msg: %+v", msg)
+	}
+	if ctx.Err() == nil || err != context.Canceled {
+		t.Fatalf("expected context.Canceled error, got %v", err)
+	}
+	if msg != nil {
+		t.Fatalf("expected nil msg when context is canceled, got %+v", msg)
+	}
+}
+
+func TestGeminiClient_ExecuteSandboxCodeApproval(t *testing.T) {
+	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiKey := r.Header.Get("x-goog-api-key")
+		if apiKey != "test-key" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		resp := map[string]any{
+			"candidates": []map[string]any{
+				{
+					"content": map[string]any{
+						"role": "model",
+						"parts": []map[string]any{
+							{
+								"functionCall": map[string]any{
+									"name": "execute_sandbox_code",
+									"args": map[string]any{
+										"code":     "print('hello sandbox')",
+										"language": "python",
+										"summary":  "Test sandbox execution",
+									},
+								},
+							},
+						},
+					},
+					"finishReason": "STOP",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer geminiServer.Close()
+
+	client := server.NewGeminiClient(
+		server.WithBaseURL(geminiServer.URL),
+		server.WithModel("gemini-2.5-flash"),
+	)
+
+	msg, err := client.GenerateContent(context.Background(), "test-key", nil, "Run python script")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if msg == nil {
+		t.Fatal("expected non-nil ChatMessage")
+	}
+	if msg.Approval == nil {
+		t.Fatal("expected approval request when Gemini invokes execute_sandbox_code")
+	}
+	if msg.Approval.Code != "print('hello sandbox')" {
+		t.Errorf("unexpected approval code: %s", msg.Approval.Code)
+	}
+	if msg.Approval.Language != "python" {
+		t.Errorf("unexpected approval language: %s", msg.Approval.Language)
+	}
+	if msg.Approval.RiskLevel != types.RiskHigh {
+		t.Errorf("expected RiskHigh, got %s", msg.Approval.RiskLevel)
+	}
+	if msg.Approval.Summary != "Test sandbox execution" {
+		t.Errorf("unexpected approval summary: %s", msg.Approval.Summary)
+	}
+}
+
+func TestFineGrainedMutexLocking(t *testing.T) {
+	t.Run("mutex not blocked during handleApprove execution", func(t *testing.T) {
+		workspace := t.TempDir()
+
+		// Mock Gemini to propose a shell sleep command
+		geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			resp := map[string]any{
+				"candidates": []map[string]any{
+					{
+						"content": map[string]any{
+							"role": "model",
+							"parts": []map[string]any{
+								{
+									"functionCall": map[string]any{
+										"name": "request_human_approval",
+										"args": map[string]any{
+											"summary":    "Slow background job",
+											"code":       "sleep 0.4",
+											"language":   "sh",
+											"risk_level": "HIGH",
+										},
+									},
+								},
+							},
+						},
+						"finishReason": "STOP",
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		defer geminiServer.Close()
+
+		client := server.NewGeminiClient(
+			server.WithBaseURL(geminiServer.URL),
+			server.WithModel("gemini-2.5-flash"),
+		)
+		srv := server.NewWorkloadServer(
+			server.WithGeminiClient(client),
+			server.WithWorkspaceDir(workspace),
+			server.WithForceMock(false),
+		)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+
+		// Step 1: Create approval request
+		chatReq, _ := json.Marshal(types.ChatRequest{Message: "Run slow job"})
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(chatReq))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Gemini-API-Key", "test-key")
+		chatResp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("chat request failed: %v", err)
+		}
+		defer chatResp.Body.Close()
+
+		var chatMsg types.ChatMessage
+		_ = json.NewDecoder(chatResp.Body).Decode(&chatMsg)
+		if chatMsg.Approval == nil {
+			t.Fatal("expected approval request")
+		}
+
+		// Step 2: Start approval in goroutine (which executes sleep 0.4s)
+		appReq, _ := json.Marshal(types.ApprovalResponse{
+			ApprovalID: chatMsg.Approval.ApprovalID,
+			Decision:   types.DecisionApprove,
+		})
+
+		approveDone := make(chan struct{})
+		go func() {
+			defer close(approveDone)
+			resp, appErr := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(appReq))
+			if appErr == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+
+		// Wait briefly so handleApprove starts executing
+		time.Sleep(100 * time.Millisecond)
+
+		// Step 3: Concurrently call srv.History() and measure duration.
+		// If mutex is blocked by executor, this will take >= 300ms.
+		start := time.Now()
+		hist := srv.History()
+		duration := time.Since(start)
+
+		if duration > 200*time.Millisecond {
+			t.Fatalf("srv.History() was blocked by executor execution for %v (expected < 200ms)", duration)
+		}
+		if len(hist) < 2 {
+			t.Fatalf("expected at least 2 history messages, got %d", len(hist))
+		}
+
+		// Also verify pending approval was cleared immediately before execution
+		pending := srv.PendingApproval()
+		if pending != nil {
+			t.Errorf("expected pending approval to be cleared during execution, got: %+v", pending)
+		}
+
+		<-approveDone
+	})
+
+	t.Run("mutex not blocked during handleChat Gemini generation", func(t *testing.T) {
+		geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Simulate 400ms external Gemini API latency
+			time.Sleep(400 * time.Millisecond)
+			resp := map[string]any{
+				"candidates": []map[string]any{
+					{
+						"content": map[string]any{
+							"role": "model",
+							"parts": []map[string]any{
+								{"text": "Response after latency"},
+							},
+						},
+						"finishReason": "STOP",
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		defer geminiServer.Close()
+
+		client := server.NewGeminiClient(
+			server.WithBaseURL(geminiServer.URL),
+			server.WithModel("gemini-2.5-flash"),
+		)
+		srv := server.NewWorkloadServer(
+			server.WithGeminiClient(client),
+			server.WithForceMock(false),
+		)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+
+		chatDone := make(chan struct{})
+		go func() {
+			defer close(chatDone)
+			reqBody, _ := json.Marshal(types.ChatRequest{Message: "Check latency"})
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(reqBody))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Gemini-API-Key", "test-key")
+			resp, chatErr := http.DefaultClient.Do(req)
+			if chatErr == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+
+		// Wait briefly so handleChat has entered GenerateContent
+		time.Sleep(100 * time.Millisecond)
+
+		// History() must not be blocked while GenerateContent is running
+		start := time.Now()
+		hist := srv.History()
+		duration := time.Since(start)
+
+		if duration > 200*time.Millisecond {
+			t.Fatalf("srv.History() was blocked by Gemini generation for %v (expected < 200ms)", duration)
+		}
+		// The user message should already be present in history!
+		if len(hist) != 1 || hist[0].Content != "Check latency" {
+			t.Fatalf("expected user message in history while generation is running, got: %+v", hist)
+		}
+
+		<-chatDone
+
+		// After completion, assistant message is appended
+		histAfter := srv.History()
+		if len(histAfter) != 2 {
+			t.Fatalf("expected 2 messages after chat completed, got %d", len(histAfter))
 		}
 	})
 }

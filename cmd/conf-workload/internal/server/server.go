@@ -171,16 +171,18 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	userMsg := types.ChatMessage{
 		ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
 		Sender:    types.SenderUser,
 		Content:   req.Message,
 		Timestamp: time.Now().Unix(),
 	}
+
+	s.mu.Lock()
 	s.history = append(s.history, userMsg)
+	historyCopy := make([]types.ChatMessage, len(s.history))
+	copy(historyCopy, s.history)
+	s.mu.Unlock()
 
 	var assistantMsg *types.ChatMessage
 	var err error
@@ -191,16 +193,18 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
 
-		assistantMsg, err = s.geminiClient.GenerateContent(ctx, apiKey, s.history, req.Message)
+		assistantMsg, err = s.geminiClient.GenerateContent(ctx, apiKey, historyCopy, req.Message)
 		if err != nil || assistantMsg == nil {
 			assistantMsg = s.mockEngine.GenerateTurn(req.Message)
 		}
 	}
 
+	s.mu.Lock()
 	if assistantMsg.Approval != nil {
 		s.pendingApproval = assistantMsg.Approval
 	}
 	s.history = append(s.history, *assistantMsg)
+	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(assistantMsg)
@@ -224,9 +228,8 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.pendingApproval == nil || s.pendingApproval.ApprovalID != req.ApprovalID {
+		s.mu.Unlock()
 		http.Error(w, "no matching pending approval found", http.StatusNotFound)
 		return
 	}
@@ -240,16 +243,18 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 			Timestamp: time.Now().Unix(),
 		}
 		s.history = append(s.history, rejectMsg)
+		s.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(rejectMsg)
 		return
 	}
 
-	// Decision is APPROVE
+	// Decision is APPROVE: capture approval details and clear pending approval to prevent replay
 	lang := s.pendingApproval.Language
 	code := s.pendingApproval.Code
 	s.pendingApproval = nil
+	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -275,7 +280,10 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 		Content:   output,
 		Timestamp: time.Now().Unix(),
 	}
+
+	s.mu.Lock()
 	s.history = append(s.history, resultMsg)
+	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resultMsg)

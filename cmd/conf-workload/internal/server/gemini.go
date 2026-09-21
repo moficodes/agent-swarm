@@ -19,8 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -214,7 +214,7 @@ func (c *GeminiClient) ToolDeclarations() []FunctionDeclaration {
 		},
 		{
 			Name:        "execute_sandbox_code",
-			Description: "Execute a script inside the isolated gVisor sandbox container workspace.",
+			Description: "Execute a script inside the isolated gVisor sandbox container workspace. Requires human operator approval before execution.",
 			Parameters: &Schema{
 				Type: "OBJECT",
 				Properties: map[string]*Schema{
@@ -225,6 +225,10 @@ func (c *GeminiClient) ToolDeclarations() []FunctionDeclaration {
 					"code": {
 						Type:        "STRING",
 						Description: "Source code to run inside sandbox.",
+					},
+					"summary": {
+						Type:        "STRING",
+						Description: "Optional concise summary of the proposed code execution.",
 					},
 				},
 				Required: []string{"language", "code"},
@@ -285,42 +289,81 @@ func (c *GeminiClient) ExecuteFetchResearchData(topic string) map[string]any {
 	return executeFetchResearchData(topic)
 }
 
-// GenerateContent issues a prompt to the Gemini API or seamlessly delegates to MockEngine on error or missing key.
-func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, history []types.ChatMessage, prompt string) (*types.ChatMessage, error) {
-	if apiKey == "" {
-		return c.mockEngine.GenerateTurn(prompt), nil
+// BuildContents constructs alternating user and model Content turns from chat history and prompt.
+// Consecutive turns of the same role are merged into a single Content with multiple Parts.
+func (c *GeminiClient) BuildContents(history []types.ChatMessage, prompt string) []Content {
+	var rawItems []struct {
+		role string
+		text string
 	}
 
-	contents := make([]Content, 0, len(history)+2)
 	for _, item := range history {
+		if item.Content == "" {
+			continue
+		}
 		role := "user"
 		if item.Sender == types.SenderAssistant {
 			role = "model"
 		}
-		if item.Content != "" {
+		rawItems = append(rawItems, struct {
+			role string
+			text string
+		}{role: role, text: item.Content})
+	}
+
+	promptAlreadyAtEnd := len(history) > 0 &&
+		history[len(history)-1].Sender == types.SenderUser &&
+		history[len(history)-1].Content == prompt
+
+	if prompt != "" && !promptAlreadyAtEnd {
+		rawItems = append(rawItems, struct {
+			role string
+			text string
+		}{role: "user", text: prompt})
+	}
+
+	if len(rawItems) == 0 {
+		return nil
+	}
+
+	var contents []Content
+	for _, item := range rawItems {
+		if len(contents) > 0 && contents[len(contents)-1].Role == item.role {
+			contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, Part{Text: item.text})
+		} else {
 			contents = append(contents, Content{
-				Role:  role,
-				Parts: []Part{{Text: item.Content}},
+				Role:  item.role,
+				Parts: []Part{{Text: item.text}},
 			})
 		}
 	}
 
-	promptAlreadyAtEnd := len(history) > 0 && history[len(history)-1].Sender == types.SenderUser && history[len(history)-1].Content == prompt
-	if prompt != "" && !promptAlreadyAtEnd {
-		contents = append(contents, Content{
-			Role:  "user",
-			Parts: []Part{{Text: prompt}},
-		})
+	return contents
+}
+
+// GenerateContent issues a prompt to the Gemini API or seamlessly delegates to MockEngine on error or missing key.
+func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, history []types.ChatMessage, prompt string) (*types.ChatMessage, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 
+	if apiKey == "" {
+		return c.mockEngine.GenerateTurn(prompt), nil
+	}
+
+	contents := c.BuildContents(history, prompt)
 	if len(contents) == 0 {
 		return c.mockEngine.GenerateTurn(prompt), nil
 	}
 
-	endpoint := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", c.baseURL, c.model, url.QueryEscape(apiKey))
+	endpoint := fmt.Sprintf("%s/v1beta/models/%s:generateContent", c.baseURL, c.model)
 
 	const maxTurns = 3
 	for turn := 0; turn < maxTurns; turn++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		reqBody := GenerateContentRequest{
 			Contents: contents,
 			Tools: []Tool{
@@ -332,29 +375,57 @@ func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, histo
 
 		jsonBytes, err := json.Marshal(reqBody)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Printf("[Gemini] Fallback to MockEngine: %v", err)
 			return c.mockEngine.GenerateTurn(prompt), nil
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBytes))
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Printf("[Gemini] Fallback to MockEngine: %v", err)
 			return c.mockEngine.GenerateTurn(prompt), nil
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-goog-api-key", apiKey)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Printf("[Gemini] Fallback to MockEngine: %v", err)
 			return c.mockEngine.GenerateTurn(prompt), nil
 		}
 
 		if resp.StatusCode != http.StatusOK {
 			_ = resp.Body.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Printf("[Gemini] Fallback to MockEngine: non-200 HTTP status %d", resp.StatusCode)
 			return c.mockEngine.GenerateTurn(prompt), nil
 		}
 
 		var genResp GenerateContentResponse
 		decodeErr := json.NewDecoder(resp.Body).Decode(&genResp)
 		_ = resp.Body.Close()
-		if decodeErr != nil || len(genResp.Candidates) == 0 {
+		if decodeErr != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Printf("[Gemini] Fallback to MockEngine: decode error %v", decodeErr)
+			return c.mockEngine.GenerateTurn(prompt), nil
+		}
+		if len(genResp.Candidates) == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Printf("[Gemini] Fallback to MockEngine: no candidates in response")
 			return c.mockEngine.GenerateTurn(prompt), nil
 		}
 
@@ -388,6 +459,24 @@ func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, histo
 						Code:       code,
 						Language:   lang,
 						RiskLevel:  riskLevel,
+					}
+				case "execute_sandbox_code":
+					code, _ := part.FunctionCall.Args["code"].(string)
+					lang, _ := part.FunctionCall.Args["language"].(string)
+					if lang == "" {
+						lang = "python"
+					}
+					summary, _ := part.FunctionCall.Args["summary"].(string)
+					if summary == "" {
+						summary = fmt.Sprintf("Execute %s script in sandbox", lang)
+					}
+
+					approvalReq = &types.ApprovalRequest{
+						ApprovalID: fmt.Sprintf("app-%d", time.Now().UnixNano()),
+						Summary:    summary,
+						Code:       code,
+						Language:   lang,
+						RiskLevel:  types.RiskHigh,
 					}
 				case "fetch_research_data":
 					fetchCall = part.FunctionCall
@@ -452,8 +541,10 @@ func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, histo
 			}, nil
 		}
 
+		log.Printf("[Gemini] Fallback to MockEngine: empty text response")
 		return c.mockEngine.GenerateTurn(prompt), nil
 	}
 
+	log.Printf("[Gemini] Fallback to MockEngine: max turns reached without response")
 	return c.mockEngine.GenerateTurn(prompt), nil
 }
