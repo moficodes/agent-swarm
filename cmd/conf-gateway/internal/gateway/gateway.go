@@ -62,8 +62,18 @@ func (f SuspendFunc) SuspendActor(ctx context.Context, atespace, actorID string)
 type commandSuspender struct{}
 
 func (c *commandSuspender) SuspendActor(ctx context.Context, atespace, actorID string) error {
-	cmd := exec.CommandContext(ctx, "kubectl-ate", "suspend", "actor", actorID, "-a", atespace)
-	return cmd.Run()
+	var cmd *exec.Cmd
+	if _, err := exec.LookPath("kubectl-ate"); err == nil {
+		cmd = exec.CommandContext(ctx, "kubectl-ate", "suspend", "actor", actorID, "-a", atespace)
+	} else {
+		cmd = exec.CommandContext(ctx, "kubectl", "ate", "suspend", "actor", actorID, "-a", atespace)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[gateway] suspend actor %s/%s failed: %v (output: %s)", atespace, actorID, err, string(out))
+		return err
+	}
+	return nil
 }
 
 // Claims represents the decoded JWT payload.
