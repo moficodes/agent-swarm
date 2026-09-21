@@ -948,15 +948,9 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actorID := strings.TrimPrefix(r.URL.Path, "/api/actor/")
-	if actorID == "" || actorID == "/api/actor" {
-		http.Error(w, "actor ID is required", http.StatusBadRequest)
-		return
-	}
-	if strings.Contains(actorID, "/") {
-		actorID = strings.Trim(actorID, "/")
-	}
-	if actorID == "" {
-		http.Error(w, "actor ID is required", http.StatusBadRequest)
+	actorID = strings.Trim(actorID, "/")
+	if actorID == "" || actorID == "api/actor" || strings.Contains(actorID, "/") {
+		http.Error(w, "invalid actor ID: must not contain slashes", http.StatusBadRequest)
 		return
 	}
 
