@@ -87,23 +87,39 @@
       .replace(/'/g, '&#39;');
   }
 
-  // Lightweight Offline Syntax Highlighter for Python / Shell
-  function highlightCode(rawCode) {
-    if (!rawCode) return '';
-    const escaped = escapeHTML(rawCode);
+  // Lightweight Offline Single-Pass Syntax Highlighter for Python / Shell
+  function highlightCode(code) {
+    if (!code) return '';
+    const tokenRegex = /(#.*$)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\b(?:def|class|return|import|from|if|elif|else|for|while|try|except|finally|with|as|pass|break|continue|lambda|yield|in|is|not|and|or|print|None|True|False)\b)|(\b[a-zA-Z_][a-zA-Z0-9_]*(?=\s*\())|(\b\d+(?:\.\d+)?\b)/gm;
+    let result = '';
+    let lastIndex = 0;
+    let match;
 
-    // Regex tokens
-    return escaped
-      // Comments
-      .replace(/(#[^\n]*)/g, '<span class="syn-com">$1</span>')
-      // Strings double and single quotes
-      .replace(/(&quot;[^&]*&quot;|&#39;[^&]*&#39;)/g, '<span class="syn-str">$1</span>')
-      // Numbers
-      .replace(/\b(\d+)\b/g, '<span class="syn-num">$1</span>')
-      // Keywords
-      .replace(/\b(def|class|import|from|return|if|elif|else|for|while|try|except|finally|with|as|pass|break|continue|lambda|yield|in|is|not|and|or|True|False|None)\b/g, '<span class="syn-kwd">$1</span>')
-      // Common builtins
-      .replace(/\b(print|len|range|str|int|float|list|dict|set|open|exec|sys|os|time|json)\b/g, '<span class="syn-fn">$1</span>');
+    while ((match = tokenRegex.exec(code)) !== null) {
+      if (match.index > lastIndex) {
+        result += escapeHTML(code.slice(lastIndex, match.index));
+      }
+      const [full, comment, string, keyword, fn, number] = match;
+      if (comment) {
+        result += '<span class="syn-com">' + escapeHTML(comment) + '</span>';
+      } else if (string) {
+        result += '<span class="syn-str">' + escapeHTML(string) + '</span>';
+      } else if (keyword) {
+        result += '<span class="syn-kwd">' + escapeHTML(keyword) + '</span>';
+      } else if (fn) {
+        result += '<span class="syn-fn">' + escapeHTML(fn) + '</span>';
+      } else if (number) {
+        result += '<span class="syn-num">' + escapeHTML(number) + '</span>';
+      } else {
+        result += escapeHTML(full);
+      }
+      lastIndex = tokenRegex.lastIndex;
+    }
+
+    if (lastIndex < code.length) {
+      result += escapeHTML(code.slice(lastIndex));
+    }
+    return result;
   }
 
   function scrollToBottom() {
@@ -273,15 +289,22 @@
     typingEl = null;
   }
 
+  function setInputState(disabled) {
+    if (el.promptInput) el.promptInput.disabled = disabled;
+    if (el.sendBtn) el.sendBtn.disabled = disabled;
+    document.querySelectorAll('.chip').forEach(function(chip) {
+      chip.disabled = disabled;
+    });
+  }
+
   // Chat Submission
   async function submitPrompt(text) {
     if (!text || state.inFlight) return;
     state.inFlight = true;
-    el.sendBtn.disabled = true;
-    el.promptInput.disabled = true;
+    setInputState(true);
 
     appendMessage('user', text);
-    el.promptInput.value = '';
+    if (el.promptInput) el.promptInput.value = '';
 
     // Status: initially Running on Pod
     setStatusPill(LIFECYCLE_STATES.RUNNING);
@@ -345,18 +368,20 @@
       setStatusPill(LIFECYCLE_STATES.SUSPENDED);
     } finally {
       state.inFlight = false;
-      el.sendBtn.disabled = false;
-      el.promptInput.disabled = false;
-      el.promptInput.focus();
+      setInputState(false);
+      if (el.promptInput) el.promptInput.focus();
     }
   }
 
   // Approval Decision Handling
   async function handleApprovalDecision(approvalId, decision, cardElement) {
-    if (!approvalId) return;
+    if (!approvalId || state.inFlight) return;
 
-    const btnReject = cardElement.querySelector('.btn-reject');
-    const btnApprove = cardElement.querySelector('.btn-approve');
+    state.inFlight = true;
+    setInputState(true);
+
+    const btnReject = cardElement ? cardElement.querySelector('.btn-reject') : null;
+    const btnApprove = cardElement ? cardElement.querySelector('.btn-approve') : null;
     if (btnReject) btnReject.disabled = true;
     if (btnApprove) btnApprove.disabled = true;
 
@@ -365,7 +390,9 @@
     // If wait > 400ms, mark as parked in Envoy queue
     clearTimeout(state.parkedTimer);
     state.parkedTimer = setTimeout(function() {
-      setStatusPill(LIFECYCLE_STATES.PARKED);
+      if (state.inFlight) {
+        setStatusPill(LIFECYCLE_STATES.PARKED);
+      }
     }, 400);
 
     showTypingIndicator();
@@ -387,6 +414,16 @@
       clearTimeout(state.parkedTimer);
       removeTypingIndicator();
 
+      if (resp.status === 401) {
+        localStorage.removeItem('conf_attendee_token');
+        await initSession();
+        appendSystemMessage('⚠️ Session was refreshed. Please re-submit your decision.');
+        if (btnReject) btnReject.disabled = false;
+        if (btnApprove) btnApprove.disabled = false;
+        setStatusPill(LIFECYCLE_STATES.SUSPENDED);
+        return;
+      }
+
       if (!resp.ok) {
         const errorText = await resp.text();
         appendSystemMessage('❌ Failed to submit approval: ' + (errorText || resp.statusText));
@@ -397,11 +434,13 @@
       }
 
       // Replace actions with finalized badge
-      const actionsDiv = cardElement.querySelector('.approval-actions');
-      if (actionsDiv) {
-        actionsDiv.innerHTML = '<div class="approval-status-badge ' + (decision === 'APPROVE' ? 'approved' : 'rejected') + '">' +
-          (decision === 'APPROVE' ? '✓ Execution Approved &amp; Executed' : '✕ Execution Rejected') +
-          '</div>';
+      if (cardElement) {
+        const actionsDiv = cardElement.querySelector('.approval-actions');
+        if (actionsDiv) {
+          actionsDiv.innerHTML = '<div class="approval-status-badge ' + (decision === 'APPROVE' ? 'approved' : 'rejected') + '">' +
+            (decision === 'APPROVE' ? '✓ Execution Approved &amp; Executed' : '✕ Execution Rejected') +
+            '</div>';
+        }
       }
 
       const resultMsg = await resp.json();
@@ -415,6 +454,10 @@
       if (btnReject) btnReject.disabled = false;
       if (btnApprove) btnApprove.disabled = false;
       setStatusPill(LIFECYCLE_STATES.SUSPENDED);
+    } finally {
+      state.inFlight = false;
+      setInputState(false);
+      if (el.promptInput) el.promptInput.focus();
     }
   }
 
@@ -445,6 +488,7 @@
     // Prompt Chips
     document.querySelectorAll('.chip').forEach(function(chip) {
       chip.addEventListener('click', function() {
+        if (state.inFlight) return;
         const prompt = chip.getAttribute('data-prompt');
         if (prompt) {
           submitPrompt(prompt);

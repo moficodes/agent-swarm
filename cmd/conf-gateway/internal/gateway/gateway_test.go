@@ -1329,4 +1329,55 @@ func TestChatRoute(t *testing.T) {
 	if respPost.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405 for POST /chat, got %d", respPost.StatusCode)
 	}
+
+	// 5. HEAD /chat should return 200 OK with text/html and empty body
+	respHead, err := http.Head(ts.URL + "/chat")
+	if err != nil {
+		t.Fatalf("failed to HEAD /chat: %v", err)
+	}
+	defer respHead.Body.Close()
+
+	if respHead.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for HEAD /chat, got %d", respHead.StatusCode)
+	}
+	if !strings.Contains(respHead.Header.Get("Content-Type"), "text/html") {
+		t.Errorf("expected text/html Content-Type for HEAD /chat, got %q", respHead.Header.Get("Content-Type"))
+	}
+	headBody, _ := io.ReadAll(respHead.Body)
+	if len(headBody) != 0 {
+		t.Errorf("expected empty body for HEAD /chat, got %d bytes", len(headBody))
+	}
+
+	// 6. GET /chat/nonexistent should return 404 Not Found (subtree bleed prevention)
+	respSubtree, err := http.Get(ts.URL + "/chat/nonexistent")
+	if err != nil {
+		t.Fatalf("failed to GET /chat/nonexistent: %v", err)
+	}
+	defer respSubtree.Body.Close()
+
+	if respSubtree.StatusCode != http.StatusNotFound {
+		t.Errorf("expected status 404 for /chat/nonexistent, got %d", respSubtree.StatusCode)
+	}
+
+	// 7. GET /chat/ should return 200 OK
+	respSlash, err := http.Get(ts.URL + "/chat/")
+	if err != nil {
+		t.Fatalf("failed to GET /chat/: %v", err)
+	}
+	defer respSlash.Body.Close()
+
+	if respSlash.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for GET /chat/, got %d", respSlash.StatusCode)
+	}
+
+	// 8. POST /chat/ should return 405 Method Not Allowed
+	respPostSlash, err := http.Post(ts.URL+"/chat/", "application/json", nil)
+	if err != nil {
+		t.Fatalf("failed to POST /chat/: %v", err)
+	}
+	defer respPostSlash.Body.Close()
+
+	if respPostSlash.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected status 405 for POST /chat/, got %d", respPostSlash.StatusCode)
+	}
 }

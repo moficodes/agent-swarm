@@ -267,7 +267,11 @@ func (g *Gateway) routes() {
 }
 
 func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.URL.Path != "/chat" && r.URL.Path != "/chat/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -281,8 +285,11 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
+	}
 }
 
 func normalizeStaticFS(sysFS fs.FS) fs.FS {

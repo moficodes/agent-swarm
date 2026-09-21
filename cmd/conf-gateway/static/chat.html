@@ -17,7 +17,7 @@ limitations under the License.
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#07090e">
   <meta name="description" content="Agent Substrate - Interactive Conference Attendee Sandboxed AI Agent">
   <title>Substrate Agent // Conference Demo</title>
@@ -29,7 +29,7 @@ limitations under the License.
     <header class="app-header">
       <div class="header-main">
         <div class="brand">
-          <span class="brand-glyph">⬡</span>
+          <span class="brand-glyph" aria-hidden="true">⬡</span>
           <span class="brand-title">SUBSTRATE</span>
           <span class="badge model-badge">Gemini Flash</span>
         </div>
@@ -40,7 +40,7 @@ limitations under the License.
       <!-- Substrate Lifecycle Status Pill -->
       <div class="status-bar">
         <div id="status-pill" class="status-pill suspended" title="Substrate Micro-VM Lifecycle State">
-          <span class="status-dot"></span>
+          <span class="status-dot" aria-hidden="true"></span>
           <span id="status-text" class="status-text">⚡ Suspended in GCS</span>
           <span id="status-sub" class="status-sub">0 vCPU / 0 MB RAM</span>
         </div>
@@ -51,13 +51,13 @@ limitations under the License.
     <section class="chips-container" aria-label="Suggested starter prompts">
       <div class="chips-scroll">
         <button type="button" class="chip" data-prompt="Analyze sales telemetry, detect outliers, and produce an ASCII histogram">
-          <span class="chip-icon">📊</span> Anomaly Analysis
+          <span class="chip-icon" aria-hidden="true">📊</span> Anomaly Analysis
         </button>
         <button type="button" class="chip" data-prompt="Run security vulnerability audit on container sandbox environment">
-          <span class="chip-icon">🔒</span> Security Audit
+          <span class="chip-icon" aria-hidden="true">🔒</span> Security Audit
         </button>
         <button type="button" class="chip" data-prompt="Benchmark gVisor CPU and memory allocation throughput">
-          <span class="chip-icon">⚡</span> Benchmark Sandbox
+          <span class="chip-icon" aria-hidden="true">⚡</span> Benchmark Sandbox
         </button>
       </div>
     </section>
@@ -95,7 +95,7 @@ limitations under the License.
             aria-label="Chat prompt input"
           />
           <button type="submit" id="send-btn" class="send-btn" aria-label="Send prompt">
-            <svg class="send-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="send-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <line x1="22" y1="2" x2="11" y2="13"></line>
               <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
             </svg>
@@ -110,7 +110,7 @@ limitations under the License.
     <div class="approval-card" data-approval-id="">
       <div class="approval-header">
         <div class="risk-indicator risk-high">
-          <span class="risk-dot"></span>
+          <span class="risk-dot" aria-hidden="true"></span>
           <span class="risk-label">HIGH RISK</span>
         </div>
         <span class="approval-lang">python</span>
@@ -127,10 +127,10 @@ limitations under the License.
       </div>
       <div class="approval-actions">
         <button type="button" class="action-btn btn-reject">
-          <span class="btn-icon">✕</span> Reject
+          <span class="btn-icon" aria-hidden="true">✕</span> Reject
         </button>
         <button type="button" class="action-btn btn-approve">
-          <span class="btn-icon">✓</span> Approve &amp; Execute
+          <span class="btn-icon" aria-hidden="true">✓</span> Approve &amp; Execute
         </button>
       </div>
     </div>
