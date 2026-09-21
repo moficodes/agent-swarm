@@ -223,6 +223,18 @@ html, body {
   animation: pulse-dot 1.5s infinite ease-in-out;
 }
 
+.status-pill.thinking {
+  background: rgba(0, 240, 255, 0.15);
+  border-color: rgba(0, 240, 255, 0.5);
+  color: var(--neon-cyan);
+  box-shadow: var(--shadow-glow-cyan);
+}
+.status-pill.thinking .status-dot {
+  background-color: var(--neon-cyan);
+  box-shadow: 0 0 8px var(--neon-cyan);
+  animation: pulse-dot 0.8s infinite ease-in-out;
+}
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.85); }

@@ -20,7 +20,7 @@
     attendeeId: '',
     token: '',
     inFlight: false,
-    parkedTimer: null,
+    eventSource: null,
   };
 
   // DOM Elements
@@ -44,27 +44,123 @@
       sub: '0 vCPU / 0 MB RAM',
     },
     PARKED: {
-      className: 'parked',
+      className: 'parked parked-envoy',
+      text: '⏳ Parked in Envoy',
+      sub: 'L7 Request Buffer',
+    },
+    PARKED_ENVOY: {
+      className: 'parked parked-envoy',
       text: '⏳ Parked in Envoy',
       sub: 'L7 Request Buffer',
     },
     RUNNING: {
-      className: 'running',
-      text: '🚀 Running on Pod',
+      className: 'running running-gvisor',
+      text: '🚀 Running in Sandbox',
       sub: 'gVisor runsc sandbox',
     },
+    RUNNING_GVISOR: {
+      className: 'running running-gvisor',
+      text: '🚀 Running in Sandbox',
+      sub: 'gVisor runsc sandbox',
+    },
+    THINKING_VERTEX_AI: {
+      className: 'thinking thinking-vertex-ai',
+      text: '🧠 Reasoning on Vertex AI',
+      sub: 'Generating analysis plan...',
+    },
+    AWAITING_APPROVAL: {
+      className: 'awaiting awaiting-approval',
+      text: '⏸️ Awaiting Approval',
+      sub: 'Process frozen to GCS',
+    },
     AWAITING: {
-      className: 'awaiting',
+      className: 'awaiting awaiting-approval',
       text: '⏸️ Awaiting Approval',
       sub: 'Process frozen to GCS',
     },
   };
 
   function setStatusPill(pillState) {
-    if (!el.statusPill) return;
-    el.statusPill.className = 'status-pill ' + pillState.className;
-    if (el.statusText) el.statusText.textContent = pillState.text;
-    if (el.statusSub) el.statusSub.textContent = pillState.sub;
+    if (!el.statusPill || !pillState) return;
+    el.statusPill.className = 'status-pill ' + (pillState.className || 'suspended');
+    if (el.statusText) el.statusText.textContent = pillState.text || '';
+    if (el.statusSub) el.statusSub.textContent = pillState.sub || '';
+  }
+
+  // -------------------------------------------------------------------------
+  // Server-Sent Events (SSE) Real-Time State Sync
+  // -------------------------------------------------------------------------
+  function connectEventSource() {
+    if (!state.attendeeId) return;
+    if (state.eventSource) {
+      state.eventSource.close();
+      state.eventSource = null;
+    }
+
+    const es = new EventSource('/api/events?attendee_id=' + state.attendeeId);
+    state.eventSource = es;
+
+    es.addEventListener('state_change', function(e) {
+      try {
+        const data = JSON.parse(e.data);
+        handleServerStateChange(data);
+      } catch (err) {
+        console.warn('Failed to parse state_change event:', err);
+      }
+    });
+
+    es.addEventListener('reset', function(e) {
+      handleResetEvent();
+    });
+
+    es.onerror = function() {
+      // EventSource automatically handles reconnection
+    };
+  }
+
+  function handleServerStateChange(event) {
+    if (!event) return;
+    if (event.attendee_id && state.attendeeId && event.attendee_id !== state.attendeeId) {
+      return;
+    }
+
+    // Detect cluster reset broadcast
+    if (event.subtext && event.subtext.toLowerCase().includes('cluster reset')) {
+      handleResetEvent();
+      return;
+    }
+
+    const stateKey = (event.state || 'SUSPENDED').toUpperCase();
+    const config = LIFECYCLE_STATES[stateKey] || LIFECYCLE_STATES.SUSPENDED;
+    const text = event.label || config.text;
+    const sub = event.subtext || config.sub;
+
+    if (el.statusPill) {
+      el.statusPill.className = 'status-pill ' + config.className;
+    }
+    if (el.statusText) {
+      el.statusText.textContent = text;
+    }
+    if (el.statusSub) {
+      el.statusSub.textContent = sub;
+    }
+  }
+
+  function handleResetEvent() {
+    state.inFlight = false;
+    setInputState(false);
+    removeTypingIndicator();
+
+    setStatusPill(LIFECYCLE_STATES.SUSPENDED);
+
+    if (el.chatFeed) {
+      const intro = el.chatFeed.querySelector('.intro-message');
+      el.chatFeed.innerHTML = '';
+      if (intro) {
+        el.chatFeed.appendChild(intro);
+      }
+      appendSystemMessage('⟲ Cluster reset: session state and process memory returned to zero.');
+    }
   }
 
   function formatAttendeeBadge(id) {
@@ -142,12 +238,25 @@
     // If query string has reset, clear stored session
     const urlParams = new URLSearchParams(window.location.search);
     const forceReset = urlParams.get('reset') === '1';
+    const attendeeParam = urlParams.get('attendee') || urlParams.get('attendee_id');
 
-    if (!forceReset && storedId && storedToken) {
+    if (attendeeParam) {
+      state.attendeeId = attendeeParam;
+      if (storedId === attendeeParam && storedToken) {
+        state.token = storedToken;
+      }
+      if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
+      setStatusPill(LIFECYCLE_STATES.SUSPENDED);
+      connectEventSource();
+      if (!forceReset && state.token) {
+        return;
+      }
+    } else if (!forceReset && storedId && storedToken) {
       state.attendeeId = storedId;
       state.token = storedToken;
       if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
       setStatusPill(LIFECYCLE_STATES.SUSPENDED);
+      connectEventSource();
       return;
     }
 
@@ -157,13 +266,16 @@
         throw new Error('HTTP ' + resp.status + ' initializing session');
       }
       const data = await resp.json();
-      state.attendeeId = data.attendee_id;
+      if (!attendeeParam) {
+        state.attendeeId = data.attendee_id;
+        localStorage.setItem('conf_attendee_id', state.attendeeId);
+      }
       state.token = data.token;
-      localStorage.setItem('conf_attendee_id', state.attendeeId);
       localStorage.setItem('conf_attendee_token', state.token);
 
       if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
       setStatusPill(LIFECYCLE_STATES.SUSPENDED);
+      connectEventSource();
     } catch (err) {
       console.error('Failed to init session:', err);
       appendSystemMessage('Unable to connect to gateway session. Please refresh the page.');
@@ -306,17 +418,6 @@
     appendMessage('user', text);
     if (el.promptInput) el.promptInput.value = '';
 
-    // Status: initially Running on Pod
-    setStatusPill(LIFECYCLE_STATES.RUNNING);
-
-    // If request takes more than 400ms, indicate it might be parked in Envoy
-    clearTimeout(state.parkedTimer);
-    state.parkedTimer = setTimeout(function() {
-      if (state.inFlight) {
-        setStatusPill(LIFECYCLE_STATES.PARKED);
-      }
-    }, 400);
-
     showTypingIndicator();
 
     try {
@@ -330,7 +431,6 @@
         body: JSON.stringify({ message: text }),
       });
 
-      clearTimeout(state.parkedTimer);
       removeTypingIndicator();
 
       if (resp.status === 401) {
@@ -353,16 +453,10 @@
       const msgDiv = appendMessage('assistant', chatMsg.content, chatMsg.timestamp);
 
       if (chatMsg.approval) {
-        // Paused for human approval: 0 MB RAM, state is Awaiting / Suspended
-        setStatusPill(LIFECYCLE_STATES.AWAITING);
         appendApprovalCard(chatMsg.approval, msgDiv);
-      } else {
-        // Completed turn: suspended back to GCS
-        setStatusPill(LIFECYCLE_STATES.SUSPENDED);
       }
     } catch (err) {
       console.error('Chat error:', err);
-      clearTimeout(state.parkedTimer);
       removeTypingIndicator();
       appendSystemMessage('❌ Network communication error: ' + err.message);
       setStatusPill(LIFECYCLE_STATES.SUSPENDED);
@@ -385,16 +479,6 @@
     if (btnReject) btnReject.disabled = true;
     if (btnApprove) btnApprove.disabled = true;
 
-    setStatusPill(LIFECYCLE_STATES.RUNNING);
-
-    // If wait > 400ms, mark as parked in Envoy queue
-    clearTimeout(state.parkedTimer);
-    state.parkedTimer = setTimeout(function() {
-      if (state.inFlight) {
-        setStatusPill(LIFECYCLE_STATES.PARKED);
-      }
-    }, 400);
-
     showTypingIndicator();
 
     try {
@@ -411,7 +495,6 @@
         }),
       });
 
-      clearTimeout(state.parkedTimer);
       removeTypingIndicator();
 
       if (resp.status === 401) {
@@ -445,10 +528,8 @@
 
       const resultMsg = await resp.json();
       appendMessage('assistant', resultMsg.content, resultMsg.timestamp);
-      setStatusPill(LIFECYCLE_STATES.SUSPENDED);
     } catch (err) {
       console.error('Approval submission error:', err);
-      clearTimeout(state.parkedTimer);
       removeTypingIndicator();
       appendSystemMessage('❌ Error submitting decision: ' + err.message);
       if (btnReject) btnReject.disabled = false;

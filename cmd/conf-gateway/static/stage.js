@@ -39,10 +39,29 @@
     workerDot1: document.getElementById('worker-dot-1'),
     fleetGrid: document.getElementById('fleet-grid'),
     eventTicker: document.getElementById('event-ticker'),
+    btnSim25: document.getElementById('btn-sim-25'),
+    btnSim50: document.getElementById('btn-sim-50'),
+    btnSimStop: document.getElementById('btn-sim-stop'),
+    btnResetAll: document.getElementById('btn-reset-all'),
+    spotlightDrawer: document.getElementById('spotlight-drawer'),
+    spotlightBackdrop: document.getElementById('spotlight-backdrop'),
+    spotlightTitle: document.getElementById('spotlight-title'),
+    spotlightState: document.getElementById('spotlight-state'),
+    spotlightClose: document.getElementById('spotlight-close'),
+    spotlightWorker: document.getElementById('spotlight-worker'),
+    spotlightSnapshot: document.getElementById('spotlight-snapshot'),
+    spotlightFootprint: document.getElementById('spotlight-footprint'),
+    spotlightPrompt: document.getElementById('spotlight-prompt'),
+    spotlightCode: document.getElementById('spotlight-code'),
+    spotlightOutput: document.getElementById('spotlight-output'),
+    spotlightPhoneLink: document.getElementById('spotlight-phone-link'),
   };
 
   // State
   let lastEventSignature = '';
+  let simulationActive = false;
+  let simulationCount = 0;
+  let currentSpotlightActorId = null;
 
   // -------------------------------------------------------------------------
   // Offline Pure-JS SVG QR Code Generator (ISO/IEC 18004 compliant subset)
@@ -348,6 +367,9 @@
       if (!resp.ok) return;
       const data = await resp.json();
       updateDashboard(data);
+      if (currentSpotlightActorId && el.spotlightDrawer && el.spotlightDrawer.classList.contains('open')) {
+        refreshSpotlightDrawer(currentSpotlightActorId);
+      }
     } catch (err) {
       // Background retry on transient network error
       console.warn('Telemetry poll transient error:', err);
@@ -570,11 +592,371 @@
   }
 
   // -------------------------------------------------------------------------
+  // Syntax Highlighter for Code in Spotlight Drawer
+  // -------------------------------------------------------------------------
+  function highlightCode(code) {
+    if (!code) return '';
+    const tokenRegex = /(#.*$)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\b(?:def|class|return|import|from|if|elif|else|for|while|try|except|finally|with|as|pass|break|continue|lambda|yield|in|is|not|and|or|print|None|True|False)\b)|(\b[a-zA-Z_][a-zA-Z0-9_]*(?=\s*\())|(\b\d+(?:\.\d+)?\b)/gm;
+    let result = '';
+    let lastIndex = 0;
+    let match;
+
+    while ((match = tokenRegex.exec(code)) !== null) {
+      if (match.index > lastIndex) {
+        result += escapeHTML(code.slice(lastIndex, match.index));
+      }
+      const [full, comment, string, keyword, fn, number] = match;
+      if (comment) {
+        result += '<span class="syn-com">' + escapeHTML(comment) + '</span>';
+      } else if (string) {
+        result += '<span class="syn-str">' + escapeHTML(string) + '</span>';
+      } else if (keyword) {
+        result += '<span class="syn-kwd">' + escapeHTML(keyword) + '</span>';
+      } else if (fn) {
+        result += '<span class="syn-fn">' + escapeHTML(fn) + '</span>';
+      } else if (number) {
+        result += '<span class="syn-num">' + escapeHTML(number) + '</span>';
+      } else {
+        result += escapeHTML(full);
+      }
+      lastIndex = tokenRegex.lastIndex;
+    }
+
+    if (lastIndex < code.length) {
+      result += escapeHTML(code.slice(lastIndex));
+    }
+    return result;
+  }
+
+  // -------------------------------------------------------------------------
+  // Spotlight Drawer Controller
+  // -------------------------------------------------------------------------
+  async function openSpotlightDrawer(actorId) {
+    if (!actorId) return;
+    currentSpotlightActorId = actorId;
+
+    if (el.spotlightTitle) el.spotlightTitle.textContent = formatActorName(actorId);
+    if (el.spotlightPhoneLink) el.spotlightPhoneLink.href = '/chat?attendee=' + encodeURIComponent(actorId);
+
+    if (el.spotlightDrawer) el.spotlightDrawer.classList.add('open');
+    if (el.spotlightBackdrop) el.spotlightBackdrop.classList.add('open');
+
+    await refreshSpotlightDrawer(actorId);
+  }
+
+  async function refreshSpotlightDrawer(actorId) {
+    if (!actorId) return;
+    try {
+      const resp = await fetch('/api/actor/' + encodeURIComponent(actorId), { cache: 'no-store' });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (currentSpotlightActorId === actorId) {
+        populateSpotlightDrawer(data);
+      }
+    } catch (err) {
+      console.warn('Error fetching actor details for spotlight:', err);
+    }
+  }
+
+  function closeSpotlightDrawer() {
+    currentSpotlightActorId = null;
+    if (el.spotlightDrawer) el.spotlightDrawer.classList.remove('open');
+    if (el.spotlightBackdrop) el.spotlightBackdrop.classList.remove('open');
+  }
+
+  function populateSpotlightDrawer(data) {
+    if (!data) return;
+    const actorId = data.actor_id || currentSpotlightActorId;
+    if (el.spotlightTitle) {
+      el.spotlightTitle.textContent = formatActorName(actorId);
+    }
+
+    // State badge
+    const rawState = (data.state || 'SUSPENDED').toUpperCase();
+    let stateClass = 'suspended';
+    let stateLabel = rawState.replace(/_/g, ' ');
+
+    if (rawState.includes('PARKED')) {
+      stateClass = 'parked';
+      stateLabel = 'PARKED (Envoy)';
+    } else if (rawState.includes('RUNNING') || rawState.includes('THINKING')) {
+      stateClass = 'running';
+      stateLabel = rawState.includes('THINKING') ? 'THINKING (Vertex AI)' : 'RUNNING (gVisor)';
+    } else if (rawState.includes('AWAITING')) {
+      stateClass = 'awaiting';
+      stateLabel = 'AWAITING APPROVAL';
+    } else {
+      stateClass = 'suspended';
+      stateLabel = 'SUSPENDED (GCS)';
+    }
+
+    if (el.spotlightState) {
+      el.spotlightState.textContent = stateLabel;
+      el.spotlightState.className = 'drawer-state-badge ' + stateClass;
+    }
+
+    // Worker pod
+    if (el.spotlightWorker) {
+      if (data.worker_pod) {
+        el.spotlightWorker.textContent = data.worker_pod;
+        el.spotlightWorker.className = 'drawer-metric-value highlight-cyan';
+      } else {
+        el.spotlightWorker.textContent = 'None (Suspended to GCS)';
+        el.spotlightWorker.className = 'drawer-metric-value';
+      }
+    }
+
+    // Snapshot location
+    if (el.spotlightSnapshot) {
+      if (data.snapshot_location) {
+        const sizeStr = data.snapshot_size_bytes ? ` (${Math.round(data.snapshot_size_bytes / 1024)} KB)` : '';
+        el.spotlightSnapshot.textContent = data.snapshot_location + sizeStr;
+        el.spotlightSnapshot.title = data.snapshot_location;
+      } else {
+        el.spotlightSnapshot.textContent = 'In-memory / No snapshot';
+      }
+    }
+
+    // Footprint pill
+    if (el.spotlightFootprint) {
+      if (rawState.includes('RUNNING') || rawState.includes('THINKING')) {
+        el.spotlightFootprint.textContent = '1 vCPU / 256 MB (Active Pod)';
+        el.spotlightFootprint.className = 'drawer-metric-value highlight-cyan';
+      } else if (rawState.includes('PARKED')) {
+        el.spotlightFootprint.textContent = '0 vCPU / 0 MB (Held in Envoy)';
+        el.spotlightFootprint.className = 'drawer-metric-value highlight-amber';
+      } else {
+        el.spotlightFootprint.textContent = '0 vCPU / 0 MB in GCS';
+        el.spotlightFootprint.className = 'drawer-metric-value highlight-green';
+      }
+    }
+
+    // Prompt block
+    if (el.spotlightPrompt) {
+      let promptText = '';
+      if (data.pending_approval && data.pending_approval.summary) {
+        promptText = data.pending_approval.summary;
+      } else if (data.chat_history && data.chat_history.length > 0) {
+        for (let i = data.chat_history.length - 1; i >= 0; i--) {
+          if (data.chat_history[i].sender === 'user' && data.chat_history[i].content) {
+            promptText = data.chat_history[i].content;
+            break;
+          }
+        }
+        if (!promptText && data.chat_history[data.chat_history.length - 1].content) {
+          promptText = data.chat_history[data.chat_history.length - 1].content;
+        }
+      }
+      el.spotlightPrompt.textContent = promptText || 'No active prompt.';
+    }
+
+    // Code block with syntax highlighting
+    if (el.spotlightCode) {
+      let codeStr = '';
+      if (data.pending_approval && data.pending_approval.code) {
+        codeStr = data.pending_approval.code;
+      } else if (data.last_result && data.last_result.code) {
+        codeStr = data.last_result.code;
+      }
+      if (codeStr) {
+        el.spotlightCode.innerHTML = highlightCode(codeStr);
+      } else {
+        el.spotlightCode.textContent = '# No active code execution';
+      }
+    }
+
+    // Terminal output console
+    if (el.spotlightOutput) {
+      if (data.last_result) {
+        const res = data.last_result;
+        let outputText = '';
+        if (res.stdout) outputText += res.stdout;
+        if (res.stderr) outputText += (outputText ? '\n[STDERR]\n' : '') + res.stderr;
+        if (!outputText) outputText = '(execution returned 0 output)';
+        const meta = `\n\n--- Process exited code ${res.exit_code ?? 0} (${res.duration_ms ?? 0} ms) ---`;
+        el.spotlightOutput.textContent = outputText + meta;
+      } else if (rawState === 'AWAITING_APPROVAL') {
+        el.spotlightOutput.textContent = '[PAUSED] Execution paused waiting for operator approval in mobile view.';
+      } else if (rawState.includes('RUNNING') || rawState.includes('THINKING')) {
+        el.spotlightOutput.textContent = '[RUNNING] Executing inside gVisor sandbox container...';
+      } else {
+        el.spotlightOutput.textContent = 'Awaiting execution output...';
+      }
+    }
+
+    // Phone link
+    if (el.spotlightPhoneLink) {
+      el.spotlightPhoneLink.href = '/chat?attendee=' + encodeURIComponent(actorId);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Audience Simulation & Reset Controls
+  // -------------------------------------------------------------------------
+  async function fetchSimulationStatus() {
+    try {
+      const resp = await fetch('/api/simulation', { cache: 'no-store' });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      simulationActive = !!data.running;
+      simulationCount = data.count || 0;
+      updateSimulationUI();
+    } catch (err) {
+      console.warn('Simulation status poll error:', err);
+    }
+  }
+
+  function updateSimulationUI() {
+    if (simulationActive) {
+      if (el.btnSimStop) el.btnSimStop.style.display = 'inline-flex';
+      if (el.btnSim25) {
+        if (simulationCount === 25) {
+          el.btnSim25.classList.add('active');
+        } else {
+          el.btnSim25.classList.remove('active');
+        }
+      }
+      if (el.btnSim50) {
+        if (simulationCount === 50) {
+          el.btnSim50.classList.add('active');
+        } else {
+          el.btnSim50.classList.remove('active');
+        }
+      }
+    } else {
+      if (el.btnSimStop) el.btnSimStop.style.display = 'none';
+      if (el.btnSim25) el.btnSim25.classList.remove('active');
+      if (el.btnSim50) el.btnSim50.classList.remove('active');
+    }
+  }
+
+  async function startSimulation(count) {
+    try {
+      if (count === 25 && el.btnSim25) el.btnSim25.classList.add('active');
+      if (count === 50 && el.btnSim50) el.btnSim50.classList.add('active');
+      const resp = await fetch('/api/simulation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'start', count: count }),
+      });
+      if (resp.ok) {
+        await fetchSimulationStatus();
+        fetchTelemetry();
+      }
+    } catch (err) {
+      console.error('Failed to start simulation:', err);
+    }
+  }
+
+  async function stopSimulation() {
+    try {
+      const resp = await fetch('/api/simulation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' }),
+      });
+      if (resp.ok) {
+        await fetchSimulationStatus();
+        fetchTelemetry();
+      }
+    } catch (err) {
+      console.error('Failed to stop simulation:', err);
+    }
+  }
+
+  async function resetAllCluster() {
+    if (!el.btnResetAll) return;
+    const origText = el.btnResetAll.textContent;
+    el.btnResetAll.textContent = '⟲ Resetting...';
+    el.btnResetAll.disabled = true;
+
+    try {
+      const resp = await fetch('/api/reset', { method: 'POST' });
+      if (resp.ok) {
+        el.btnResetAll.textContent = '✓ Reset Complete';
+        setTimeout(() => {
+          if (el.btnResetAll) {
+            el.btnResetAll.textContent = origText;
+            el.btnResetAll.disabled = false;
+          }
+        }, 1500);
+      } else {
+        el.btnResetAll.textContent = '✕ Reset Failed';
+        setTimeout(() => {
+          if (el.btnResetAll) {
+            el.btnResetAll.textContent = origText;
+            el.btnResetAll.disabled = false;
+          }
+        }, 1500);
+      }
+      await fetchSimulationStatus();
+      await fetchTelemetry();
+      if (currentSpotlightActorId) {
+        refreshSpotlightDrawer(currentSpotlightActorId);
+      }
+    } catch (err) {
+      console.error('Failed to reset cluster:', err);
+      el.btnResetAll.textContent = origText;
+      el.btnResetAll.disabled = false;
+    }
+  }
+
+  function initControls() {
+    if (el.btnSim25) {
+      el.btnSim25.addEventListener('click', function() {
+        startSimulation(25);
+      });
+    }
+    if (el.btnSim50) {
+      el.btnSim50.addEventListener('click', function() {
+        startSimulation(50);
+      });
+    }
+    if (el.btnSimStop) {
+      el.btnSimStop.addEventListener('click', function() {
+        stopSimulation();
+      });
+    }
+    if (el.btnResetAll) {
+      el.btnResetAll.addEventListener('click', function() {
+        resetAllCluster();
+      });
+    }
+
+    if (el.spotlightClose) {
+      el.spotlightClose.addEventListener('click', closeSpotlightDrawer);
+    }
+    if (el.spotlightBackdrop) {
+      el.spotlightBackdrop.addEventListener('click', closeSpotlightDrawer);
+    }
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        closeSpotlightDrawer();
+      }
+    });
+
+    if (el.fleetGrid) {
+      el.fleetGrid.addEventListener('click', function(e) {
+        const badge = e.target.closest('.fleet-badge');
+        if (badge) {
+          const actorId = badge.dataset.id || badge.id.replace('badge-', '');
+          if (actorId) {
+            openSpotlightDrawer(actorId);
+          }
+        }
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Start
   // -------------------------------------------------------------------------
   document.addEventListener('DOMContentLoaded', function() {
     initOnboardingQR();
+    initControls();
+    fetchSimulationStatus();
     fetchTelemetry();
     setInterval(fetchTelemetry, 500);
+    setInterval(fetchSimulationStatus, 2000);
   });
 })();

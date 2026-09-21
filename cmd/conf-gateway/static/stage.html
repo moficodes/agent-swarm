@@ -34,6 +34,12 @@ limitations under the License.
           <span class="brand-subtitle">Interactive Conference Swarm Control Plane</span>
         </div>
       </div>
+      <div class="header-controls">
+        <button id="btn-sim-25" class="btn-ctrl">▶ Simulate 25</button>
+        <button id="btn-sim-50" class="btn-ctrl">▶ Simulate 50</button>
+        <button id="btn-sim-stop" class="btn-ctrl btn-stop" style="display:none">■ Stop</button>
+        <button id="btn-reset-all" class="btn-ctrl btn-reset">⟲ Reset All</button>
+      </div>
       <div class="header-specs">
         <div class="spec-card">
           <span class="spec-label">HARDWARE CAPACITY</span>
@@ -309,6 +315,74 @@ limitations under the License.
       </div>
     </footer>
   </div>
+
+  <!-- Spotlight Backdrop Overlay -->
+  <div id="spotlight-backdrop" class="spotlight-backdrop"></div>
+
+  <!-- Actor Spotlight Slide-Out Drawer -->
+  <aside id="spotlight-drawer" class="spotlight-drawer" aria-label="Actor Spotlight Inspector">
+    <div class="drawer-header">
+      <div class="drawer-header-left">
+        <h2 id="spotlight-title" class="drawer-title">Attendee --</h2>
+        <span id="spotlight-state" class="drawer-state-badge suspended">SUSPENDED</span>
+      </div>
+      <button id="spotlight-close" class="drawer-close-btn" aria-label="Close spotlight drawer">✕</button>
+    </div>
+
+    <div class="drawer-body">
+      <!-- Overview Metrics -->
+      <div class="drawer-section drawer-overview-card">
+        <h3 class="drawer-section-title">RUNTIME FOOTPRINT &amp; SCHEDULING</h3>
+        <div class="drawer-metrics-grid">
+          <div class="drawer-metric">
+            <span class="drawer-metric-label">WORKER POD</span>
+            <span id="spotlight-worker" class="drawer-metric-value">None (Suspended)</span>
+          </div>
+          <div class="drawer-metric">
+            <span class="drawer-metric-label">RESOURCE FOOTPRINT</span>
+            <span id="spotlight-footprint" class="drawer-metric-value highlight-green">0 vCPU / 0 MB in GCS</span>
+          </div>
+          <div class="drawer-metric full-width">
+            <span class="drawer-metric-label">GCS SNAPSHOT LOCATION</span>
+            <span id="spotlight-snapshot" class="drawer-metric-value snapshot-path">gs://conf-demo-bucket/...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Prompt Block -->
+      <div class="drawer-section">
+        <h3 class="drawer-section-title">ACTIVE PROMPT / THOUGHT</h3>
+        <div id="spotlight-prompt" class="drawer-prompt-box">No active prompt.</div>
+      </div>
+
+      <!-- Code Block with Syntax Highlighting -->
+      <div class="drawer-section">
+        <div class="drawer-section-header">
+          <h3 class="drawer-section-title">GENERATED SANDBOX CODE</h3>
+          <span class="code-lang-tag">python</span>
+        </div>
+        <pre class="drawer-code-pre"><code id="spotlight-code" class="drawer-code-block"># No active code execution</code></pre>
+      </div>
+
+      <!-- Terminal Output Console -->
+      <div class="drawer-section">
+        <h3 class="drawer-section-title">TERMINAL OUTPUT CONSOLE</h3>
+        <pre id="spotlight-output" class="drawer-terminal-box">Awaiting execution output...</pre>
+      </div>
+
+      <!-- Action Link -->
+      <div class="drawer-section drawer-actions">
+        <a id="spotlight-phone-link" class="drawer-phone-btn" href="/chat" target="_blank" rel="noopener">
+          📱 Open Phone View
+          <svg class="external-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+            <polyline points="15 3 21 3 21 9"></polyline>
+            <line x1="10" y1="14" x2="21" y2="3"></line>
+          </svg>
+        </a>
+      </div>
+    </div>
+  </aside>
 
   <script src="/static/stage.js"></script>
 </body>
