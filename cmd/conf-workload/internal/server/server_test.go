@@ -1,0 +1,580 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package server_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload/internal/server"
+	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+)
+
+func TestHealthz(t *testing.T) {
+	srv := server.NewWorkloadServer(server.WithForceMock(true))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("unexpected error calling /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read /healthz response body: %v", err)
+	}
+	if string(body) != "OK" {
+		t.Fatalf("expected body 'OK', got %q", string(body))
+	}
+}
+
+func TestChat_MockMode(t *testing.T) {
+	srv := server.NewWorkloadServer(server.WithForceMock(true))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	reqBody, err := json.Marshal(types.ChatRequest{
+		Message: "Analyze sales telemetry and detect anomalies",
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal chat request: %v", err)
+	}
+
+	resp, err := http.Post(ts.URL+"/api/chat", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("unexpected error posting to /api/chat: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var chatMsg types.ChatMessage
+	if err := json.NewDecoder(resp.Body).Decode(&chatMsg); err != nil {
+		t.Fatalf("failed to decode chat message: %v", err)
+	}
+
+	if chatMsg.Sender != types.SenderAssistant {
+		t.Errorf("expected sender %q, got %q", types.SenderAssistant, chatMsg.Sender)
+	}
+	if chatMsg.Approval == nil {
+		t.Fatal("expected approval request in response, got nil")
+	}
+	if chatMsg.Approval.ApprovalID == "" {
+		t.Error("expected non-empty ApprovalID")
+	}
+	if chatMsg.Approval.Language != "python" {
+		t.Errorf("expected python language, got %q", chatMsg.Approval.Language)
+	}
+	if chatMsg.Approval.RiskLevel != types.RiskHigh {
+		t.Errorf("expected HIGH risk level, got %q", chatMsg.Approval.RiskLevel)
+	}
+	if !strings.Contains(chatMsg.Approval.Code, "detect_anomalies") {
+		t.Errorf("expected approval code to contain 'detect_anomalies', got: %s", chatMsg.Approval.Code)
+	}
+}
+
+func TestChat_MockedGeminiHTTPTransport(t *testing.T) {
+	// Mock Gemini REST API endpoint
+	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiKey := r.URL.Query().Get("key")
+		if apiKey != "test-gemini-key" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if !strings.Contains(r.URL.Path, "/v1beta/models/") || !strings.Contains(r.URL.Path, ":generateContent") {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+
+		// Return Gemini generateContent response with request_human_approval function call
+		resp := map[string]any{
+			"candidates": []map[string]any{
+				{
+					"content": map[string]any{
+						"role": "model",
+						"parts": []map[string]any{
+							{
+								"text": "I have created an anomaly detection script for you. Please approve execution:",
+							},
+							{
+								"functionCall": map[string]any{
+									"name": "request_human_approval",
+									"args": map[string]any{
+										"summary":    "Execute real-time telemetry regression analysis",
+										"code":       "print('executing gemini generated python script')",
+										"language":   "python",
+										"risk_level": "HIGH",
+									},
+								},
+							},
+						},
+					},
+					"finishReason": "STOP",
+				},
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer geminiServer.Close()
+
+	client := server.NewGeminiClient(
+		server.WithBaseURL(geminiServer.URL),
+		server.WithModel("gemini-2.5-flash-lite"),
+	)
+	srv := server.NewWorkloadServer(
+		server.WithGeminiClient(client),
+		server.WithForceMock(false),
+	)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	reqBody, _ := json.Marshal(types.ChatRequest{Message: "Check cluster metrics"})
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Gemini-API-Key", "test-gemini-key")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request to /api/chat failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var chatMsg types.ChatMessage
+	if err := json.NewDecoder(resp.Body).Decode(&chatMsg); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if chatMsg.Approval == nil {
+		t.Fatal("expected approval request parsed from gemini functionCall, got nil")
+	}
+	if chatMsg.Approval.Summary != "Execute real-time telemetry regression analysis" {
+		t.Errorf("unexpected summary: %s", chatMsg.Approval.Summary)
+	}
+	if chatMsg.Approval.Code != "print('executing gemini generated python script')" {
+		t.Errorf("unexpected code: %s", chatMsg.Approval.Code)
+	}
+	if chatMsg.Approval.Language != "python" {
+		t.Errorf("unexpected language: %s", chatMsg.Approval.Language)
+	}
+	if chatMsg.Approval.RiskLevel != types.RiskHigh {
+		t.Errorf("unexpected risk level: %s", chatMsg.Approval.RiskLevel)
+	}
+}
+
+func TestInMemoryStatePreservation(t *testing.T) {
+	srv := server.NewWorkloadServer(server.WithForceMock(true))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Turn 1: Send user message
+	req1, _ := json.Marshal(types.ChatRequest{Message: "Turn 1: Analyze sensor stream"})
+	resp1, err := http.Post(ts.URL+"/api/chat", "application/json", bytes.NewReader(req1))
+	if err != nil {
+		t.Fatalf("turn 1 request failed: %v", err)
+	}
+	defer resp1.Body.Close()
+
+	var msg1 types.ChatMessage
+	if err := json.NewDecoder(resp1.Body).Decode(&msg1); err != nil {
+		t.Fatalf("failed to decode turn 1 response: %v", err)
+	}
+	if msg1.Approval == nil {
+		t.Fatal("turn 1 missing approval")
+	}
+
+	// Reject Turn 1 approval
+	rejectBody, _ := json.Marshal(types.ApprovalResponse{
+		ApprovalID: msg1.Approval.ApprovalID,
+		Decision:   types.DecisionReject,
+	})
+	rejectResp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(rejectBody))
+	if err != nil {
+		t.Fatalf("turn 1 reject failed: %v", err)
+	}
+	defer rejectResp.Body.Close()
+
+	// Turn 2: Send second user message
+	req2, _ := json.Marshal(types.ChatRequest{Message: "Turn 2: Check network egress"})
+	resp2, err := http.Post(ts.URL+"/api/chat", "application/json", bytes.NewReader(req2))
+	if err != nil {
+		t.Fatalf("turn 2 request failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	var msg2 types.ChatMessage
+	if err := json.NewDecoder(resp2.Body).Decode(&msg2); err != nil {
+		t.Fatalf("failed to decode turn 2 response: %v", err)
+	}
+
+	// Inspect in-memory state preservation
+	history := srv.History()
+	if len(history) < 4 {
+		t.Fatalf("expected at least 4 messages in history, got %d", len(history))
+	}
+
+	// Verify order:
+	// 0: User turn 1
+	// 1: Assistant turn 1 (with approval)
+	// 2: System / Assistant rejection notice
+	// 3: User turn 2
+	// 4: Assistant turn 2
+	if history[0].Sender != types.SenderUser || history[0].Content != "Turn 1: Analyze sensor stream" {
+		t.Errorf("history[0] unexpected: %+v", history[0])
+	}
+	if history[1].Sender != types.SenderAssistant || history[1].Approval == nil {
+		t.Errorf("history[1] unexpected: %+v", history[1])
+	}
+	if history[2].Sender != types.SenderSystem && history[2].Sender != types.SenderAssistant {
+		t.Errorf("history[2] unexpected sender: %s", history[2].Sender)
+	}
+	if history[3].Sender != types.SenderUser || history[3].Content != "Turn 2: Check network egress" {
+		t.Errorf("history[3] unexpected: %+v", history[3])
+	}
+}
+
+func TestApprove_Execute(t *testing.T) {
+	workspace := t.TempDir()
+	srv := server.NewWorkloadServer(
+		server.WithForceMock(true),
+		server.WithWorkspaceDir(workspace),
+	)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Generate approval request
+	chatReq, _ := json.Marshal(types.ChatRequest{Message: "Run outlier detection"})
+	chatResp, err := http.Post(ts.URL+"/api/chat", "application/json", bytes.NewReader(chatReq))
+	if err != nil {
+		t.Fatalf("chat request failed: %v", err)
+	}
+	defer chatResp.Body.Close()
+
+	var chatMsg types.ChatMessage
+	if err := json.NewDecoder(chatResp.Body).Decode(&chatMsg); err != nil {
+		t.Fatalf("failed to decode chat message: %v", err)
+	}
+	if chatMsg.Approval == nil {
+		t.Fatal("expected approval request")
+	}
+
+	// 2. Submit approval
+	appReq, _ := json.Marshal(types.ApprovalResponse{
+		ApprovalID: chatMsg.Approval.ApprovalID,
+		Decision:   types.DecisionApprove,
+	})
+	appResp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(appReq))
+	if err != nil {
+		t.Fatalf("approve request failed: %v", err)
+	}
+	defer appResp.Body.Close()
+
+	if appResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", appResp.StatusCode)
+	}
+
+	var resultMsg types.ChatMessage
+	if err := json.NewDecoder(appResp.Body).Decode(&resultMsg); err != nil {
+		t.Fatalf("failed to decode approve response: %v", err)
+	}
+
+	if resultMsg.Sender != types.SenderAssistant {
+		t.Errorf("expected sender assistant, got %s", resultMsg.Sender)
+	}
+	if !strings.Contains(resultMsg.Content, "[SANDBOX]") && !strings.Contains(resultMsg.Content, "Execution completed") {
+		t.Errorf("expected execution output in content, got: %s", resultMsg.Content)
+	}
+
+	// 3. Trying to approve the same ID again must fail with 404
+	secondAppResp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(appReq))
+	if err != nil {
+		t.Fatalf("second approve request failed: %v", err)
+	}
+	defer secondAppResp.Body.Close()
+
+	if secondAppResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected status 404 for consumed approval ID, got %d", secondAppResp.StatusCode)
+	}
+}
+
+func TestApprove_Reject(t *testing.T) {
+	srv := server.NewWorkloadServer(server.WithForceMock(true))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	chatReq, _ := json.Marshal(types.ChatRequest{Message: "Compute metrics"})
+	chatResp, err := http.Post(ts.URL+"/api/chat", "application/json", bytes.NewReader(chatReq))
+	if err != nil {
+		t.Fatalf("chat request failed: %v", err)
+	}
+	defer chatResp.Body.Close()
+
+	var chatMsg types.ChatMessage
+	_ = json.NewDecoder(chatResp.Body).Decode(&chatMsg)
+	if chatMsg.Approval == nil {
+		t.Fatal("expected approval request")
+	}
+
+	// Reject approval
+	rejectReq, _ := json.Marshal(types.ApprovalResponse{
+		ApprovalID: chatMsg.Approval.ApprovalID,
+		Decision:   types.DecisionReject,
+	})
+	rejectResp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(rejectReq))
+	if err != nil {
+		t.Fatalf("reject request failed: %v", err)
+	}
+	defer rejectResp.Body.Close()
+
+	if rejectResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rejectResp.StatusCode)
+	}
+
+	var rejectMsg types.ChatMessage
+	if err := json.NewDecoder(rejectResp.Body).Decode(&rejectMsg); err != nil {
+		t.Fatalf("failed to decode reject message: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(rejectMsg.Content), "cancel") && !strings.Contains(strings.ToLower(rejectMsg.Content), "reject") {
+		t.Errorf("expected cancellation message, got: %s", rejectMsg.Content)
+	}
+
+	// Ensure pending approval was cleared
+	secondRejectResp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(rejectReq))
+	if err != nil {
+		t.Fatalf("second reject request failed: %v", err)
+	}
+	defer secondRejectResp.Body.Close()
+
+	if secondRejectResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for already-processed approval, got %d", secondRejectResp.StatusCode)
+	}
+}
+
+func TestApprove_InvalidAndNotFound(t *testing.T) {
+	srv := server.NewWorkloadServer(server.WithForceMock(true))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	t.Run("nonexistent approval ID returns 404", func(t *testing.T) {
+		req, _ := json.Marshal(types.ApprovalResponse{
+			ApprovalID: "nonexistent-id",
+			Decision:   types.DecisionApprove,
+		})
+		resp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(req))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("invalid decision returns 400", func(t *testing.T) {
+		req, _ := json.Marshal(map[string]string{
+			"approval_id": "app-123",
+			"decision":    "MAYBE",
+		})
+		resp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(req))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid decision, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("malformed json returns 400", func(t *testing.T) {
+		resp, err := http.Post(ts.URL+"/api/approve", "application/json", strings.NewReader("bad json"))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for malformed json, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("non-POST method returns 405", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/approve")
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405, got %d", resp.StatusCode)
+		}
+	})
+}
+
+func TestConcurrencySafety(t *testing.T) {
+	srv := server.NewWorkloadServer(server.WithForceMock(true))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	const workers = 20
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	for i := 0; i < workers; i++ {
+		workerID := i
+		go func() {
+			defer wg.Done()
+
+			// Concurrently query healthz
+			hResp, err := http.Get(ts.URL + "/healthz")
+			if err == nil {
+				_ = hResp.Body.Close()
+			}
+
+			// Concurrently query chat
+			chatReq, _ := json.Marshal(types.ChatRequest{
+				Message: fmt.Sprintf("Worker %d: Analyze load spikes", workerID),
+			})
+			resp, err := http.Post(ts.URL+"/api/chat", "application/json", bytes.NewReader(chatReq))
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+
+			var msg types.ChatMessage
+			if err := json.NewDecoder(resp.Body).Decode(&msg); err == nil && msg.Approval != nil {
+				// Concurrently approve or reject
+				decision := types.DecisionApprove
+				if workerID%2 == 0 {
+					decision = types.DecisionReject
+				}
+				appReq, _ := json.Marshal(types.ApprovalResponse{
+					ApprovalID: msg.Approval.ApprovalID,
+					Decision:   decision,
+				})
+				appResp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(appReq))
+				if err == nil {
+					_ = appResp.Body.Close()
+				}
+			}
+
+			// Concurrently inspect history
+			_ = srv.History()
+		}()
+	}
+
+	wg.Wait()
+}
+
+func TestGeminiClient_ConfigurationAndFallback(t *testing.T) {
+	t.Run("default model is gemini-2.5-flash", func(t *testing.T) {
+		t.Setenv("GEMINI_MODEL", "")
+		c := server.NewGeminiClient()
+		if c.Model() != "gemini-2.5-flash" {
+			t.Errorf("expected default model 'gemini-2.5-flash', got %q", c.Model())
+		}
+	})
+
+	t.Run("env var GEMINI_MODEL overrides default", func(t *testing.T) {
+		t.Setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+		c := server.NewGeminiClient()
+		if c.Model() != "gemini-2.5-flash-lite" {
+			t.Errorf("expected model 'gemini-2.5-flash-lite', got %q", c.Model())
+		}
+	})
+
+	t.Run("explicit WithModel option overrides env var", func(t *testing.T) {
+		t.Setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+		c := server.NewGeminiClient(server.WithModel("gemini-custom-pro"))
+		if c.Model() != "gemini-custom-pro" {
+			t.Errorf("expected model 'gemini-custom-pro', got %q", c.Model())
+		}
+	})
+
+	t.Run("tool declarations include required tools", func(t *testing.T) {
+		c := server.NewGeminiClient()
+		tools := c.ToolDeclarations()
+		expectedTools := []string{
+			"request_human_approval",
+			"execute_sandbox_code",
+			"fetch_research_data",
+		}
+		for _, wantTool := range expectedTools {
+			found := false
+			for _, tool := range tools {
+				if tool.Name == wantTool {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("missing tool declaration: %q", wantTool)
+			}
+		}
+	})
+
+	t.Run("fallback to MockEngine when API key is empty", func(t *testing.T) {
+		c := server.NewGeminiClient()
+		msg, err := c.GenerateContent(context.Background(), "", nil, "Analyze anomalies")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if msg == nil || msg.Approval == nil {
+			t.Fatal("expected mock engine message with approval when API key is empty")
+		}
+	})
+
+	t.Run("fallback to MockEngine when HTTP endpoint returns 500 error", func(t *testing.T) {
+		errServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "internal service failure", http.StatusInternalServerError)
+		}))
+		defer errServer.Close()
+
+		c := server.NewGeminiClient(server.WithBaseURL(errServer.URL))
+		msg, err := c.GenerateContent(context.Background(), "some-key", nil, "Analyze anomalies")
+		if err != nil {
+			t.Fatalf("unexpected error during fallback: %v", err)
+		}
+		if msg == nil || msg.Approval == nil {
+			t.Fatal("expected fallback to mock engine when Gemini API fails with 500")
+		}
+	})
+}
