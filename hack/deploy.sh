@@ -134,8 +134,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   fi
 
   if [[ "${action}" == "deploy" ]]; then
-    exec "${ROOT}/hack/install-ate.sh" --deploy-demo-conference "${extra_args[@]}"
+    exec "${ROOT}/hack/install-ate.sh" --deploy-demo-conference ${extra_args[@]+"${extra_args[@]}"}
   else
-    exec "${ROOT}/hack/install-ate.sh" --delete-demo-conference "${extra_args[@]}"
+    exec "${ROOT}/hack/install-ate.sh" --delete-demo-conference ${extra_args[@]+"${extra_args[@]}"}
   fi
 fi
