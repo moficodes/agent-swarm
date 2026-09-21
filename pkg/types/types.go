@@ -57,14 +57,21 @@ const (
 type ActorLifecycleState string
 
 const (
-	// StateSuspended indicates the actor has no active worker and zero active state.
+	// StateSuspended indicates the actor process is frozen to storage consuming 0 compute.
 	StateSuspended ActorLifecycleState = "SUSPENDED"
-	// StateParked indicates the actor is checkpointed and awaiting resumption or input.
+	// StateParked indicates the request is waiting in Envoy's L7 request parking queue.
 	StateParked ActorLifecycleState = "PARKED"
-	// StateRunning indicates the actor is actively executing on a worker pod.
+	// StateRunning indicates the actor is currently scheduled and running on a worker pod.
 	StateRunning ActorLifecycleState = "RUNNING"
-	// StateAwaitingApproval indicates the actor is paused waiting for human authorization.
+	// StateAwaitingApproval indicates the actor is paused awaiting human operator signoff.
 	StateAwaitingApproval ActorLifecycleState = "AWAITING_APPROVAL"
+
+	// StateThinkingVertexAI indicates Gemini on Vertex AI is actively reasoning on the prompt.
+	StateThinkingVertexAI ActorLifecycleState = "THINKING_VERTEX_AI"
+	// StateParkedEnvoy indicates the request is explicitly held in Envoy ext_proc buffer.
+	StateParkedEnvoy ActorLifecycleState = "PARKED_ENVOY"
+	// StateRunningGVisor indicates the code is executing inside the gVisor sandbox container.
+	StateRunningGVisor ActorLifecycleState = "RUNNING_GVISOR"
 )
 
 // ApprovalRequest contains the details and security context of an execution requiring approval.
