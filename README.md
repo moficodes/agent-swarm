@@ -175,7 +175,7 @@ A minute-by-minute cue sheet for presenting the demo on stage:
 |        |                           | snapshot metadata."               | and GCS snapshot.    |
 +-----------------------------------------------------------------------------------------------+
 | 02:45  | The Freeze                | "Look at the grid: all agents are | All actors frozen;   |
-|        | Fleet turns solid purple; | are purple (Awaiting Approval).   | RAM streamed to GCS; |
+|        | Fleet turns solid purple; | purple (Awaiting Approval).       | RAM streamed to GCS; |
 |        | workers return to idle.   | But our pods use 0% CPU and 0 MB! | 0 vCPU, 0 RAM used.  |
 |        |                           | Take your time reading the code." |                      |
 +-----------------------------------------------------------------------------------------------+

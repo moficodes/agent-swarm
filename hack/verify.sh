@@ -705,11 +705,12 @@ log_pass "Step 7: Audience Simulation Engine Verified"
 # =========================================================================
 # Step 8: Actor Spotlight Inspector API
 # =========================================================================
+TARGET_ACTOR_ID="${ATTENDEE_ID:-attendee-01}"
 log_info "Step 8: Actor Spotlight Inspector API (/api/actor/{id})"
-ACTOR_HTTP_CODE=$(curl -s -o "${TMP_DIR}/actor_details.json" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/actor/attendee-01")
+ACTOR_HTTP_CODE=$(curl -s -o "${TMP_DIR}/actor_details.json" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")
 
 if [[ "${ACTOR_HTTP_CODE}" != "200" ]]; then
-  log_err "GET /api/actor/attendee-01 returned HTTP ${ACTOR_HTTP_CODE} (expected 200)"
+  log_err "GET /api/actor/${TARGET_ACTOR_ID} returned HTTP ${ACTOR_HTTP_CODE} (expected 200)"
   log_fail "Step 8: Actor Spotlight Inspector API"
   exit 1
 fi
@@ -777,17 +778,17 @@ if [[ "${RESET_STATUS}" != "ok" ]]; then
 fi
 log_ok "POST /api/reset returned HTTP 200 OK with payload status: ok"
 
-# Asserts GET /api/actor/attendee-01 reports state SUSPENDED
-ACTOR_RESET_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/actor/attendee-01")
+# Asserts GET /api/actor/{id} reports state SUSPENDED
+ACTOR_RESET_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")
 ACTOR_RESET_STATE=$(printf "%s" "${ACTOR_RESET_RESP}" | jq -r .state 2>/dev/null || true)
 
 if [[ "${ACTOR_RESET_STATE}" != "SUSPENDED" ]]; then
-  log_err "GET /api/actor/attendee-01 reported state '${ACTOR_RESET_STATE}' after reset (expected 'SUSPENDED'). Response: ${ACTOR_RESET_RESP}"
+  log_err "GET /api/actor/${TARGET_ACTOR_ID} reported state '${ACTOR_RESET_STATE}' after reset (expected 'SUSPENDED'). Response: ${ACTOR_RESET_RESP}"
   log_fail "Step 9: 1-Click Cluster Reset Controller"
   exit 1
 fi
 
-log_ok "GET /api/actor/attendee-01 confirmed actor state is SUSPENDED"
+log_ok "GET /api/actor/${TARGET_ACTOR_ID} confirmed actor state is SUSPENDED"
 log_pass "Step 9: 1-Click Cluster Reset Controller Verified"
 
 printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
