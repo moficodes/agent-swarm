@@ -541,9 +541,11 @@ func TestGeminiClient_ConfigurationAndFallback(t *testing.T) {
 		for _, wantTool := range expectedTools {
 			found := false
 			for _, tool := range tools {
-				if tool.Name == wantTool {
-					found = true
-					break
+				for _, fn := range tool.FunctionDeclarations {
+					if fn.Name == wantTool {
+						found = true
+						break
+					}
 				}
 			}
 			if !found {
@@ -553,7 +555,9 @@ func TestGeminiClient_ConfigurationAndFallback(t *testing.T) {
 	})
 
 	t.Run("fallback to MockEngine when API key is empty", func(t *testing.T) {
-		c := server.NewGeminiClient()
+		t.Setenv("PROJECT_ID", "")
+		t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+		c := server.NewGeminiClient(server.WithProject(""))
 		msg, err := c.GenerateContent(context.Background(), "", nil, "Analyze anomalies")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -940,7 +944,7 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 }
 
 func TestGeminiClient_PreventDuplicateUserPrompt(t *testing.T) {
-	var capturedContents []server.Content
+	var capturedContents []*server.Content
 	var mu sync.Mutex
 
 	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1020,7 +1024,7 @@ func TestGeminiClient_PreventDuplicateUserPrompt(t *testing.T) {
 }
 
 func TestGeminiClient_ConsecutiveSameRoleHistoryMerging(t *testing.T) {
-	var capturedContents []server.Content
+	var capturedContents []*server.Content
 	var mu sync.Mutex
 
 	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -15,9 +15,7 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -27,74 +25,42 @@ import (
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload/internal/engine"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"google.golang.org/genai"
 )
 
 const (
-	defaultGeminiModel   = "gemini-2.5-flash"
-	defaultGeminiBaseURL = "https://generativelanguage.googleapis.com"
+	defaultGeminiModel = "gemini-2.5-flash"
 )
-
-// FunctionDeclaration defines a tool/function declared to the Gemini model.
-type FunctionDeclaration struct {
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	Parameters  *Schema `json:"parameters,omitempty"`
-}
-
-// Schema defines JSON Schema for tool parameters.
-type Schema struct {
-	Type        string             `json:"type"`
-	Properties  map[string]*Schema `json:"properties,omitempty"`
-	Required    []string           `json:"required,omitempty"`
-	Description string             `json:"description,omitempty"`
-}
-
-// Tool defines tools exposed to the Gemini model.
-type Tool struct {
-	FunctionDeclarations []FunctionDeclaration `json:"functionDeclarations,omitempty"`
-}
 
 // GenerateContentRequest represents the payload dispatched to generateContent.
 type GenerateContentRequest struct {
-	Contents []Content `json:"contents"`
-	Tools    []Tool    `json:"tools,omitempty"`
+	Contents []*genai.Content `json:"contents"`
+	Tools    []*genai.Tool    `json:"tools,omitempty"`
 }
 
-// Content represents a multi-turn conversation turn for Gemini.
-type Content struct {
-	Role  string `json:"role,omitempty"`
-	Parts []Part `json:"parts"`
+// Content is an alias for genai.Content.
+type Content = genai.Content
+
+// Part is an alias for genai.Part.
+type Part = genai.Part
+
+// Model returns the configured Gemini model name.
+func (c *GeminiClient) Model() string {
+	return c.model
 }
 
-// Part represents a component of a message turn.
-type Part struct {
-	Text             string            `json:"text,omitempty"`
-	FunctionCall     *FunctionCall     `json:"functionCall,omitempty"`
-	FunctionResponse *FunctionResponse `json:"functionResponse,omitempty"`
+// Project returns the configured GCP project ID for Vertex AI.
+func (c *GeminiClient) Project() string {
+	return c.project
 }
 
-// FunctionCall describes an invocation proposed by the model.
-type FunctionCall struct {
-	Name string         `json:"name"`
-	Args map[string]any `json:"args,omitempty"`
+// Location returns the configured GCP location for Vertex AI.
+func (c *GeminiClient) Location() string {
+	return c.location
 }
 
-// FunctionResponse describes the output of a tool invocation.
-type FunctionResponse struct {
-	Name     string         `json:"name"`
-	Response map[string]any `json:"response"`
-}
-
-// GenerateContentResponse represents the REST API response from Gemini.
-type GenerateContentResponse struct {
-	Candidates []Candidate `json:"candidates,omitempty"`
-}
-
-// Candidate represents a candidate output from the model.
-type Candidate struct {
-	Content      Content `json:"content"`
-	FinishReason string  `json:"finishReason,omitempty"`
-}
+// ResearchDataHandler defines a handler returning telemetry/research metrics for fetch_research_data.
+type ResearchDataHandler func(topic string) map[string]any
 
 // GeminiClientOption configures GeminiClient.
 type GeminiClientOption func(*GeminiClient)
@@ -108,7 +74,7 @@ func WithModel(model string) GeminiClientOption {
 	}
 }
 
-// WithBaseURL sets the base URL for Gemini REST requests.
+// WithBaseURL sets the base URL for Gemini requests.
 func WithBaseURL(baseURL string) GeminiClientOption {
 	return func(c *GeminiClient) {
 		if baseURL != "" {
@@ -117,7 +83,7 @@ func WithBaseURL(baseURL string) GeminiClientOption {
 	}
 }
 
-// WithHTTPClient sets the HTTP client used for REST requests.
+// WithHTTPClient sets the HTTP client used for requests.
 func WithHTTPClient(client *http.Client) GeminiClientOption {
 	return func(c *GeminiClient) {
 		if client != nil {
@@ -135,9 +101,6 @@ func WithGeminiMockEngine(m *engine.MockEngine) GeminiClientOption {
 	}
 }
 
-// ResearchDataHandler defines a handler returning telemetry/research metrics for fetch_research_data.
-type ResearchDataHandler func(topic string) map[string]any
-
 // WithResearchDataHandler sets a custom handler for fetch_research_data.
 func WithResearchDataHandler(handler ResearchDataHandler) GeminiClientOption {
 	return func(c *GeminiClient) {
@@ -147,9 +110,26 @@ func WithResearchDataHandler(handler ResearchDataHandler) GeminiClientOption {
 	}
 }
 
-// GeminiClient communicates with the Gemini REST API with automated fallback to MockEngine.
+// WithProject sets the GCP Project ID for Vertex AI.
+func WithProject(project string) GeminiClientOption {
+	return func(c *GeminiClient) {
+		c.project = project
+	}
+}
+
+// WithLocation sets the GCP location/region for Vertex AI.
+func WithLocation(location string) GeminiClientOption {
+	return func(c *GeminiClient) {
+		c.location = location
+	}
+}
+
+// GeminiClient communicates with Google GenAI / Vertex AI using official google.golang.org/genai SDK,
+// with automated GKE Workload Identity authentication and fallback to MockEngine.
 type GeminiClient struct {
 	model               string
+	project             string
+	location            string
 	baseURL             string
 	httpClient          *http.Client
 	mockEngine          *engine.MockEngine
@@ -163,12 +143,36 @@ func NewGeminiClient(opts ...GeminiClientOption) *GeminiClient {
 		model = defaultGeminiModel
 	}
 
+	project := os.Getenv("PROJECT_ID")
+	if project == "" {
+		project = os.Getenv("GOOGLE_CLOUD_PROJECT")
+	}
+	if project == "" {
+		project = "mofilabs"
+	}
+
+	location := os.Getenv("GCE_REGION")
+	if location == "" {
+		location = os.Getenv("GOOGLE_CLOUD_LOCATION")
+	}
+	if location == "" {
+		location = "us-west1"
+	}
+
 	c := &GeminiClient{
-		model:               model,
-		baseURL:             defaultGeminiBaseURL,
-		httpClient:          &http.Client{Timeout: 30 * time.Second},
-		mockEngine:          engine.NewMockEngine(),
-		researchDataHandler: executeFetchResearchData,
+		model:      model,
+		project:    project,
+		location:   location,
+		mockEngine: engine.NewMockEngine(),
+		researchDataHandler: func(topic string) map[string]any {
+			return map[string]any{
+				"status":      "success",
+				"source":      "system_telemetry",
+				"telemetry":   []int{12, 14, 15, 13, 98, 12, 11, 14, 88, 13},
+				"data_points": []int{12, 14, 15, 13, 98, 12, 11, 14, 88, 13},
+				"message":     "Telemetry data retrieved successfully for analysis.",
+			}
+		},
 	}
 
 	for _, opt := range opts {
@@ -178,124 +182,89 @@ func NewGeminiClient(opts ...GeminiClientOption) *GeminiClient {
 	return c
 }
 
-// Model returns the configured model identifier.
-func (c *GeminiClient) Model() string {
-	return c.model
-}
-
-// ToolDeclarations returns the standard tool definitions for conference agents.
-func (c *GeminiClient) ToolDeclarations() []FunctionDeclaration {
-	return []FunctionDeclaration{
+// ToolDeclarations returns the declared tools for the Gemini model.
+func (c *GeminiClient) ToolDeclarations() []*genai.Tool {
+	return []*genai.Tool{
 		{
-			Name:        "request_human_approval",
-			Description: "Request human operator authorization before executing code or high-risk actions.",
-			Parameters: &Schema{
-				Type: "OBJECT",
-				Properties: map[string]*Schema{
-					"summary": {
-						Type:        "STRING",
-						Description: "Concise summary of the proposed code execution or task.",
-					},
-					"code": {
-						Type:        "STRING",
-						Description: "The exact script or code snippet to execute.",
-					},
-					"language": {
-						Type:        "STRING",
-						Description: "Programming language (e.g. python, bash, sh).",
-					},
-					"risk_level": {
-						Type:        "STRING",
-						Description: "Risk assessment level (LOW, MEDIUM, HIGH).",
+			FunctionDeclarations: []*genai.FunctionDeclaration{
+				{
+					Name:        "request_human_approval",
+					Description: "Request human approval before executing any code, script, or state-changing action.",
+					Parameters: &genai.Schema{
+						Type: genai.TypeObject,
+						Properties: map[string]*genai.Schema{
+							"summary": {
+								Type:        genai.TypeString,
+								Description: "A clear, concise summary of the proposed action.",
+							},
+							"code": {
+								Type:        genai.TypeString,
+								Description: "The exact script or code snippet to execute.",
+							},
+							"language": {
+								Type:        genai.TypeString,
+								Description: "Programming language (e.g. python, bash, sh).",
+							},
+							"risk_level": {
+								Type:        genai.TypeString,
+								Description: "Risk assessment level (LOW, MEDIUM, HIGH).",
+							},
+						},
+						Required: []string{"summary", "code"},
 					},
 				},
-				Required: []string{"summary", "code"},
-			},
-		},
-		{
-			Name:        "execute_sandbox_code",
-			Description: "Execute a script inside the isolated gVisor sandbox container workspace. Requires human operator approval before execution.",
-			Parameters: &Schema{
-				Type: "OBJECT",
-				Properties: map[string]*Schema{
-					"language": {
-						Type:        "STRING",
-						Description: "Target programming language (python, bash, sh).",
-					},
-					"code": {
-						Type:        "STRING",
-						Description: "Source code to run inside sandbox.",
-					},
-					"summary": {
-						Type:        "STRING",
-						Description: "Optional concise summary of the proposed code execution.",
-					},
-				},
-				Required: []string{"language", "code"},
-			},
-		},
-		{
-			Name:        "fetch_research_data",
-			Description: "Fetch telemetry metrics or research samples for analysis.",
-			Parameters: &Schema{
-				Type: "OBJECT",
-				Properties: map[string]*Schema{
-					"topic": {
-						Type:        "STRING",
-						Description: "Topic or system metric source to fetch.",
-					},
-					"query": {
-						Type:        "STRING",
-						Description: "Alternative query string for telemetry search.",
+				{
+					Name:        "execute_sandbox_code",
+					Description: "Execute a script inside the isolated gVisor sandbox container workspace. Requires human operator approval before execution.",
+					Parameters: &genai.Schema{
+						Type: genai.TypeObject,
+						Properties: map[string]*genai.Schema{
+							"language": {
+								Type:        genai.TypeString,
+								Description: "Target programming language (python, bash, sh).",
+							},
+							"code": {
+								Type:        genai.TypeString,
+								Description: "Source code to run inside sandbox.",
+							},
+							"summary": {
+								Type:        genai.TypeString,
+								Description: "Optional concise summary of the proposed code execution.",
+							},
+						},
+						Required: []string{"language", "code"},
 					},
 				},
-				Required: []string{"topic"},
+				{
+					Name:        "fetch_research_data",
+					Description: "Fetch telemetry metrics or research samples for analysis.",
+					Parameters: &genai.Schema{
+						Type: genai.TypeObject,
+						Properties: map[string]*genai.Schema{
+							"topic": {
+								Type:        genai.TypeString,
+								Description: "Topic or system metric source to fetch.",
+							},
+						},
+						Required: []string{"topic"},
+					},
+				},
 			},
 		},
 	}
 }
 
-// executeFetchResearchData returns realistic telemetry metrics and anomaly samples.
-func executeFetchResearchData(topic string) map[string]any {
-	if topic == "" {
-		topic = "cluster_telemetry"
-	}
-	return map[string]any{
-		"topic":  topic,
-		"status": "success",
-		"telemetry": map[string]any{
-			"cpu_usage_percent": 87.4,
-			"memory_usage_mb":   1450,
-			"active_actors":     12,
-			"parked_requests":   3,
-			"worker_count":      4,
-			"latency_p99_ms":    42.8,
-		},
-		"anomaly_samples": []map[string]any{
-			{"metric": "cpu_spike", "timestamp": "2026-09-20T10:00:00Z", "value": 98.2, "expected": 45.0, "severity": "HIGH"},
-			{"metric": "memory_leak", "timestamp": "2026-09-20T10:01:00Z", "value": 1420.0, "expected": 512.0, "severity": "HIGH"},
-			{"metric": "network_egress", "timestamp": "2026-09-20T10:02:00Z", "value": 850.0, "expected": 120.0, "severity": "MEDIUM"},
-		},
-		"raw_samples":  []float64{12.4, 14.1, 15.0, 98.2, 12.1, 88.5, 13.0},
-		"sample_count": 7,
-	}
-}
-
-// ExecuteFetchResearchData calls the configured research data handler for the given topic.
+// ExecuteFetchResearchData calls the registered research data handler.
 func (c *GeminiClient) ExecuteFetchResearchData(topic string) map[string]any {
 	if c.researchDataHandler != nil {
 		return c.researchDataHandler(topic)
 	}
-	return executeFetchResearchData(topic)
+	return map[string]any{"status": "ok", "topic": topic}
 }
 
-// BuildContents constructs alternating user and model Content turns from chat history and prompt.
-// Consecutive turns of the same role are merged into a single Content with multiple Parts.
-func (c *GeminiClient) BuildContents(history []types.ChatMessage, prompt string) []Content {
-	var rawItems []struct {
-		role string
-		text string
-	}
+// BuildContents prepares alternating user and model contents for the GenAI SDK.
+func BuildContents(history []types.ChatMessage, prompt string) []*genai.Content {
+	var contents []*genai.Content
 
 	for _, item := range history {
 		if item.Content == "" {
@@ -305,35 +274,36 @@ func (c *GeminiClient) BuildContents(history []types.ChatMessage, prompt string)
 		if item.Sender == types.SenderAssistant {
 			role = "model"
 		}
-		rawItems = append(rawItems, struct {
-			role string
-			text string
-		}{role: role, text: item.Content})
+
+		if len(contents) > 0 && contents[len(contents)-1].Role == role {
+			contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, &genai.Part{Text: item.Content})
+		} else {
+			contents = append(contents, &genai.Content{
+				Role: role,
+				Parts: []*genai.Part{
+					{Text: item.Content},
+				},
+			})
+		}
 	}
 
-	promptAlreadyAtEnd := len(history) > 0 &&
-		history[len(history)-1].Sender == types.SenderUser &&
-		history[len(history)-1].Content == prompt
+	promptAlreadyAtEnd := false
+	if len(history) > 0 {
+		lastMsg := history[len(history)-1]
+		if lastMsg.Sender == types.SenderUser && lastMsg.Content == prompt {
+			promptAlreadyAtEnd = true
+		}
+	}
 
 	if prompt != "" && !promptAlreadyAtEnd {
-		rawItems = append(rawItems, struct {
-			role string
-			text string
-		}{role: "user", text: prompt})
-	}
-
-	if len(rawItems) == 0 {
-		return nil
-	}
-
-	var contents []Content
-	for _, item := range rawItems {
-		if len(contents) > 0 && contents[len(contents)-1].Role == item.role {
-			contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, Part{Text: item.text})
+		if len(contents) > 0 && contents[len(contents)-1].Role == "user" {
+			contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, &genai.Part{Text: prompt})
 		} else {
-			contents = append(contents, Content{
-				Role:  item.role,
-				Parts: []Part{{Text: item.text}},
+			contents = append(contents, &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: prompt},
+				},
 			})
 		}
 	}
@@ -341,98 +311,67 @@ func (c *GeminiClient) BuildContents(history []types.ChatMessage, prompt string)
 	return contents
 }
 
-// GenerateContent issues a prompt to the Gemini API or seamlessly delegates to MockEngine on error or missing key.
+// GenerateContent calls Vertex AI using Workload Identity, or Gemini Developer API if an API key is provided,
+// falling back to MockEngine if unavailable or on error.
 func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, history []types.ChatMessage, prompt string) (*types.ChatMessage, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 
-	if apiKey == "" {
+	// Prepare SDK client config
+	cfg := &genai.ClientConfig{}
+	if c.baseURL != "" {
+		cfg.HTTPOptions.BaseURL = c.baseURL
+	}
+	if apiKey != "" {
+		cfg.Backend = genai.BackendGeminiAPI
+		cfg.APIKey = apiKey
+	} else if c.project != "" {
+		// Use Vertex AI with GKE Workload Identity / ADC
+		cfg.Backend = genai.BackendVertexAI
+		cfg.Project = c.project
+		cfg.Location = c.location
+	} else {
 		return c.mockEngine.GenerateTurn(prompt), nil
 	}
 
-	contents := c.BuildContents(history, prompt)
-	if len(contents) == 0 {
+	if c.httpClient != nil {
+		cfg.HTTPClient = c.httpClient
+	}
+
+	sdkClient, err := genai.NewClient(ctx, cfg)
+	if err != nil {
+		log.Printf("[Gemini] Fallback to MockEngine: failed to initialize SDK client: %v", err)
 		return c.mockEngine.GenerateTurn(prompt), nil
 	}
 
-	endpoint := fmt.Sprintf("%s/v1beta/models/%s:generateContent", c.baseURL, c.model)
+	contents := BuildContents(history, prompt)
+	genConfig := &genai.GenerateContentConfig{
+		Tools: c.ToolDeclarations(),
+	}
 
-	const maxTurns = 3
+	// Multi-turn tool execution loop (max 3 turns)
+	maxTurns := 3
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 
-		reqBody := GenerateContentRequest{
-			Contents: contents,
-			Tools: []Tool{
-				{
-					FunctionDeclarations: c.ToolDeclarations(),
-				},
-			},
-		}
-
-		jsonBytes, err := json.Marshal(reqBody)
+		genResp, err := sdkClient.Models.GenerateContent(ctx, c.model, contents, genConfig)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			log.Printf("[Gemini] Fallback to MockEngine: %v", err)
+			log.Printf("[Gemini] Fallback to MockEngine: GenerateContent error: %v", err)
 			return c.mockEngine.GenerateTurn(prompt), nil
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBytes))
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			log.Printf("[Gemini] Fallback to MockEngine: %v", err)
-			return c.mockEngine.GenerateTurn(prompt), nil
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-goog-api-key", apiKey)
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			log.Printf("[Gemini] Fallback to MockEngine: %v", err)
-			return c.mockEngine.GenerateTurn(prompt), nil
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			_ = resp.Body.Close()
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			log.Printf("[Gemini] Fallback to MockEngine: non-200 HTTP status %d", resp.StatusCode)
-			return c.mockEngine.GenerateTurn(prompt), nil
-		}
-
-		var genResp GenerateContentResponse
-		decodeErr := json.NewDecoder(resp.Body).Decode(&genResp)
-		_ = resp.Body.Close()
-		if decodeErr != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			log.Printf("[Gemini] Fallback to MockEngine: decode error %v", decodeErr)
-			return c.mockEngine.GenerateTurn(prompt), nil
-		}
-		if len(genResp.Candidates) == 0 {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			log.Printf("[Gemini] Fallback to MockEngine: no candidates in response")
+		if len(genResp.Candidates) == 0 || genResp.Candidates[0].Content == nil {
+			log.Printf("[Gemini] Fallback to MockEngine: empty candidates in response")
 			return c.mockEngine.GenerateTurn(prompt), nil
 		}
 
 		cand := genResp.Candidates[0]
 		var textBuilder strings.Builder
 		var approvalReq *types.ApprovalRequest
-		var fetchCall *FunctionCall
+		var toolCallsToExecute []*genai.FunctionCall
 
 		for _, part := range cand.Content.Parts {
 			if part.Text != "" {
@@ -441,16 +380,20 @@ func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, histo
 			if part.FunctionCall != nil {
 				switch part.FunctionCall.Name {
 				case "request_human_approval":
-					summary, _ := part.FunctionCall.Args["summary"].(string)
-					code, _ := part.FunctionCall.Args["code"].(string)
-					lang, _ := part.FunctionCall.Args["language"].(string)
+					args := part.FunctionCall.Args
+					summary, _ := args["summary"].(string)
+					code, _ := args["code"].(string)
+					lang, _ := args["language"].(string)
+					riskStr, _ := args["risk_level"].(string)
+
 					if lang == "" {
 						lang = "python"
 					}
-					risk, _ := part.FunctionCall.Args["risk_level"].(string)
-					riskLevel := types.RiskHigh
-					if risk != "" {
-						riskLevel = types.RiskLevel(risk)
+					risk := types.RiskHigh
+					if strings.EqualFold(riskStr, "LOW") {
+						risk = types.RiskLow
+					} else if strings.EqualFold(riskStr, "MEDIUM") {
+						risk = types.RiskMedium
 					}
 
 					approvalReq = &types.ApprovalRequest{
@@ -458,19 +401,19 @@ func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, histo
 						Summary:    summary,
 						Code:       code,
 						Language:   lang,
-						RiskLevel:  riskLevel,
+						RiskLevel:  risk,
 					}
 				case "execute_sandbox_code":
-					code, _ := part.FunctionCall.Args["code"].(string)
-					lang, _ := part.FunctionCall.Args["language"].(string)
+					args := part.FunctionCall.Args
+					code, _ := args["code"].(string)
+					lang, _ := args["language"].(string)
+					summary, _ := args["summary"].(string)
+					if summary == "" {
+						summary = "Execute sandbox code in gVisor container"
+					}
 					if lang == "" {
 						lang = "python"
 					}
-					summary, _ := part.FunctionCall.Args["summary"].(string)
-					if summary == "" {
-						summary = fmt.Sprintf("Execute %s script in sandbox", lang)
-					}
-
 					approvalReq = &types.ApprovalRequest{
 						ApprovalID: fmt.Sprintf("app-%d", time.Now().UnixNano()),
 						Summary:    summary,
@@ -479,20 +422,18 @@ func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, histo
 						RiskLevel:  types.RiskHigh,
 					}
 				case "fetch_research_data":
-					fetchCall = part.FunctionCall
+					toolCallsToExecute = append(toolCallsToExecute, part.FunctionCall)
 				}
 			}
 		}
 
-		textContent := textBuilder.String()
-
-		// If human approval was requested, return immediately.
 		if approvalReq != nil {
+			textContent := textBuilder.String()
 			if textContent == "" {
-				textContent = "I analyzed your request and prepared the following code execution. Please review and authorize:"
+				textContent = fmt.Sprintf("I analyzed your request. To proceed, I need your approval to execute this %s script in the sandbox:", approvalReq.Language)
 			}
 			return &types.ChatMessage{
-				ID:        fmt.Sprintf("gemini-%d", time.Now().UnixNano()),
+				ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
 				Sender:    types.SenderAssistant,
 				Content:   textContent,
 				Timestamp: time.Now().Unix(),
@@ -500,51 +441,41 @@ func (c *GeminiClient) GenerateContent(ctx context.Context, apiKey string, histo
 			}, nil
 		}
 
-		// If fetch_research_data was requested, execute tool and continue multi-turn loop.
-		if fetchCall != nil {
-			topic := ""
-			if t, ok := fetchCall.Args["topic"].(string); ok && t != "" {
-				topic = t
-			} else if q, ok := fetchCall.Args["query"].(string); ok {
-				topic = q
-			}
+		if len(toolCallsToExecute) > 0 {
+			// Append model turn to conversation contents
+			contents = append(contents, cand.Content)
 
-			toolResult := c.ExecuteFetchResearchData(topic)
-
-			modelTurn := cand.Content
-			if modelTurn.Role == "" {
-				modelTurn.Role = "model"
-			}
-			contents = append(contents, modelTurn)
-
-			contents = append(contents, Content{
-				Role: "function",
-				Parts: []Part{
-					{
-						FunctionResponse: &FunctionResponse{
-							Name:     fetchCall.Name,
-							Response: toolResult,
-						},
+			// Execute tools and append function responses
+			var funcResponseParts []*genai.Part
+			for _, call := range toolCallsToExecute {
+				topic, _ := call.Args["topic"].(string)
+				toolResult := c.ExecuteFetchResearchData(topic)
+				funcResponseParts = append(funcResponseParts, &genai.Part{
+					FunctionResponse: &genai.FunctionResponse{
+						Name:     call.Name,
+						Response: toolResult,
 					},
-				},
+				})
+			}
+
+			contents = append(contents, &genai.Content{
+				Role:  "user",
+				Parts: funcResponseParts,
 			})
 			continue
 		}
 
-		// If Gemini yielded text without tool calls, return it.
+		textContent := textBuilder.String()
 		if textContent != "" {
 			return &types.ChatMessage{
-				ID:        fmt.Sprintf("gemini-%d", time.Now().UnixNano()),
+				ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
 				Sender:    types.SenderAssistant,
 				Content:   textContent,
 				Timestamp: time.Now().Unix(),
 			}, nil
 		}
-
-		log.Printf("[Gemini] Fallback to MockEngine: empty text response")
-		return c.mockEngine.GenerateTurn(prompt), nil
 	}
 
-	log.Printf("[Gemini] Fallback to MockEngine: max turns reached without response")
+	log.Printf("[Gemini] Fallback to MockEngine: reached max turns without completion")
 	return c.mockEngine.GenerateTurn(prompt), nil
 }
