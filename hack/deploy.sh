@@ -35,8 +35,23 @@ demo-conference_deploy() {
   local current_args
   current_args="$(run_kubectl get deployment atenet-router -n ate-system -o jsonpath='{.spec.template.spec.containers[?(@.name=="atenet-router")].args}' 2>/dev/null || true)"
   if [[ "${current_args}" != *"--parked-request-budget=60s"* ]]; then
-    run_kubectl patch deployment atenet-router -n ate-system --type=json \
-      -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--parked-request-budget=60s"}]' 2>/dev/null || true
+    if [[ "${current_args}" == *"--parked-request-budget=5s"* ]]; then
+      local idx
+      if command -v jq &>/dev/null; then
+        idx="$(run_kubectl get deployment atenet-router -n ate-system -o json 2>/dev/null \
+          | jq '.spec.template.spec.containers[] | select(.name=="atenet-router") | .args | index("--parked-request-budget=5s")' 2>/dev/null || true)"
+      fi
+      if [[ -n "${idx:-}" && "${idx}" != "null" ]]; then
+        run_kubectl patch deployment atenet-router -n ate-system --type=json \
+          -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args/${idx}\",\"value\":\"--parked-request-budget=60s\"}]" 2>/dev/null || true
+      else
+        run_kubectl patch deployment atenet-router -n ate-system --type=json \
+          -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--parked-request-budget=60s"}]' 2>/dev/null || true
+      fi
+    else
+      run_kubectl patch deployment atenet-router -n ate-system --type=json \
+        -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--parked-request-budget=60s"}]' 2>/dev/null || true
+    fi
     run_kubectl rollout status deployment/atenet-router -n ate-system --timeout=60s 2>/dev/null || true
   fi
 
@@ -45,24 +60,44 @@ demo-conference_deploy() {
     demos/conference/conference-template.yaml.tmpl conf-agent
 
   log_step "Creating 50 attendee actors in ate-demo-conf..."
+  local i actor err_out
   for i in $(seq 1 50); do
-    local actor
     actor=$(printf "attendee-%02d" "${i}")
-    run_kubectl_ate create actor "${actor}" -a ate-demo-conf --template conf-agent 2>/dev/null || true
+    if ! err_out="$(run_kubectl_ate create actor "${actor}" -a ate-demo-conf --template conf-agent 2>&1)"; then
+      if [[ "${err_out}" == *"AlreadyExists"* || "${err_out}" == *"already exists"* ]] || run_kubectl_ate get actor "${actor}" -a ate-demo-conf >/dev/null 2>&1; then
+        :
+      else
+        echo "error: failed to create actor ${actor}: ${err_out}" >&2
+        exit 1
+      fi
+    fi
   done
   log_step "Successfully deployed 50 attendee actors in ate-demo-conf on 2-worker pool."
 }
 
 demo-conference_delete() {
   log_step "demo-conference_delete"
-  log_step "Deleting 50 attendee actors in ate-demo-conf..."
-  for i in $(seq 1 50); do
-    local actor
-    actor=$(printf "attendee-%02d" "${i}")
-    run_kubectl_ate delete actor "${actor}" -a ate-demo-conf 2>/dev/null || true
-  done
   delete_substrate_demo render_demo_manifest \
     demos/conference/conference.yaml.tmpl ate-demo-conf conf-agent
+
+  local current_args
+  current_args="$(run_kubectl get deployment atenet-router -n ate-system -o jsonpath='{.spec.template.spec.containers[?(@.name=="atenet-router")].args}' 2>/dev/null || true)"
+  if [[ "${current_args}" == *"--parked-request-budget=60s"* ]]; then
+    log_step "Restoring atenet-router --parked-request-budget=5s..."
+    local idx
+    if command -v jq &>/dev/null; then
+      idx="$(run_kubectl get deployment atenet-router -n ate-system -o json 2>/dev/null \
+        | jq '.spec.template.spec.containers[] | select(.name=="atenet-router") | .args | index("--parked-request-budget=60s")' 2>/dev/null || true)"
+    fi
+    if [[ -n "${idx:-}" && "${idx}" != "null" ]]; then
+      run_kubectl patch deployment atenet-router -n ate-system --type=json \
+        -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args/${idx}\",\"value\":\"--parked-request-budget=5s\"}]" 2>/dev/null || true
+    else
+      run_kubectl patch deployment atenet-router -n ate-system --type=json \
+        -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--parked-request-budget=5s"}]' 2>/dev/null || true
+    fi
+    run_kubectl rollout status deployment/atenet-router -n ate-system --timeout=60s 2>/dev/null || true
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
