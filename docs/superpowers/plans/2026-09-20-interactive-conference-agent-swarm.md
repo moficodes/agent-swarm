@@ -155,10 +155,10 @@ const (
 type ActorLifecycleState string
 
 const (
-	StateSuspended ActorLifecycleState = "SUSPENDED"
-	StateParked    ActorLifecycleState = "PARKED"
-	StateRunning   ActorLifecycleState = "RUNNING"
-	StateApproving ActorLifecycleState = "AWAITING_APPROVAL"
+	StateSuspended        ActorLifecycleState = "SUSPENDED"
+	StateParked           ActorLifecycleState = "PARKED"
+	StateRunning          ActorLifecycleState = "RUNNING"
+	StateAwaitingApproval ActorLifecycleState = "AWAITING_APPROVAL"
 )
 
 type ApprovalRequest struct {
@@ -197,10 +197,10 @@ type ChatRequest struct {
 }
 
 type ExecutionResult struct {
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	ExitCode int    `json:"exit_code"`
-	Duration int64  `json:"duration_ms"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	ExitCode   int    `json:"exit_code"`
+	DurationMs int64  `json:"duration_ms"`
 }
 
 type StageTelemetry struct {
@@ -354,9 +354,9 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 	}
 
 	return &types.ExecutionResult{
-		Stdout:   string(out),
-		ExitCode: exitCode,
-		Duration: duration,
+		Stdout:     string(out),
+		ExitCode:   exitCode,
+		DurationMs: duration,
 	}, nil
 }
 ```
@@ -658,7 +658,7 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		output = fmt.Sprintf("Execution error: %v", err)
 	} else {
-		output = fmt.Sprintf("Execution completed in %dms (exit code %d):\n\n%s", res.Duration, res.ExitCode, res.Stdout)
+		output = fmt.Sprintf("Execution completed in %dms (exit code %d):\n\n%s", res.DurationMs, res.ExitCode, res.Stdout)
 	}
 
 	msg := types.ChatMessage{
