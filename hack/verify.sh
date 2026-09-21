@@ -141,11 +141,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-TMP_DIR=""
+TMP_DIR="$(mktemp -d /tmp/ate-conf-verify.XXXXXX)"
+BURST_DIR="${TMP_DIR}/burst"
 SPAWNED_PIDS=()
+BURST_PIDS=()
 
 cleanup() {
   local exit_code=$?
+  trap - EXIT INT TERM
   if [[ ${#SPAWNED_PIDS[@]} -gt 0 ]]; then
     printf "\nShutting down locally spawned mock processes (%s)...\n" "${SPAWNED_PIDS[*]}"
     kill "${SPAWNED_PIDS[@]}" 2>/dev/null || true
@@ -153,9 +156,19 @@ cleanup() {
     kill -9 "${SPAWNED_PIDS[@]}" 2>/dev/null || true
     wait "${SPAWNED_PIDS[@]}" 2>/dev/null || true
   fi
-  if [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]]; then
-    rm -rf "${TMP_DIR}"
+  if [[ ${#BURST_PIDS[@]} -gt 0 ]]; then
+    for pid in "${BURST_PIDS[@]}"; do
+      pkill -P "${pid}" 2>/dev/null || true
+    done
+    kill "${BURST_PIDS[@]}" 2>/dev/null || true
+    sleep 0.1
+    for pid in "${BURST_PIDS[@]}"; do
+      pkill -9 -P "${pid}" 2>/dev/null || true
+    done
+    kill -9 "${BURST_PIDS[@]}" 2>/dev/null || true
+    wait "${BURST_PIDS[@]}" 2>/dev/null || true
   fi
+  rm -rf "${TMP_DIR}"
   exit "${exit_code}"
 }
 trap cleanup EXIT INT TERM
@@ -176,15 +189,17 @@ decode_jwt_payload() {
   printf "%s" "${payload}" | (base64 -d 2>/dev/null || base64 -D 2>/dev/null)
 }
 
-printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
-printf "${CLR_BOLD}  Agent Substrate: Conference Demo Automated Verification${CLR_RESET}\n"
-printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
-printf "  Gateway URL : %s\n" "${GATEWAY_URL}"
-printf "  Router URL  : %s\n" "${ROUTER_URL}"
-printf "  Status URL  : %s\n" "${STATUS_URL}"
-printf "  Concurrency : %s\n" "${CONCURRENCY}"
-printf "  Mock Mode   : %s\n" "${MOCK_MODE}"
-printf "${CLR_CYAN}========================================================================${CLR_RESET}\n\n"
+print_banner() {
+  printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
+  printf "${CLR_BOLD}  Agent Substrate: Conference Demo Automated Verification${CLR_RESET}\n"
+  printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
+  printf "  Gateway URL : %s\n" "${GATEWAY_URL}"
+  printf "  Router URL  : %s\n" "${ROUTER_URL}"
+  printf "  Status URL  : %s\n" "${STATUS_URL}"
+  printf "  Concurrency : %s\n" "${CONCURRENCY}"
+  printf "  Mock Mode   : %s\n" "${MOCK_MODE}"
+  printf "${CLR_CYAN}========================================================================${CLR_RESET}\n\n"
+}
 
 # Verify prerequisites
 if ! command -v curl &>/dev/null; then
@@ -194,6 +209,16 @@ fi
 if ! command -v jq &>/dev/null; then
   log_err "Required dependency 'jq' is not installed."
   exit 1
+fi
+if [[ "${MOCK_MODE}" == "true" ]]; then
+  if ! command -v go &>/dev/null; then
+    log_err "Required dependency 'go' is not installed (required for --mock-mode)."
+    exit 1
+  fi
+  if ! command -v python3 &>/dev/null; then
+    log_err "Required dependency 'python3' is not installed (required for --mock-mode)."
+    exit 1
+  fi
 fi
 
 # Check if conference edge gateway is reachable, or launch mock environment if in mock mode
@@ -206,7 +231,6 @@ fi
 if [[ "${IS_GATEWAY_REACHABLE}" != "true" ]]; then
   if [[ "${MOCK_MODE}" == "true" ]]; then
     log_info "Gateway at ${GATEWAY_URL} not detected. Initializing standalone mock environment..."
-    TMP_DIR="$(mktemp -d /tmp/ate-conf-verify.XXXXXX)"
 
     log_info "Compiling conference binaries into temporary workspace..."
     go build -o "${TMP_DIR}/conf-workload" ./demos/conference/cmd/conf-workload
@@ -339,6 +363,9 @@ PYEOF
   fi
 fi
 
+# Print configuration banner after URLs are finalized
+print_banner
+
 # =========================================================================
 # Step 1: Health & Static UI Assets
 # =========================================================================
@@ -396,7 +423,7 @@ if [[ "${JWT_SUB}" != "${ATTENDEE_ID}" ]]; then
   exit 1
 fi
 
-if [[ -z "${JWT_EXP}" || "${JWT_EXP}" -le "${NOW_TS}" ]]; then
+if [[ -z "${JWT_EXP}" || "${JWT_EXP}" == "null" || "${JWT_EXP}" -le "${NOW_TS}" ]]; then
   log_err "Token expired or invalid exp: token.exp=${JWT_EXP}, now=${NOW_TS}"
   log_fail "Step 2: Ephemeral Session Minting"
   exit 1
@@ -476,7 +503,6 @@ log_pass "Step 4: Turn 2 Approval & Sandbox Execution Verified"
 # Step 5: Audience Burst & Request Parking
 # =========================================================================
 log_info "Step 5: Audience Burst & Request Parking (${CONCURRENCY} concurrent requests)"
-BURST_DIR="${TMP_DIR:-/tmp}/burst_$(date +%s)"
 mkdir -p "${BURST_DIR}"
 
 BURST_PIDS=()
@@ -510,7 +536,10 @@ for _ in $(seq 1 15); do
   sleep 0.04
 done
 
-wait "${BURST_PIDS[@]}"
+if [[ ${#BURST_PIDS[@]} -gt 0 ]]; then
+  wait "${BURST_PIDS[@]}"
+  BURST_PIDS=()
+fi
 
 BURST_FAILURES=0
 BURST_503S=0
@@ -558,7 +587,7 @@ TELEM_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/stage/telemetry")
 
 WORKERS_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.workers | length' 2>/dev/null || echo 0)
 ACTORS_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.actors | length' 2>/dev/null || echo 0)
-PARKED_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.parked_requests' 2>/dev/null || echo -1)
+PARKED_COUNT=$(printf "%s" "${TELEM_RESP}" | jq -r '.parked_requests // -1' 2>/dev/null || echo -1)
 EVENTS_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.recent_events | length' 2>/dev/null || echo 0)
 
 if [[ ${WORKERS_COUNT} -lt 2 ]]; then
@@ -573,8 +602,8 @@ if [[ ${ACTORS_COUNT} -lt 1 ]]; then
   exit 1
 fi
 
-if [[ ${PARKED_COUNT} -lt 0 ]]; then
-  log_err "Missing parked_requests metric in telemetry. Response: ${TELEM_RESP}"
+if ! [[ -n "${PARKED_COUNT}" && "${PARKED_COUNT}" != "null" && "${PARKED_COUNT}" =~ ^[0-9]+$ ]] || [[ ${PARKED_COUNT} -lt 0 ]]; then
+  log_err "Missing or invalid parked_requests metric in telemetry. Response: ${TELEM_RESP}"
   log_fail "Step 6: Telemetry Endpoint"
   exit 1
 fi
