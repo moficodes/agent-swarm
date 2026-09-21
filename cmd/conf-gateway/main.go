@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/substrate/demos/conference/pkg/ai"
 )
 
 //go:embed static/*
@@ -83,6 +84,7 @@ func main() {
 		gateway.WithJWTSecret(cfg.JWTSecret),
 		gateway.WithGeminiAPIKey(cfg.GeminiAPIKey),
 		gateway.WithStaticFS(staticFS),
+		gateway.WithAIClient(ai.NewGeminiClient()),
 	}
 
 	gw := gateway.NewGateway(cfg.RouterURL, cfg.StatusURL, opts...)

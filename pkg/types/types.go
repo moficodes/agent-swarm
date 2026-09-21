@@ -80,6 +80,8 @@ type ApprovalRequest struct {
 type ApprovalResponse struct {
 	ApprovalID string       `json:"approval_id"`
 	Decision   DecisionType `json:"decision"`
+	Code       string       `json:"code,omitempty"`
+	Language   string       `json:"language,omitempty"`
 }
 
 // Validate checks whether the approval response is well-formed.

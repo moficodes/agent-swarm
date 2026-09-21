@@ -40,6 +40,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/agent-substrate/substrate/demos/conference/pkg/ai"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -129,6 +130,15 @@ func WithStatusInterval(d time.Duration) Option {
 	}
 }
 
+// WithAIClient sets the Vertex AI / Gemini client for conversational planning.
+func WithAIClient(c *ai.GeminiClient) Option {
+	return func(g *Gateway) {
+		if c != nil {
+			g.aiClient = c
+		}
+	}
+}
+
 // WithMaxActors sets the maximum number of pre-provisioned actors to cycle through.
 func WithMaxActors(max int) Option {
 	return func(g *Gateway) {
@@ -168,14 +178,17 @@ type Gateway struct {
 	httpClient     *http.Client
 	staticFS       fs.FS
 	maxActors      int
+	aiClient       *ai.GeminiClient
 
-	mux          *http.ServeMux
-	proxy        *httputil.ReverseProxy
-	attendeeSeq  uint64
-	mu           sync.RWMutex
-	activeActors map[string]types.ActorLifecycleState
-	recentEvents []string
-	parkedCount  int
+	mux              *http.ServeMux
+	proxy            *httputil.ReverseProxy
+	attendeeSeq      uint64
+	mu               sync.RWMutex
+	activeActors     map[string]types.ActorLifecycleState
+	pendingApprovals map[string]*types.ApprovalRequest
+	chatHistories    map[string][]types.ChatMessage
+	recentEvents     []string
+	parkedCount      int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -192,10 +205,12 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		suspender:      &commandSuspender{},
 		statusInterval: 500 * time.Millisecond,
 		httpClient:     &http.Client{Timeout: 5 * time.Second},
-		mux:            http.NewServeMux(),
-		activeActors:   make(map[string]types.ActorLifecycleState),
-		recentEvents:   make([]string, 0),
-		maxActors:      50,
+		mux:              http.NewServeMux(),
+		activeActors:     make(map[string]types.ActorLifecycleState),
+		pendingApprovals: make(map[string]*types.ApprovalRequest),
+		chatHistories:    make(map[string][]types.ChatMessage),
+		recentEvents:     make([]string, 0),
+		maxActors:        50,
 	}
 
 	for _, opt := range opts {
@@ -273,8 +288,13 @@ func (g *Gateway) routes() {
 	})
 	g.mux.HandleFunc("/api/session", g.handleSession)
 	g.mux.HandleFunc("/api/stage/telemetry", g.handleTelemetry)
-	g.mux.HandleFunc("/api/chat", g.proxyToActor)
-	g.mux.HandleFunc("/api/approve", g.proxyToActor)
+	if g.aiClient != nil {
+		g.mux.HandleFunc("/api/chat", g.handleChatRequest)
+		g.mux.HandleFunc("/api/approve", g.handleApproveRequest)
+	} else {
+		g.mux.HandleFunc("/api/chat", g.proxyToActor)
+		g.mux.HandleFunc("/api/approve", g.proxyToActor)
+	}
 
 	g.mux.HandleFunc("/chat", g.handleChat)
 	g.mux.HandleFunc("/chat/", g.handleChat)
@@ -458,6 +478,115 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(telem)
+}
+
+func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	attendeeID, err := g.authenticateRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	var req types.ChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	g.mu.Lock()
+	g.activeActors[attendeeID] = types.StateRunning
+	g.addEventLocked(fmt.Sprintf("Attendee %s analyzing prompt with Vertex AI", attendeeID))
+	userMsg := types.ChatMessage{
+		ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
+		Sender:    types.SenderUser,
+		Content:   req.Message,
+		Timestamp: time.Now().Unix(),
+	}
+	g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], userMsg)
+	historyCopy := make([]types.ChatMessage, len(g.chatHistories[attendeeID]))
+	copy(historyCopy, g.chatHistories[attendeeID])
+	g.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	assistantMsg, err := g.aiClient.GenerateContent(ctx, g.geminiAPIKey, historyCopy, req.Message)
+	if err != nil || assistantMsg == nil {
+		assistantMsg = g.aiClient.FallbackTurn(req.Message)
+	}
+
+	g.mu.Lock()
+	if assistantMsg.Approval != nil {
+		g.pendingApprovals[attendeeID] = assistantMsg.Approval
+		g.activeActors[attendeeID] = types.StateAwaitingApproval
+		g.addEventLocked(fmt.Sprintf("Attendee %s awaiting human approval for %s", attendeeID, assistantMsg.Approval.Summary))
+	} else {
+		g.activeActors[attendeeID] = types.StateSuspended
+	}
+	g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], *assistantMsg)
+	g.mu.Unlock()
+
+	// Zero-cost suspension while attendee reviews code or when turn is complete
+	g.asyncSuspendActor(attendeeID)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(assistantMsg)
+}
+
+func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	attendeeID, err := g.authenticateRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var req types.ApprovalResponse
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		http.Error(w, "invalid json payload", http.StatusBadRequest)
+		return
+	}
+	if err := req.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	g.mu.Lock()
+	app, hasApp := g.pendingApprovals[attendeeID]
+	if hasApp && app.ApprovalID == req.ApprovalID {
+		req.Code = app.Code
+		req.Language = app.Language
+		delete(g.pendingApprovals, attendeeID)
+	}
+	g.activeActors[attendeeID] = types.StateRunning
+	g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: executing in gVisor", attendeeID, req.ApprovalID))
+	g.mu.Unlock()
+
+	// Forward the approval with code to the actor via reverse proxy!
+	updatedBody, _ := json.Marshal(req)
+	r.Body = io.NopCloser(bytes.NewReader(updatedBody))
+	r.ContentLength = int64(len(updatedBody))
+	r.Header.Set("Content-Length", strconv.Itoa(len(updatedBody)))
+
+	ctx := context.WithValue(r.Context(), attendeeContextKey{}, attendeeID)
+	outReq := r.WithContext(ctx)
+
+	g.proxy.ServeHTTP(w, outReq)
 }
 
 func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {

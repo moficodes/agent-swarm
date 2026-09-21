@@ -228,7 +228,8 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	if s.pendingApproval == nil || s.pendingApproval.ApprovalID != req.ApprovalID {
+	hasMatch := s.pendingApproval != nil && s.pendingApproval.ApprovalID == req.ApprovalID
+	if !hasMatch && req.Code == "" {
 		s.mu.Unlock()
 		http.Error(w, "no matching pending approval found", http.StatusNotFound)
 		return
@@ -251,8 +252,12 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Decision is APPROVE: capture approval details and clear pending approval to prevent replay
-	lang := s.pendingApproval.Language
-	code := s.pendingApproval.Code
+	lang := req.Language
+	code := req.Code
+	if code == "" && s.pendingApproval != nil {
+		lang = s.pendingApproval.Language
+		code = s.pendingApproval.Code
+	}
 	s.pendingApproval = nil
 	s.mu.Unlock()
 
