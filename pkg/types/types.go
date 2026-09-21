@@ -135,3 +135,44 @@ type WorkerStatus struct {
 	CurrentTask string `json:"current_task"`
 	ElapsedMs   int64  `json:"elapsed_ms"`
 }
+
+// ActorDetails provides a full snapshot of an actor's current state and telemetry for the inspector drawer.
+type ActorDetails struct {
+	ActorID           string              `json:"actor_id"`
+	State             ActorLifecycleState `json:"state"`
+	WorkerPod         string              `json:"worker_pod"`
+	SnapshotLocation  string              `json:"snapshot_location"`
+	SnapshotSizeBytes int64               `json:"snapshot_size_bytes"`
+	ChatHistory       []ChatMessage       `json:"chat_history"`
+	PendingApproval   *ApprovalRequest    `json:"pending_approval,omitempty"`
+	LastResult        *ExecutionResult    `json:"last_result,omitempty"`
+}
+
+// SimulationRequest specifies actions to control the virtual attendee swarm.
+type SimulationRequest struct {
+	Action string `json:"action"` // "start" or "stop"
+	Count  int    `json:"count,omitempty"`
+}
+
+// Validate checks whether the simulation request is valid.
+func (s *SimulationRequest) Validate() error {
+	if s == nil {
+		return errors.New("simulation request is nil")
+	}
+	if s.Action != "start" && s.Action != "stop" {
+		return fmt.Errorf("invalid action: %s (expected 'start' or 'stop')", s.Action)
+	}
+	if s.Action == "start" && (s.Count < 1 || s.Count > 100) {
+		return fmt.Errorf("invalid count: %d (must be between 1 and 100)", s.Count)
+	}
+	return nil
+}
+
+// StateChangeEvent represents a real-time actor state transition streamed over SSE.
+type StateChangeEvent struct {
+	AttendeeID string              `json:"attendee_id"`
+	State      ActorLifecycleState `json:"state"`
+	Label      string              `json:"label"`
+	Subtext    string              `json:"subtext"`
+	Timestamp  int64               `json:"timestamp"`
+}

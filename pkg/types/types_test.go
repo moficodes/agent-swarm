@@ -257,3 +257,183 @@ func TestAuxiliaryTypesSerialization(t *testing.T) {
 		}
 	})
 }
+
+func TestEnhancementTypesSerialization(t *testing.T) {
+	t.Run("ActorDetails", func(t *testing.T) {
+		details := types.ActorDetails{
+			ActorID:           "attendee-07",
+			State:             types.StateAwaitingApproval,
+			WorkerPod:         "conf-workers-0",
+			SnapshotLocation:  "gs://test-bucket/ate-demo-conf/actors/attendee-07.snap",
+			SnapshotSizeBytes: 384000,
+			ChatHistory: []types.ChatMessage{
+				{
+					ID:        "msg-1",
+					Sender:    types.SenderUser,
+					Content:   "Analyze recent survey data",
+					Timestamp: 1789910000,
+				},
+			},
+			PendingApproval: &types.ApprovalRequest{
+				ApprovalID: "app-1",
+				Summary:    "Run script",
+				Code:       "print(1)",
+				Language:   "python",
+				RiskLevel:  types.RiskHigh,
+			},
+			LastResult: &types.ExecutionResult{
+				Stdout:     "output",
+				Stderr:     "",
+				ExitCode:   0,
+				DurationMs: 25,
+			},
+		}
+
+		data, err := json.Marshal(details)
+		if err != nil {
+			t.Fatalf("failed to marshal ActorDetails: %v", err)
+		}
+
+		var decoded types.ActorDetails
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal ActorDetails: %v", err)
+		}
+
+		if diff := cmp.Diff(details, decoded); diff != "" {
+			t.Fatalf("ActorDetails mismatch (-want +got):\n%s", diff)
+		}
+
+		detailsOmit := types.ActorDetails{
+			ActorID:           "attendee-08",
+			State:             types.StateRunning,
+			WorkerPod:         "conf-workers-1",
+			SnapshotLocation:  "",
+			SnapshotSizeBytes: 0,
+			ChatHistory:       []types.ChatMessage{},
+		}
+		dataOmit, err := json.Marshal(detailsOmit)
+		if err != nil {
+			t.Fatalf("failed to marshal ActorDetails with omitempty: %v", err)
+		}
+		if strings.Contains(string(dataOmit), `"pending_approval"`) || strings.Contains(string(dataOmit), `"last_result"`) {
+			t.Fatalf("expected pending_approval and last_result to be omitted, got: %s", string(dataOmit))
+		}
+		var decodedOmit types.ActorDetails
+		if err := json.Unmarshal(dataOmit, &decodedOmit); err != nil {
+			t.Fatalf("failed to unmarshal ActorDetails: %v", err)
+		}
+		if diff := cmp.Diff(detailsOmit, decodedOmit); diff != "" {
+			t.Fatalf("ActorDetails mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("SimulationRequest", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			req     *types.SimulationRequest
+			wantErr bool
+		}{
+			{
+				name:    "valid start count 25",
+				req:     &types.SimulationRequest{Action: "start", Count: 25},
+				wantErr: false,
+			},
+			{
+				name:    "valid start count min 1",
+				req:     &types.SimulationRequest{Action: "start", Count: 1},
+				wantErr: false,
+			},
+			{
+				name:    "valid start count max 100",
+				req:     &types.SimulationRequest{Action: "start", Count: 100},
+				wantErr: false,
+			},
+			{
+				name:    "valid stop",
+				req:     &types.SimulationRequest{Action: "stop"},
+				wantErr: false,
+			},
+			{
+				name:    "valid stop with count",
+				req:     &types.SimulationRequest{Action: "stop", Count: 0},
+				wantErr: false,
+			},
+			{
+				name:    "nil receiver",
+				req:     nil,
+				wantErr: true,
+			},
+			{
+				name:    "invalid action pause",
+				req:     &types.SimulationRequest{Action: "pause", Count: 10},
+				wantErr: true,
+			},
+			{
+				name:    "invalid action empty",
+				req:     &types.SimulationRequest{Action: "", Count: 10},
+				wantErr: true,
+			},
+			{
+				name:    "start count 0 out of bounds",
+				req:     &types.SimulationRequest{Action: "start", Count: 0},
+				wantErr: true,
+			},
+			{
+				name:    "start count negative out of bounds",
+				req:     &types.SimulationRequest{Action: "start", Count: -5},
+				wantErr: true,
+			},
+			{
+				name:    "start count > 100 out of bounds",
+				req:     &types.SimulationRequest{Action: "start", Count: 101},
+				wantErr: true,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				err := tt.req.Validate()
+				if (err != nil) != tt.wantErr {
+					t.Errorf("SimulationRequest.Validate() error = %v, wantErr %v", err, tt.wantErr)
+				}
+			})
+		}
+
+		req := types.SimulationRequest{Action: "start", Count: 25}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("failed to marshal SimulationRequest: %v", err)
+		}
+		var decoded types.SimulationRequest
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal SimulationRequest: %v", err)
+		}
+		if diff := cmp.Diff(req, decoded); diff != "" {
+			t.Fatalf("SimulationRequest mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("StateChangeEvent", func(t *testing.T) {
+		event := types.StateChangeEvent{
+			AttendeeID: "attendee-12",
+			State:      types.StateRunning,
+			Label:      "Running Analysis",
+			Subtext:    "Executing sandbox code",
+			Timestamp:  1789910200,
+		}
+
+		data, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("failed to marshal StateChangeEvent: %v", err)
+		}
+
+		var decoded types.StateChangeEvent
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal StateChangeEvent: %v", err)
+		}
+
+		if diff := cmp.Diff(event, decoded); diff != "" {
+			t.Fatalf("StateChangeEvent mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
