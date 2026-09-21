@@ -196,7 +196,8 @@ type Gateway struct {
 	lastResults      map[string]*types.ExecutionResult
 	recentEvents     []string
 	parkedCount      int
-	simRunner        SimulationStopper
+	simRunner        *SimulationRunner
+	customStopper    SimulationStopper
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -226,6 +227,8 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 	for _, opt := range opts {
 		opt(gw)
 	}
+
+	gw.simRunner = NewSimulationRunner(gw)
 
 	if gw.staticFS == nil {
 		gw.staticFS = normalizeStaticFS(resolveStaticFS())
@@ -285,10 +288,13 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 func (g *Gateway) Close() {
 	g.mu.Lock()
 	runner := g.simRunner
-	g.simRunner = nil
+	custom := g.customStopper
 	g.mu.Unlock()
 	if runner != nil {
 		runner.Stop()
+	}
+	if custom != nil {
+		custom.Stop()
 	}
 
 	if g.cancel != nil {
@@ -313,6 +319,7 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/actor", g.handleActorDetails)
 	g.mux.HandleFunc("/api/stage/telemetry", g.handleTelemetry)
 	g.mux.HandleFunc("/api/reset", g.handleReset)
+	g.mux.HandleFunc("/api/simulation", g.handleSimulation)
 	if g.aiClient != nil {
 		g.mux.HandleFunc("/api/chat", g.handleChatRequest)
 		g.mux.HandleFunc("/api/approve", g.handleApproveRequest)
@@ -1037,11 +1044,14 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 
 	g.mu.Lock()
 	runner := g.simRunner
-	g.simRunner = nil
+	custom := g.customStopper
 	g.mu.Unlock()
 
 	if runner != nil {
 		runner.Stop()
+	}
+	if custom != nil {
+		custom.Stop()
 	}
 
 	g.mu.Lock()
@@ -1100,7 +1110,108 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) SetSimulationRunner(sr SimulationStopper) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.simRunner = sr
+	if realRunner, ok := sr.(*SimulationRunner); ok {
+		g.simRunner = realRunner
+		g.customStopper = nil
+	} else {
+		g.customStopper = sr
+	}
+}
+
+// SimulationRunner returns the active simulation runner.
+func (g *Gateway) SimulationRunner() *SimulationRunner {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.simRunner
+}
+
+func (g *Gateway) handleSimulation(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/simulation" {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		g.mu.RLock()
+		runner := g.simRunner
+		g.mu.RUnlock()
+
+		running, count := false, 0
+		if runner != nil {
+			running, count = runner.Status()
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodHead {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"running": running,
+			"count":   count,
+		})
+
+	case http.MethodPost:
+		var req types.SimulationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+			return
+		}
+		if err := req.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		switch req.Action {
+		case "start":
+			g.mu.Lock()
+			if g.simRunner == nil {
+				g.simRunner = NewSimulationRunner(g)
+			}
+			runner := g.simRunner
+			g.mu.Unlock()
+
+			if err := runner.Start(req.Count); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			g.mu.Lock()
+			g.addEventLocked(fmt.Sprintf("Started audience simulation with %d virtual attendees", req.Count))
+			g.mu.Unlock()
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"running": true,
+				"count":   req.Count,
+			})
+
+		case "stop":
+			g.mu.Lock()
+			runner := g.simRunner
+			g.mu.Unlock()
+
+			if runner != nil {
+				runner.Stop()
+			}
+
+			g.mu.Lock()
+			g.addEventLocked("Stopped audience simulation")
+			g.mu.Unlock()
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"running": false,
+				"count":   0,
+			})
+		}
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (g *Gateway) asyncSuspendActor(attendeeID string) {

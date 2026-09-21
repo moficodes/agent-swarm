@@ -2324,3 +2324,322 @@ func TestResetEndpoint(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+func TestSimulationEndpoint(t *testing.T) {
+	var chatCalls atomic.Int64
+	var approveCalls atomic.Int64
+	var seenActors sync.Map
+
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		chatCalls.Add(1)
+		actor := r.Header.Get("ate-target-actor")
+		if actor != "" {
+			seenActors.Store(actor, true)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        fmt.Sprintf("msg-sim-%d", chatCalls.Load()),
+			Sender:    types.SenderAssistant,
+			Content:   "WAITING_FOR_APPROVAL: run simulated workload",
+			Timestamp: time.Now().Unix(),
+			Approval: &types.ApprovalRequest{
+				ApprovalID: fmt.Sprintf("app-sim-%d", chatCalls.Load()),
+				Summary:    "Run simulation benchmark",
+				Code:       "print('simulated benchmark')",
+				Language:   "python",
+				RiskLevel:  types.RiskMedium,
+			},
+		})
+	})
+	upstreamMux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		approveCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        fmt.Sprintf("msg-approved-%d", approveCalls.Load()),
+			Sender:    types.SenderAssistant,
+			Content:   "Execution completed in 15ms (exit code 0):\nBenchmark OK",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	suspender := &mockSuspender{}
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithAtespace("ate-demo-conf"),
+		gateway.WithSuspender(suspender),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	t.Run("InitialStatus", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/simulation")
+		if err != nil {
+			t.Fatalf("failed to GET /api/simulation: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+
+		var status struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			t.Fatalf("failed to decode simulation status: %v", err)
+		}
+
+		if status.Running {
+			t.Errorf("expected running to be false initially, got %v", status.Running)
+		}
+		if status.Count != 0 {
+			t.Errorf("expected count to be 0 initially, got %d", status.Count)
+		}
+
+		// Verify HEAD request
+		headResp, err := http.Head(ts.URL + "/api/simulation")
+		if err != nil {
+			t.Fatalf("failed to HEAD /api/simulation: %v", err)
+		}
+		defer headResp.Body.Close()
+		if headResp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200 for HEAD /api/simulation, got %d", headResp.StatusCode)
+		}
+		headBody, _ := io.ReadAll(headResp.Body)
+		if len(headBody) != 0 {
+			t.Errorf("expected empty body for HEAD, got %d bytes", len(headBody))
+		}
+	})
+
+	t.Run("StartAndStop", func(t *testing.T) {
+		// Reset call counts
+		chatCalls.Store(0)
+		approveCalls.Store(0)
+
+		// 1. POST /api/simulation with start and count 5
+		startReqBody := `{"action":"start","count":5}`
+		respStart, err := http.Post(ts.URL+"/api/simulation", "application/json", strings.NewReader(startReqBody))
+		if err != nil {
+			t.Fatalf("failed to POST /api/simulation start: %v", err)
+		}
+		defer respStart.Body.Close()
+
+		if respStart.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200 for start, got %d", respStart.StatusCode)
+		}
+
+		var startStatus struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		if err := json.NewDecoder(respStart.Body).Decode(&startStatus); err != nil {
+			t.Fatalf("failed to decode start response: %v", err)
+		}
+		if !startStatus.Running {
+			t.Errorf("expected start response running=true, got %v", startStatus.Running)
+		}
+		if startStatus.Count != 5 {
+			t.Errorf("expected start response count=5, got %d", startStatus.Count)
+		}
+
+		// 2. GET /api/simulation returns running=true, count=5
+		respGet, err := http.Get(ts.URL + "/api/simulation")
+		if err != nil {
+			t.Fatalf("failed to GET /api/simulation: %v", err)
+		}
+		var getStatus struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		_ = json.NewDecoder(respGet.Body).Decode(&getStatus)
+		_ = respGet.Body.Close()
+
+		if !getStatus.Running || getStatus.Count != 5 {
+			t.Errorf("expected GET /api/simulation running=true, count=5, got %+v", getStatus)
+		}
+
+		// 3. Wait for virtual attendees to submit prompts and approvals
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if chatCalls.Load() >= 5 && approveCalls.Load() >= 2 {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		if chatCalls.Load() < 5 {
+			t.Errorf("expected at least 5 chat calls submitted by virtual attendees, got %d", chatCalls.Load())
+		}
+		if approveCalls.Load() < 2 {
+			t.Errorf("expected at least 2 approve calls submitted by virtual attendees, got %d", approveCalls.Load())
+		}
+
+		// Check multiple distinct actors were active
+		actorCount := 0
+		seenActors.Range(func(key, value any) bool {
+			actorCount++
+			return true
+		})
+		if actorCount < 2 {
+			t.Errorf("expected multiple virtual actors to be active, got %d", actorCount)
+		}
+
+		// 4. POST /api/simulation with stop
+		stopReqBody := `{"action":"stop"}`
+		respStop, err := http.Post(ts.URL+"/api/simulation", "application/json", strings.NewReader(stopReqBody))
+		if err != nil {
+			t.Fatalf("failed to POST /api/simulation stop: %v", err)
+		}
+		defer respStop.Body.Close()
+
+		if respStop.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200 for stop, got %d", respStop.StatusCode)
+		}
+
+		var stopStatus struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		if err := json.NewDecoder(respStop.Body).Decode(&stopStatus); err != nil {
+			t.Fatalf("failed to decode stop response: %v", err)
+		}
+		if stopStatus.Running {
+			t.Errorf("expected stop response running=false, got %v", stopStatus.Running)
+		}
+		if stopStatus.Count != 0 {
+			t.Errorf("expected stop response count=0, got %d", stopStatus.Count)
+		}
+
+		// 5. GET /api/simulation returns running=false, count=0
+		respGetStop, err := http.Get(ts.URL + "/api/simulation")
+		if err != nil {
+			t.Fatalf("failed to GET /api/simulation after stop: %v", err)
+		}
+		var getStopStatus struct {
+			Running bool `json:"running"`
+			Count   int  `json:"count"`
+		}
+		_ = json.NewDecoder(respGetStop.Body).Decode(&getStopStatus)
+		_ = respGetStop.Body.Close()
+
+		if getStopStatus.Running || getStopStatus.Count != 0 {
+			t.Errorf("expected GET after stop running=false, count=0, got %+v", getStopStatus)
+		}
+	})
+
+	t.Run("Validation", func(t *testing.T) {
+		invalidCases := []struct {
+			name string
+			body string
+		}{
+			{"InvalidActionPause", `{"action":"pause","count":5}`},
+			{"InvalidActionUnknown", `{"action":"unknown"}`},
+			{"InvalidActionEmpty", `{"action":""}`},
+			{"CountZero", `{"action":"start","count":0}`},
+			{"CountNegative", `{"action":"start","count":-5}`},
+			{"CountTooHigh", `{"action":"start","count":101}`},
+			{"MalformedJSON", `{"action":`},
+		}
+
+		for _, tc := range invalidCases {
+			t.Run(tc.name, func(t *testing.T) {
+				resp, err := http.Post(ts.URL+"/api/simulation", "application/json", strings.NewReader(tc.body))
+				if err != nil {
+					t.Fatalf("failed request: %v", err)
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusBadRequest {
+					t.Errorf("expected 400 Bad Request for %s, got %d", tc.name, resp.StatusCode)
+				}
+			})
+		}
+
+		// Non-GET/POST/HEAD methods should return 405 Method Not Allowed
+		methods := []string{http.MethodPut, http.MethodDelete, http.MethodPatch}
+		for _, m := range methods {
+			req, err := http.NewRequest(m, ts.URL+"/api/simulation", nil)
+			if err != nil {
+				t.Fatalf("failed to create request: %v", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("failed %s request: %v", m, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("expected 405 Method Not Allowed for %s, got %d", m, resp.StatusCode)
+			}
+		}
+	})
+
+	t.Run("ConcurrencySafety", func(t *testing.T) {
+		const numWorkers = 10
+		const numIterations = 15
+
+		token := gw.MintToken("attendee-conc-sim")
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+
+		for i := 0; i < numWorkers; i++ {
+			go func(workerID int) {
+				defer wg.Done()
+				client := &http.Client{Timeout: 5 * time.Second}
+
+				for j := 0; j < numIterations; j++ {
+					switch (workerID + j) % 5 {
+					case 0:
+						// Alternate start and stop
+						action := "start"
+						count := (workerID % 5) + 1
+						if j%2 == 1 {
+							action = "stop"
+							count = 0
+						}
+						reqBody, _ := json.Marshal(map[string]any{"action": action, "count": count})
+						resp, err := client.Post(ts.URL+"/api/simulation", "application/json", bytes.NewReader(reqBody))
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					case 1:
+						resp, err := client.Get(ts.URL + "/api/simulation")
+						if err == nil {
+							var st struct {
+								Running bool `json:"running"`
+								Count   int  `json:"count"`
+							}
+							_ = json.NewDecoder(resp.Body).Decode(&st)
+							_ = resp.Body.Close()
+						}
+					case 2:
+						req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"ping"}`))
+						req.Header.Set("Content-Type", "application/json")
+						req.Header.Set("Authorization", "Bearer "+token)
+						resp, err := client.Do(req)
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					case 3:
+						resp, err := client.Post(ts.URL+"/api/reset", "application/json", nil)
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					case 4:
+						resp, err := client.Get(ts.URL + "/api/stage/telemetry")
+						if err == nil {
+							var telem types.StageTelemetry
+							_ = json.NewDecoder(resp.Body).Decode(&telem)
+							_ = resp.Body.Close()
+						}
+					}
+				}
+			}(i)
+		}
+
+		wg.Wait()
+	})
+}
