@@ -1,0 +1,776 @@
+/*
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+:root {
+  --bg-primary: #07090e;
+  --bg-surface: #0e1422;
+  --bg-card: rgba(17, 24, 39, 0.75);
+  --bg-card-hover: rgba(22, 31, 50, 0.85);
+
+  --border-subtle: #1e293b;
+  --border-glow-cyan: rgba(0, 255, 204, 0.35);
+  --border-glow-pink: rgba(236, 72, 153, 0.45);
+  --border-glow-amber: rgba(245, 158, 11, 0.45);
+
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  --neon-cyan: #00ffcc;
+  --neon-green: #10b981;
+  --neon-pink: #ec4899;
+  --neon-amber: #f59e0b;
+  --neon-purple: #a855f7;
+  --slate-gray: #475569;
+
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Roboto Mono', Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  overflow-x: hidden;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 16:9 Presentation Stage Container */
+.stage-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100vw;
+  max-width: 100%;
+  padding: 1.25rem 1.75rem 1rem 1.75rem;
+  box-sizing: border-box;
+  gap: 1.25rem;
+  background: radial-gradient(circle at 50% 0%, rgba(16, 24, 48, 0.6) 0%, var(--bg-primary) 70%);
+}
+
+/* Header */
+.stage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.brand-glyph {
+  font-size: 2.25rem;
+  color: var(--neon-cyan);
+  text-shadow: 0 0 16px rgba(0, 255, 204, 0.65);
+  animation: pulse-glyph 4s ease-in-out infinite alternate;
+}
+
+@keyframes pulse-glyph {
+  0% { transform: scale(1); filter: brightness(1); }
+  100% { transform: scale(1.06); filter: brightness(1.3); }
+}
+
+.brand-title {
+  font-size: 1.6rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  background: linear-gradient(135deg, #ffffff 40%, var(--neon-cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.brand-subtitle {
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  display: block;
+}
+
+.header-specs {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.spec-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 0.45rem 0.85rem;
+}
+
+.spec-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.06em;
+}
+
+.spec-value {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.highlight-cyan {
+  color: var(--neon-cyan);
+  text-shadow: 0 0 10px rgba(0, 255, 204, 0.4);
+}
+
+.highlight-magenta {
+  color: var(--neon-pink);
+  text-shadow: 0 0 10px rgba(236, 72, 153, 0.4);
+}
+
+.highlight-green {
+  color: var(--neon-green);
+  text-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
+}
+
+/* Main Grid Layout */
+.stage-main {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 1.25rem;
+  flex: 1;
+}
+
+@media (min-width: 2560px) {
+  .stage-main {
+    grid-template-columns: 440px 1fr;
+    gap: 2rem;
+  }
+}
+
+/* Card Base */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 1.25rem;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(12px);
+  display: flex;
+  flex-direction: column;
+}
+
+.card-header {
+  margin-bottom: 1rem;
+}
+
+.card-tag {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--neon-cyan);
+  text-transform: uppercase;
+}
+
+.card-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-top: 0.2rem;
+}
+
+/* Sidebar: QR & Parking */
+.stage-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* QR Code Block */
+.hero-qr-card {
+  align-items: center;
+  text-align: center;
+}
+
+.hero-qr-card .card-header {
+  width: 100%;
+  text-align: left;
+}
+
+.qr-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.qr-box {
+  width: 180px;
+  height: 180px;
+  background: #0a0e17;
+  border: 2px solid var(--neon-cyan);
+  border-radius: 10px;
+  padding: 8px;
+  box-shadow: 0 0 24px rgba(0, 255, 204, 0.35);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qr-box:hover {
+  transform: scale(1.03);
+  box-shadow: 0 0 32px rgba(0, 255, 204, 0.6);
+}
+
+.qr-box svg {
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+}
+
+.qr-url-link {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--neon-cyan);
+  text-decoration: none;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  background: rgba(0, 255, 204, 0.08);
+  border: 1px solid rgba(0, 255, 204, 0.25);
+  transition: background 0.2s ease;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qr-url-link:hover {
+  background: rgba(0, 255, 204, 0.18);
+}
+
+.qr-caption {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+}
+
+/* Parking Meter Card */
+.parking-meter-card {
+  position: relative;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.parking-meter-card.active-parking {
+  border-color: var(--neon-amber);
+  box-shadow: 0 0 28px rgba(245, 158, 11, 0.35);
+}
+
+.title-with-pulse {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--slate-gray);
+  display: inline-block;
+}
+
+.pulse-dot.pulsing {
+  background-color: var(--neon-amber);
+  box-shadow: 0 0 10px var(--neon-amber);
+  animation: pulse-ring 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse-ring {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.6; }
+}
+
+.parking-metric-block {
+  margin: 0.75rem 0 1rem 0;
+}
+
+.parking-counter-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.parking-number {
+  font-size: 3.5rem;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  transition: color 0.3s ease;
+}
+
+.active-parking .parking-number {
+  color: var(--neon-amber);
+  text-shadow: 0 0 20px rgba(245, 158, 11, 0.7);
+}
+
+.parking-label-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.parking-unit {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+}
+
+.parking-state {
+  font-size: 0.85rem;
+  font-weight: 800;
+  color: var(--text-secondary);
+  letter-spacing: 0.05em;
+}
+
+.parking-state.state-burst {
+  color: var(--neon-pink);
+  text-shadow: 0 0 10px rgba(236, 72, 153, 0.6);
+  animation: pulse-text 1.2s infinite alternate;
+}
+
+@keyframes pulse-text {
+  0% { opacity: 0.7; }
+  100% { opacity: 1; }
+}
+
+/* Gauge Bar */
+.gauge-container {
+  margin-top: 0.85rem;
+}
+
+.gauge-track {
+  width: 100%;
+  height: 14px;
+  background: #0d1322;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  overflow: hidden;
+  position: relative;
+}
+
+.gauge-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--neon-cyan), var(--neon-amber), var(--neon-pink));
+  border-radius: 7px;
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.5);
+}
+
+.gauge-markers {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.35rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.parking-desc {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Stage Content: Workers & Fleet */
+.stage-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.section-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.65rem;
+}
+
+.section-label {
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--neon-cyan);
+  text-transform: uppercase;
+}
+
+.section-sub {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* Workers Section */
+.workers-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.worker-card {
+  border: 1px solid var(--border-subtle);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.worker-card.active {
+  border-color: var(--neon-green);
+  box-shadow: 0 0 24px rgba(16, 185, 129, 0.3);
+}
+
+.worker-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.85rem;
+}
+
+.worker-id {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.worker-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--slate-gray);
+}
+
+.worker-dot.active {
+  background: var(--neon-green);
+  box-shadow: 0 0 10px var(--neon-green);
+}
+
+.worker-title {
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.worker-status-badge {
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  background: rgba(100, 116, 139, 0.2);
+  color: var(--text-muted);
+}
+
+.worker-status-badge.active {
+  background: rgba(16, 185, 129, 0.2);
+  color: var(--neon-green);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.worker-body {
+  display: grid;
+  grid-template-columns: 1.2fr 2fr 1fr;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.worker-stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-name {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  margin-bottom: 0.15rem;
+}
+
+.stat-value {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.active-actor-val.running {
+  color: var(--neon-green);
+  font-weight: 800;
+}
+
+.timer-val {
+  font-family: var(--font-mono);
+  color: var(--neon-cyan);
+}
+
+/* Fleet Grid Section */
+.fleet-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.fleet-legend {
+  display: flex;
+  gap: 1.25rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.legend-dot.suspended { background: var(--slate-gray); }
+.legend-dot.parked { background: var(--neon-amber); box-shadow: 0 0 6px var(--neon-amber); }
+.legend-dot.running { background: var(--neon-green); box-shadow: 0 0 6px var(--neon-green); }
+.legend-dot.awaiting { background: var(--neon-purple); box-shadow: 0 0 6px var(--neon-purple); }
+
+/* 50 Badge Matrix */
+.fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 0.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 1rem;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+}
+
+@media (max-width: 1400px) {
+  .fleet-grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+.fleet-badge {
+  display: flex;
+  flex-direction: column;
+  padding: 0.45rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: #0b101d;
+  transition: all 0.25s ease;
+  user-select: none;
+}
+
+.fleet-badge .badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 0.35rem;
+}
+
+.fleet-badge .badge-name {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.fleet-badge .badge-state-label {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  margin-top: 0.2rem;
+  text-transform: uppercase;
+}
+
+/* Badge States */
+/* 1. Suspended (Slate gray / sleeping in GCS) */
+.fleet-badge.suspended {
+  border-color: #1e293b;
+  background: #090e18;
+}
+.fleet-badge.suspended .badge-dot {
+  background: var(--slate-gray);
+}
+.fleet-badge.suspended .badge-name {
+  color: var(--text-muted);
+}
+.fleet-badge.suspended .badge-state-label {
+  color: #475569;
+}
+
+/* 2. Parked (Bright amber / held in Envoy) */
+.fleet-badge.parked {
+  border-color: var(--neon-amber);
+  background: rgba(245, 158, 11, 0.12);
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.35);
+  transform: translateY(-2px);
+}
+.fleet-badge.parked .badge-dot {
+  background: var(--neon-amber);
+  box-shadow: 0 0 8px var(--neon-amber);
+}
+.fleet-badge.parked .badge-name {
+  color: #fbbf24;
+}
+.fleet-badge.parked .badge-state-label {
+  color: var(--neon-amber);
+}
+
+/* 3. Running (Neon emerald / active in gVisor) */
+.fleet-badge.running {
+  border-color: var(--neon-green);
+  background: rgba(16, 185, 129, 0.16);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.45);
+  transform: translateY(-2px);
+}
+.fleet-badge.running .badge-dot {
+  background: var(--neon-green);
+  box-shadow: 0 0 10px var(--neon-green);
+}
+.fleet-badge.running .badge-name {
+  color: #34d399;
+}
+.fleet-badge.running .badge-state-label {
+  color: var(--neon-green);
+}
+
+/* 4. Awaiting Approval (Purple / waiting for human tap) */
+.fleet-badge.awaiting {
+  border-color: var(--neon-purple);
+  background: rgba(168, 85, 247, 0.14);
+  box-shadow: 0 0 14px rgba(168, 85, 247, 0.35);
+  transform: translateY(-2px);
+}
+.fleet-badge.awaiting .badge-dot {
+  background: var(--neon-purple);
+  box-shadow: 0 0 8px var(--neon-purple);
+}
+.fleet-badge.awaiting .badge-name {
+  color: #c084fc;
+}
+.fleet-badge.awaiting .badge-state-label {
+  color: var(--neon-purple);
+}
+
+/* Footer: Live Activity Ticker */
+.stage-footer {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  overflow: hidden;
+}
+
+.ticker-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.ticker-label {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--neon-cyan);
+}
+
+.live-tag {
+  font-size: 0.6rem;
+  font-weight: 800;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(236, 72, 153, 0.2);
+  color: var(--neon-pink);
+  border: 1px solid rgba(236, 72, 153, 0.4);
+}
+
+.event-ticker {
+  display: flex;
+  gap: 1.25rem;
+  flex: 1;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.event-ticker::-webkit-scrollbar {
+  display: none;
+}
+
+.ticker-empty {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.ticker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  animation: fade-in-left 0.3s ease-out;
+}
+
+@keyframes fade-in-left {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.ticker-icon {
+  font-size: 0.9rem;
+}
+
+.ticker-text {
+  font-family: var(--font-mono);
+}

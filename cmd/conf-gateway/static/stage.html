@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<!--
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#07090e">
+  <meta name="description" content="Agent Substrate Presentation Stage Dashboard - Live Cluster Telemetry, Envoy Request Parking, and 50-Agent Fleet Matrix">
+  <title>Substrate Stage // Cluster Telemetry &amp; Envoy Parking Lot</title>
+  <link rel="stylesheet" href="/static/stage.css">
+</head>
+<body>
+  <div class="stage-container">
+    <!-- Top Presentation Header -->
+    <header class="stage-header">
+      <div class="header-brand">
+        <span class="brand-glyph" aria-hidden="true">⬡</span>
+        <div class="brand-text">
+          <h1 class="brand-title">AGENT SUBSTRATE</h1>
+          <span class="brand-subtitle">Interactive Conference Swarm Control Plane</span>
+        </div>
+      </div>
+      <div class="header-specs">
+        <div class="spec-card">
+          <span class="spec-label">HARDWARE CAPACITY</span>
+          <span class="spec-value highlight-cyan">2 Physical Worker Pods</span>
+        </div>
+        <div class="spec-card">
+          <span class="spec-label">OVERSUBSCRIPTION</span>
+          <span class="spec-value highlight-magenta">50x Oversubscription</span>
+        </div>
+        <div class="spec-card">
+          <span class="spec-label">ISOLATION</span>
+          <span class="spec-value">gVisor runsc</span>
+        </div>
+        <div class="spec-card">
+          <span class="spec-label">IDLE FOOTPRINT</span>
+          <span class="spec-value highlight-green">0 vCPU / 0 MB in GCS</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main 16:9 Presentation Grid -->
+    <main class="stage-main">
+      <!-- Left Column: QR Code Join Block & Envoy L7 Parking Meter -->
+      <section class="stage-sidebar">
+        <!-- Hero QR Code Block -->
+        <div class="card hero-qr-card">
+          <div class="card-header">
+            <span class="card-tag">AUDIENCE ONBOARDING</span>
+            <h2 class="card-title">Scan to Launch Agent</h2>
+          </div>
+          <div class="qr-wrapper">
+            <div id="qr-code" class="qr-box" title="Scan to launch personal agent">
+              <!-- SVG QR Code generated offline by stage.js -->
+            </div>
+            <a id="qr-link" class="qr-url-link" href="/chat" target="_blank" rel="noopener">
+              <span id="qr-url-text">Loading join URL...</span>
+              <svg class="external-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+            </a>
+          </div>
+          <p class="qr-caption">Instant ephemeral micro-VM sandbox. Zero login friction.</p>
+        </div>
+
+        <!-- Envoy L7 Request Parking Gauge -->
+        <div id="parking-meter" class="card parking-meter-card">
+          <div class="card-header">
+            <div class="title-with-pulse">
+              <span id="parking-pulse-dot" class="pulse-dot"></span>
+              <span class="card-tag">ENVOY EXT_PROC</span>
+            </div>
+            <h2 class="card-title">L7 Request Parking Lot</h2>
+          </div>
+          <div class="parking-metric-block">
+            <div class="parking-counter-row">
+              <span id="parking-count" class="parking-number">0</span>
+              <div class="parking-label-group">
+                <span class="parking-unit">PARKED REQUESTS</span>
+                <span id="parking-state-text" class="parking-state">IDLE</span>
+              </div>
+            </div>
+            <div class="gauge-container">
+              <div class="gauge-track">
+                <div id="parking-progress-bar" class="gauge-fill" style="width: 0%;"></div>
+              </div>
+              <div class="gauge-markers">
+                <span>0</span>
+                <span>10</span>
+                <span>25</span>
+                <span>50 MAX</span>
+              </div>
+            </div>
+          </div>
+          <p class="parking-desc">
+            HTTP requests held in-memory at ingress while gVisor actors restore state from GCS. Zero 503 drops.
+          </p>
+        </div>
+      </section>
+
+      <!-- Center & Right: Worker Hardware Cards + Attendee Fleet Grid -->
+      <section class="stage-content">
+        <!-- Worker Hardware Pool Display (2 Physical Pods) -->
+        <div class="workers-section">
+          <div class="section-title-row">
+            <h3 class="section-label">WORKER POOL HARDWARE EXECUTION</h3>
+            <span class="section-sub">2 Replicas // Active Execution Seats</span>
+          </div>
+          <div class="workers-grid">
+            <!-- Worker Pod 0 -->
+            <div id="worker-pod-0" class="card worker-card">
+              <div class="worker-card-header">
+                <div class="worker-id">
+                  <span class="worker-dot" id="worker-dot-0"></span>
+                  <span class="worker-title">Worker Pod 0</span>
+                </div>
+                <span class="worker-status-badge" id="worker-badge-0">IDLE</span>
+              </div>
+              <div class="worker-body">
+                <div class="worker-stat">
+                  <span class="stat-name">ACTIVE ACTOR</span>
+                  <span class="stat-value active-actor-val" id="worker-actor-0">idle</span>
+                </div>
+                <div class="worker-stat">
+                  <span class="stat-name">CURRENT TASK</span>
+                  <span class="stat-value" id="worker-task-0">Waiting for actor dispatch</span>
+                </div>
+                <div class="worker-stat">
+                  <span class="stat-name">RUN TIMER</span>
+                  <span class="stat-value timer-val" id="worker-timer-0">0 ms</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Worker Pod 1 -->
+            <div id="worker-pod-1" class="card worker-card">
+              <div class="worker-card-header">
+                <div class="worker-id">
+                  <span class="worker-dot" id="worker-dot-1"></span>
+                  <span class="worker-title">Worker Pod 1</span>
+                </div>
+                <span class="worker-status-badge" id="worker-badge-1">IDLE</span>
+              </div>
+              <div class="worker-body">
+                <div class="worker-stat">
+                  <span class="stat-name">ACTIVE ACTOR</span>
+                  <span class="stat-value active-actor-val" id="worker-actor-1">idle</span>
+                </div>
+                <div class="worker-stat">
+                  <span class="stat-name">CURRENT TASK</span>
+                  <span class="stat-value" id="worker-task-1">Waiting for actor dispatch</span>
+                </div>
+                <div class="worker-stat">
+                  <span class="stat-name">RUN TIMER</span>
+                  <span class="stat-value timer-val" id="worker-timer-1">0 ms</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 50 Attendee Fleet Grid -->
+        <div class="fleet-section">
+          <div class="section-title-row">
+            <div class="fleet-heading">
+              <h3 class="section-label">ATTENDEE AGENT FLEET MATRIX</h3>
+              <span class="section-sub">50 Actors multiplexed over 2 worker pods</span>
+            </div>
+            <!-- Legend for States -->
+            <div class="fleet-legend">
+              <span class="legend-item"><span class="legend-dot suspended"></span> SUSPENDED (in GCS)</span>
+              <span class="legend-item"><span class="legend-dot parked"></span> PARKED (in Envoy)</span>
+              <span class="legend-item"><span class="legend-dot running"></span> RUNNING (in gVisor)</span>
+              <span class="legend-item"><span class="legend-dot awaiting"></span> AWAITING APPROVAL</span>
+            </div>
+          </div>
+          <div id="fleet-grid" class="fleet-grid">
+            <!-- 50 Attendee Badge Slots (Attendee 01 .. Attendee 50) -->
+            <div class="fleet-badge suspended" id="badge-attendee-01" data-id="attendee-01"><span class="badge-dot"></span><span class="badge-name">Attendee 01</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-02" data-id="attendee-02"><span class="badge-dot"></span><span class="badge-name">Attendee 02</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-03" data-id="attendee-03"><span class="badge-dot"></span><span class="badge-name">Attendee 03</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-04" data-id="attendee-04"><span class="badge-dot"></span><span class="badge-name">Attendee 04</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-05" data-id="attendee-05"><span class="badge-dot"></span><span class="badge-name">Attendee 05</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-06" data-id="attendee-06"><span class="badge-dot"></span><span class="badge-name">Attendee 06</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-07" data-id="attendee-07"><span class="badge-dot"></span><span class="badge-name">Attendee 07</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-08" data-id="attendee-08"><span class="badge-dot"></span><span class="badge-name">Attendee 08</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-09" data-id="attendee-09"><span class="badge-dot"></span><span class="badge-name">Attendee 09</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-10" data-id="attendee-10"><span class="badge-dot"></span><span class="badge-name">Attendee 10</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-11" data-id="attendee-11"><span class="badge-dot"></span><span class="badge-name">Attendee 11</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-12" data-id="attendee-12"><span class="badge-dot"></span><span class="badge-name">Attendee 12</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-13" data-id="attendee-13"><span class="badge-dot"></span><span class="badge-name">Attendee 13</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-14" data-id="attendee-14"><span class="badge-dot"></span><span class="badge-name">Attendee 14</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-15" data-id="attendee-15"><span class="badge-dot"></span><span class="badge-name">Attendee 15</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-16" data-id="attendee-16"><span class="badge-dot"></span><span class="badge-name">Attendee 16</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-17" data-id="attendee-17"><span class="badge-dot"></span><span class="badge-name">Attendee 17</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-18" data-id="attendee-18"><span class="badge-dot"></span><span class="badge-name">Attendee 18</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-19" data-id="attendee-19"><span class="badge-dot"></span><span class="badge-name">Attendee 19</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-20" data-id="attendee-20"><span class="badge-dot"></span><span class="badge-name">Attendee 20</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-21" data-id="attendee-21"><span class="badge-dot"></span><span class="badge-name">Attendee 21</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-22" data-id="attendee-22"><span class="badge-dot"></span><span class="badge-name">Attendee 22</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-23" data-id="attendee-23"><span class="badge-dot"></span><span class="badge-name">Attendee 23</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-24" data-id="attendee-24"><span class="badge-dot"></span><span class="badge-name">Attendee 24</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-25" data-id="attendee-25"><span class="badge-dot"></span><span class="badge-name">Attendee 25</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-26" data-id="attendee-26"><span class="badge-dot"></span><span class="badge-name">Attendee 26</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-27" data-id="attendee-27"><span class="badge-dot"></span><span class="badge-name">Attendee 27</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-28" data-id="attendee-28"><span class="badge-dot"></span><span class="badge-name">Attendee 28</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-29" data-id="attendee-29"><span class="badge-dot"></span><span class="badge-name">Attendee 29</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-30" data-id="attendee-30"><span class="badge-dot"></span><span class="badge-name">Attendee 30</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-31" data-id="attendee-31"><span class="badge-dot"></span><span class="badge-name">Attendee 31</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-32" data-id="attendee-32"><span class="badge-dot"></span><span class="badge-name">Attendee 32</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-33" data-id="attendee-33"><span class="badge-dot"></span><span class="badge-name">Attendee 33</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-34" data-id="attendee-34"><span class="badge-dot"></span><span class="badge-name">Attendee 34</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-35" data-id="attendee-35"><span class="badge-dot"></span><span class="badge-name">Attendee 35</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-36" data-id="attendee-36"><span class="badge-dot"></span><span class="badge-name">Attendee 36</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-37" data-id="attendee-37"><span class="badge-dot"></span><span class="badge-name">Attendee 37</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-38" data-id="attendee-38"><span class="badge-dot"></span><span class="badge-name">Attendee 38</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-39" data-id="attendee-39"><span class="badge-dot"></span><span class="badge-name">Attendee 39</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-40" data-id="attendee-40"><span class="badge-dot"></span><span class="badge-name">Attendee 40</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-41" data-id="attendee-41"><span class="badge-dot"></span><span class="badge-name">Attendee 41</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-42" data-id="attendee-42"><span class="badge-dot"></span><span class="badge-name">Attendee 42</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-43" data-id="attendee-43"><span class="badge-dot"></span><span class="badge-name">Attendee 43</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-44" data-id="attendee-44"><span class="badge-dot"></span><span class="badge-name">Attendee 44</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-45" data-id="attendee-45"><span class="badge-dot"></span><span class="badge-name">Attendee 45</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-46" data-id="attendee-46"><span class="badge-dot"></span><span class="badge-name">Attendee 46</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-47" data-id="attendee-47"><span class="badge-dot"></span><span class="badge-name">Attendee 47</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-48" data-id="attendee-48"><span class="badge-dot"></span><span class="badge-name">Attendee 48</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-49" data-id="attendee-49"><span class="badge-dot"></span><span class="badge-name">Attendee 49</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge suspended" id="badge-attendee-50" data-id="attendee-50"><span class="badge-dot"></span><span class="badge-name">Attendee 50</span><span class="badge-state-label">SUSPENDED</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Real-Time Event Ticker -->
+    <footer class="stage-footer">
+      <div class="ticker-header">
+        <span class="ticker-label">LIVE CLUSTER FEED</span>
+        <span class="live-tag">REAL-TIME</span>
+      </div>
+      <div id="event-ticker" class="event-ticker">
+        <div class="ticker-empty">Awaiting cluster telemetry events...</div>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/stage.js"></script>
+</body>
+</html>

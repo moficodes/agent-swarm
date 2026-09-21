@@ -261,8 +261,37 @@ func (g *Gateway) routes() {
 
 	g.mux.HandleFunc("/chat", g.handleChat)
 	g.mux.HandleFunc("/chat/", g.handleChat)
+	g.mux.HandleFunc("/stage", g.handleStage)
+	g.mux.HandleFunc("/stage/", g.handleStage)
+	g.mux.HandleFunc("/", g.handleStage)
 	if g.staticFS != nil {
 		g.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(g.staticFS))))
+	}
+}
+
+func (g *Gateway) handleStage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/stage" && r.URL.Path != "/stage/" && r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if g.staticFS == nil {
+		http.Error(w, "Static filesystem not configured", http.StatusInternalServerError)
+		return
+	}
+	data, err := fs.ReadFile(g.staticFS, "stage.html")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read stage.html: %v", err), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
 	}
 }
 

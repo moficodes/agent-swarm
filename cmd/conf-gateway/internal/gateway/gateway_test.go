@@ -1381,3 +1381,170 @@ func TestChatRoute(t *testing.T) {
 		t.Errorf("expected status 405 for POST /chat/, got %d", respPostSlash.StatusCode)
 	}
 }
+
+func TestStageRoute(t *testing.T) {
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	expectedElements := []string{
+		`id="parking-meter"`,
+		`id="worker-pod-0"`,
+		`id="worker-pod-1"`,
+		`id="fleet-grid"`,
+		`id="event-ticker"`,
+		`id="qr-code"`,
+	}
+
+	// 1. GET /stage returns 200 with HTML content and required DOM elements
+	resp, err := http.Get(ts.URL + "/stage")
+	if err != nil {
+		t.Fatalf("failed to request /stage: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /stage, got %d", resp.StatusCode)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Errorf("expected Content-Type to contain text/html, got %q", contentType)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	body := string(bodyBytes)
+
+	for _, el := range expectedElements {
+		if !strings.Contains(body, el) {
+			t.Errorf("expected GET /stage HTML to contain %q, but was missing", el)
+		}
+	}
+
+	// 2. GET / returns 200 with HTML content and required DOM elements
+	respRoot, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("failed to request /: %v", err)
+	}
+	defer respRoot.Body.Close()
+
+	if respRoot.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /, got %d", respRoot.StatusCode)
+	}
+
+	contentTypeRoot := respRoot.Header.Get("Content-Type")
+	if !strings.Contains(contentTypeRoot, "text/html") {
+		t.Errorf("expected Content-Type to contain text/html, got %q", contentTypeRoot)
+	}
+
+	bodyBytesRoot, err := io.ReadAll(respRoot.Body)
+	if err != nil {
+		t.Fatalf("failed to read root response body: %v", err)
+	}
+	bodyRoot := string(bodyBytesRoot)
+
+	for _, el := range expectedElements {
+		if !strings.Contains(bodyRoot, el) {
+			t.Errorf("expected GET / HTML to contain %q, but was missing", el)
+		}
+	}
+
+	// 3. HEAD /stage should return 200 OK with text/html and empty body
+	respHead, err := http.Head(ts.URL + "/stage")
+	if err != nil {
+		t.Fatalf("failed to HEAD /stage: %v", err)
+	}
+	defer respHead.Body.Close()
+
+	if respHead.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for HEAD /stage, got %d", respHead.StatusCode)
+	}
+	if !strings.Contains(respHead.Header.Get("Content-Type"), "text/html") {
+		t.Errorf("expected text/html Content-Type for HEAD /stage, got %q", respHead.Header.Get("Content-Type"))
+	}
+	headBody, _ := io.ReadAll(respHead.Body)
+	if len(headBody) != 0 {
+		t.Errorf("expected empty body for HEAD /stage, got %d bytes", len(headBody))
+	}
+
+	// 4. Subtree path isolation: GET /stage/subpath should return 404 Not Found
+	respSubtree, err := http.Get(ts.URL + "/stage/subpath")
+	if err != nil {
+		t.Fatalf("failed to GET /stage/subpath: %v", err)
+	}
+	defer respSubtree.Body.Close()
+
+	if respSubtree.StatusCode != http.StatusNotFound {
+		t.Errorf("expected status 404 for /stage/subpath, got %d", respSubtree.StatusCode)
+	}
+
+	// 5. POST /stage should return 405 Method Not Allowed
+	respPost, err := http.Post(ts.URL+"/stage", "application/json", nil)
+	if err != nil {
+		t.Fatalf("failed to POST /stage: %v", err)
+	}
+	defer respPost.Body.Close()
+
+	if respPost.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected status 405 for POST /stage, got %d", respPost.StatusCode)
+	}
+
+	// 6. GET /static/stage.js returns 200 with JS content
+	respJS, err := http.Get(ts.URL + "/static/stage.js")
+	if err != nil {
+		t.Fatalf("failed to request /static/stage.js: %v", err)
+	}
+	defer respJS.Body.Close()
+
+	if respJS.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /static/stage.js, got %d", respJS.StatusCode)
+	}
+	jsBytes, _ := io.ReadAll(respJS.Body)
+	jsBody := string(jsBytes)
+	if !strings.Contains(jsBody, "/api/stage/telemetry") || !strings.Contains(jsBody, "updateDashboard") {
+		t.Errorf("expected stage.js to contain /api/stage/telemetry and updateDashboard")
+	}
+
+	// 7. GET /static/stage.css returns 200 with CSS content
+	respCSS, err := http.Get(ts.URL + "/static/stage.css")
+	if err != nil {
+		t.Fatalf("failed to request /static/stage.css: %v", err)
+	}
+	defer respCSS.Body.Close()
+
+	if respCSS.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /static/stage.css, got %d", respCSS.StatusCode)
+	}
+	cssBytes, _ := io.ReadAll(respCSS.Body)
+	cssBody := string(cssBytes)
+	if !strings.Contains(cssBody, "parking-meter") || !strings.Contains(cssBody, "fleet-grid") {
+		t.Errorf("expected stage.css to contain parking-meter and fleet-grid rules")
+	}
+
+	// 8. GET /stage/ should return 200 OK
+	respSlash, err := http.Get(ts.URL + "/stage/")
+	if err != nil {
+		t.Fatalf("failed to GET /stage/: %v", err)
+	}
+	defer respSlash.Body.Close()
+
+	if respSlash.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for GET /stage/, got %d", respSlash.StatusCode)
+	}
+
+	// 9. POST /stage/ should return 405 Method Not Allowed
+	respPostSlash, err := http.Post(ts.URL+"/stage/", "application/json", nil)
+	if err != nil {
+		t.Fatalf("failed to POST /stage/: %v", err)
+	}
+	defer respPostSlash.Body.Close()
+
+	if respPostSlash.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected status 405 for POST /stage/, got %d", respPostSlash.StatusCode)
+	}
+}
