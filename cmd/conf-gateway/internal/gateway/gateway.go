@@ -198,13 +198,13 @@ type Gateway struct {
 // NewGateway creates and initializes a new Gateway.
 func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 	gw := &Gateway{
-		routerURL:      routerURL,
-		statusURL:      statusURL,
-		atespace:       "ate-demo-conf",
-		jwtSecret:      "conf-demo-secret-key",
-		suspender:      &commandSuspender{},
-		statusInterval: 500 * time.Millisecond,
-		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		routerURL:        routerURL,
+		statusURL:        statusURL,
+		atespace:         "ate-demo-conf",
+		jwtSecret:        "conf-demo-secret-key",
+		suspender:        &commandSuspender{},
+		statusInterval:   500 * time.Millisecond,
+		httpClient:       &http.Client{Timeout: 5 * time.Second},
 		mux:              http.NewServeMux(),
 		activeActors:     make(map[string]types.ActorLifecycleState),
 		pendingApprovals: make(map[string]*types.ApprovalRequest),
