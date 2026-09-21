@@ -188,6 +188,7 @@ type Gateway struct {
 	activeActors     map[string]types.ActorLifecycleState
 	pendingApprovals map[string]*types.ApprovalRequest
 	chatHistories    map[string][]types.ChatMessage
+	lastResults      map[string]*types.ExecutionResult
 	recentEvents     []string
 	parkedCount      int
 
@@ -211,6 +212,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		activeActors:     make(map[string]types.ActorLifecycleState),
 		pendingApprovals: make(map[string]*types.ApprovalRequest),
 		chatHistories:    make(map[string][]types.ChatMessage),
+		lastResults:      make(map[string]*types.ExecutionResult),
 		recentEvents:     make([]string, 0),
 		maxActors:        50,
 	}
@@ -293,6 +295,8 @@ func (g *Gateway) routes() {
 	})
 	g.mux.HandleFunc("/api/session", g.handleSession)
 	g.mux.HandleFunc("/api/events", g.handleEvents)
+	g.mux.HandleFunc("/api/actor/", g.handleActorDetails)
+	g.mux.HandleFunc("/api/actor", g.handleActorDetails)
 	g.mux.HandleFunc("/api/stage/telemetry", g.handleTelemetry)
 	if g.aiClient != nil {
 		g.mux.HandleFunc("/api/chat", g.handleChatRequest)
@@ -714,6 +718,25 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/api/chat" && r.Body != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			var chatReq types.ChatRequest
+			if err := json.Unmarshal(bodyBytes, &chatReq); err == nil && chatReq.Message != "" {
+				userMsg := types.ChatMessage{
+					ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
+					Sender:    types.SenderUser,
+					Content:   chatReq.Message,
+					Timestamp: time.Now().Unix(),
+				}
+				g.mu.Lock()
+				g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], userMsg)
+				g.mu.Unlock()
+			}
+		}
+	}
+
 	g.mu.Lock()
 	if r.URL.Path == "/api/approve" {
 		g.activeActors[attendeeID] = types.StateRunningGVisor
@@ -735,13 +758,45 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	g.proxy.ServeHTTP(w, outReq)
 }
 
-func (g *Gateway) setActorState(attendeeID string, state types.ActorLifecycleState) {
+// SetActorState sets the lifecycle state of an actor.
+func (g *Gateway) SetActorState(attendeeID string, state types.ActorLifecycleState) {
 	if attendeeID == "" {
 		return
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.activeActors[attendeeID] = state
+}
+
+func (g *Gateway) setActorState(attendeeID string, state types.ActorLifecycleState) {
+	g.SetActorState(attendeeID, state)
+}
+
+// GetLastResult returns the most recent execution result for an actor.
+func (g *Gateway) GetLastResult(attendeeID string) (*types.ExecutionResult, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	res, ok := g.lastResults[attendeeID]
+	if !ok || res == nil {
+		return nil, false
+	}
+	copyRes := *res
+	return &copyRes, true
+}
+
+// SetLastResult records the most recent execution result for an actor.
+func (g *Gateway) SetLastResult(attendeeID string, res *types.ExecutionResult) {
+	if attendeeID == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if res == nil {
+		delete(g.lastResults, attendeeID)
+		return
+	}
+	copyRes := *res
+	g.lastResults[attendeeID] = &copyRes
 }
 
 // GetActorState returns the lifecycle state of an actor.
@@ -803,13 +858,64 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 
 	var isWaitingForApproval bool
 	var chatMsg types.ChatMessage
-	if err := json.Unmarshal(bodyBytes, &chatMsg); err == nil && chatMsg.Approval != nil {
-		isWaitingForApproval = true
+	hasChatMsg := false
+	if err := json.Unmarshal(bodyBytes, &chatMsg); err == nil {
+		hasChatMsg = true
+		if chatMsg.Approval != nil {
+			isWaitingForApproval = true
+		}
+	}
+
+	// Record execution result if returned
+	var execRes types.ExecutionResult
+	if err := json.Unmarshal(bodyBytes, &execRes); err == nil && (execRes.Stdout != "" || execRes.Stderr != "" || execRes.ExitCode != 0 || execRes.DurationMs > 0) {
+		g.mu.Lock()
+		g.lastResults[attendeeID] = &execRes
+		g.mu.Unlock()
+	} else if hasChatMsg {
+		if strings.HasPrefix(chatMsg.Content, "Execution completed in ") {
+			var durationMs int64
+			var exitCode int
+			if n, _ := fmt.Sscanf(chatMsg.Content, "Execution completed in %dms (exit code %d):", &durationMs, &exitCode); n >= 2 {
+				stdout := ""
+				if idx := strings.Index(chatMsg.Content, "):"); idx != -1 {
+					stdout = strings.TrimPrefix(chatMsg.Content[idx+2:], "\n")
+					stdout = strings.TrimPrefix(stdout, "\n")
+				}
+				var stderr string
+				if stderrIdx := strings.Index(stdout, "\nStderr:\n"); stderrIdx != -1 {
+					stderr = stdout[stderrIdx+len("\nStderr:\n"):]
+					stdout = stdout[:stderrIdx]
+				}
+				g.mu.Lock()
+				g.lastResults[attendeeID] = &types.ExecutionResult{
+					Stdout:     stdout,
+					Stderr:     stderr,
+					ExitCode:   exitCode,
+					DurationMs: durationMs,
+				}
+				g.mu.Unlock()
+			}
+		} else if strings.HasPrefix(chatMsg.Content, "Execution error:") {
+			g.mu.Lock()
+			g.lastResults[attendeeID] = &types.ExecutionResult{
+				Stderr:   chatMsg.Content,
+				ExitCode: 1,
+			}
+			g.mu.Unlock()
+		}
 	}
 
 	if isWaitingForApproval {
 		g.mu.Lock()
 		g.activeActors[attendeeID] = types.StateAwaitingApproval
+		g.pendingApprovals[attendeeID] = chatMsg.Approval
+		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
+			history := g.chatHistories[attendeeID]
+			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
+				g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], chatMsg)
+			}
+		}
 		g.addEventLocked(fmt.Sprintf("Actor %s awaiting human approval", attendeeID))
 		g.mu.Unlock()
 
@@ -818,6 +924,13 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	} else if resp.StatusCode == http.StatusOK {
 		g.mu.Lock()
 		g.activeActors[attendeeID] = types.StateSuspended
+		delete(g.pendingApprovals, attendeeID)
+		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
+			history := g.chatHistories[attendeeID]
+			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
+				g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], chatMsg)
+			}
+		}
 		g.addEventLocked(fmt.Sprintf("Actor %s completed turn - suspended to GCS", attendeeID))
 		g.mu.Unlock()
 
@@ -826,6 +939,81 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	}
 
 	return nil
+}
+
+func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	actorID := strings.TrimPrefix(r.URL.Path, "/api/actor/")
+	if actorID == "" || actorID == "/api/actor" {
+		http.Error(w, "actor ID is required", http.StatusBadRequest)
+		return
+	}
+	if strings.Contains(actorID, "/") {
+		actorID = strings.Trim(actorID, "/")
+	}
+	if actorID == "" {
+		http.Error(w, "actor ID is required", http.StatusBadRequest)
+		return
+	}
+
+	g.mu.RLock()
+	state, exists := g.activeActors[actorID]
+	if !exists {
+		state = types.StateSuspended
+	}
+
+	var history []types.ChatMessage
+	if h, ok := g.chatHistories[actorID]; ok && len(h) > 0 {
+		history = make([]types.ChatMessage, len(h))
+		copy(history, h)
+	} else {
+		history = []types.ChatMessage{}
+	}
+
+	var pendingApproval *types.ApprovalRequest
+	if pa, ok := g.pendingApprovals[actorID]; ok && pa != nil {
+		copyPA := *pa
+		pendingApproval = &copyPA
+	}
+
+	var lastResult *types.ExecutionResult
+	if lr, ok := g.lastResults[actorID]; ok && lr != nil {
+		copyLR := *lr
+		lastResult = &copyLR
+	}
+
+	var workerPod string
+	var snapshotLoc string
+	var snapshotSize int64
+
+	if state == types.StateRunning || state == types.StateRunningGVisor || state == types.StateThinkingVertexAI {
+		workerPod = "conf-workers-0"
+	} else {
+		snapshotLoc = fmt.Sprintf("gs://conf-demo-bucket/%s/actors/%s.snap", g.atespace, actorID)
+		snapshotSize = 384000
+	}
+	g.mu.RUnlock()
+
+	details := types.ActorDetails{
+		ActorID:           actorID,
+		State:             state,
+		WorkerPod:         workerPod,
+		SnapshotLocation:  snapshotLoc,
+		SnapshotSizeBytes: snapshotSize,
+		ChatHistory:       history,
+		PendingApproval:   pendingApproval,
+		LastResult:        lastResult,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodHead {
+		return
+	}
+	_ = json.NewEncoder(w).Encode(details)
 }
 
 func (g *Gateway) asyncSuspendActor(attendeeID string) {

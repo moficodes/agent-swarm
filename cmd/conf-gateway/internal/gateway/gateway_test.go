@@ -1744,3 +1744,268 @@ func TestSSEEventStreaming(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+func TestActorInspectorEndpoint(t *testing.T) {
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		sBody := string(bodyBytes)
+
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(sBody, "need-approval") {
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{
+				ID:        "msg-pending-approval",
+				Sender:    types.SenderAssistant,
+				Content:   "WAITING_FOR_APPROVAL: Scale telemetry pods",
+				Timestamp: time.Now().Unix(),
+				Approval: &types.ApprovalRequest{
+					ApprovalID: "app-inspector-1",
+					Summary:    "Scale telemetry pods",
+					Code:       "print('scaling pods')",
+					Language:   "python",
+					RiskLevel:  types.RiskHigh,
+				},
+			})
+			return
+		}
+
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-chat-ok",
+			Sender:    types.SenderAssistant,
+			Content:   "Telemetry inspection ready.",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+
+	upstreamMux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-approved-ok",
+			Sender:    types.SenderAssistant,
+			Content:   "Execution completed in 36ms (exit code 0):\nSystem audit passed",
+			Timestamp: time.Now().Unix(),
+		})
+	})
+
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithAtespace("ate-demo-conf"),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	t.Run("DefaultSuspendedActorInspection", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/api/actor/attendee-05")
+		if err != nil {
+			t.Fatalf("failed to request /api/actor/attendee-05: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+
+		var details types.ActorDetails
+		if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+			t.Fatalf("failed to decode ActorDetails: %v", err)
+		}
+
+		if details.ActorID != "attendee-05" {
+			t.Errorf("expected actor_id attendee-05, got %q", details.ActorID)
+		}
+		if details.State != types.StateSuspended {
+			t.Errorf("expected state %s, got %s", types.StateSuspended, details.State)
+		}
+		if !strings.Contains(details.SnapshotLocation, "bucket") || !strings.Contains(details.SnapshotLocation, "ate-demo-conf") {
+			t.Errorf("expected snapshot_location to contain bucket and atespace path, got %q", details.SnapshotLocation)
+		}
+		if details.SnapshotSizeBytes == 0 {
+			t.Errorf("expected non-zero snapshot_size_bytes, got %d", details.SnapshotSizeBytes)
+		}
+	})
+
+	t.Run("PendingApprovalStateAndPayload", func(t *testing.T) {
+		token := gw.MintToken("attendee-02")
+
+		chatReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"need-approval"}`))
+		chatReq.Header.Set("Content-Type", "application/json")
+		chatReq.Header.Set("Authorization", "Bearer "+token)
+
+		chatResp, err := http.DefaultClient.Do(chatReq)
+		if err != nil {
+			t.Fatalf("failed chat request: %v", err)
+		}
+		_ = chatResp.Body.Close()
+
+		resp, err := http.Get(ts.URL + "/api/actor/attendee-02")
+		if err != nil {
+			t.Fatalf("failed to request /api/actor/attendee-02: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+
+		var details types.ActorDetails
+		if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+			t.Fatalf("failed to decode ActorDetails: %v", err)
+		}
+
+		if details.ActorID != "attendee-02" {
+			t.Errorf("expected actor_id attendee-02, got %q", details.ActorID)
+		}
+		if details.State != types.StateAwaitingApproval {
+			t.Errorf("expected state %s, got %s", types.StateAwaitingApproval, details.State)
+		}
+		if details.PendingApproval == nil {
+			t.Fatalf("expected populated pending_approval, got nil")
+		}
+		if details.PendingApproval.ApprovalID != "app-inspector-1" {
+			t.Errorf("expected approval_id app-inspector-1, got %q", details.PendingApproval.ApprovalID)
+		}
+		if details.PendingApproval.Summary != "Scale telemetry pods" {
+			t.Errorf("expected summary 'Scale telemetry pods', got %q", details.PendingApproval.Summary)
+		}
+	})
+
+	t.Run("ExecutionHistoryAndLastResult", func(t *testing.T) {
+		token := gw.MintToken("attendee-01")
+
+		chatReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
+		chatReq.Header.Set("Content-Type", "application/json")
+		chatReq.Header.Set("Authorization", "Bearer "+token)
+		cResp, err := http.DefaultClient.Do(chatReq)
+		if err != nil {
+			t.Fatalf("failed chat request: %v", err)
+		}
+		_ = cResp.Body.Close()
+
+		appReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"app-inspector-1","decision":"APPROVE"}`))
+		appReq.Header.Set("Content-Type", "application/json")
+		appReq.Header.Set("Authorization", "Bearer "+token)
+		aResp, err := http.DefaultClient.Do(appReq)
+		if err != nil {
+			t.Fatalf("failed approve request: %v", err)
+		}
+		_ = aResp.Body.Close()
+
+		resp, err := http.Get(ts.URL + "/api/actor/attendee-01")
+		if err != nil {
+			t.Fatalf("failed to request /api/actor/attendee-01: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+
+		var details types.ActorDetails
+		if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+			t.Fatalf("failed to decode ActorDetails: %v", err)
+		}
+
+		if details.ActorID != "attendee-01" {
+			t.Errorf("expected actor_id attendee-01, got %q", details.ActorID)
+		}
+		if len(details.ChatHistory) == 0 {
+			t.Errorf("expected non-empty chat_history")
+		}
+		if details.LastResult == nil {
+			t.Fatalf("expected populated last_result, got nil")
+		}
+		if details.LastResult.ExitCode != 0 {
+			t.Errorf("expected exit_code 0, got %d", details.LastResult.ExitCode)
+		}
+		if details.LastResult.DurationMs != 36 {
+			t.Errorf("expected duration_ms 36, got %d", details.LastResult.DurationMs)
+		}
+		if !strings.Contains(details.LastResult.Stdout, "System audit passed") {
+			t.Errorf("expected stdout to contain 'System audit passed', got %q", details.LastResult.Stdout)
+		}
+	})
+
+	t.Run("MethodValidation", func(t *testing.T) {
+		methods := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
+		for _, m := range methods {
+			req, _ := http.NewRequest(m, ts.URL+"/api/actor/attendee-01", nil)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("failed %s request: %v", m, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("expected 405 Method Not Allowed for %s, got %d", m, resp.StatusCode)
+			}
+		}
+
+		// HEAD is allowed and returns 200 with empty body
+		headReq, _ := http.NewRequest(http.MethodHead, ts.URL+"/api/actor/attendee-01", nil)
+		headResp, err := http.DefaultClient.Do(headReq)
+		if err != nil {
+			t.Fatalf("failed HEAD request: %v", err)
+		}
+		defer headResp.Body.Close()
+		if headResp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 OK for HEAD, got %d", headResp.StatusCode)
+		}
+		headBody, _ := io.ReadAll(headResp.Body)
+		if len(headBody) != 0 {
+			t.Errorf("expected empty body for HEAD, got %d bytes", len(headBody))
+		}
+	})
+
+	t.Run("EmptyOrRootActorPath", func(t *testing.T) {
+		paths := []string{"/api/actor/", "/api/actor"}
+		for _, p := range paths {
+			resp, err := http.Get(ts.URL + p)
+			if err != nil {
+				t.Fatalf("failed GET %s: %v", p, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("expected 400 Bad Request for %s, got %d", p, resp.StatusCode)
+			}
+		}
+	})
+
+	t.Run("ConcurrencySafety", func(t *testing.T) {
+		const numWorkers = 8
+		const numIterations = 20
+
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+
+		for i := 0; i < numWorkers; i++ {
+			go func(workerID int) {
+				defer wg.Done()
+				client := &http.Client{Timeout: 5 * time.Second}
+
+				for j := 0; j < numIterations; j++ {
+					actorID := fmt.Sprintf("attendee-%02d", (workerID+j)%5+1)
+					resp, err := client.Get(ts.URL + "/api/actor/" + actorID)
+					if err != nil {
+						t.Errorf("concurrent GET /api/actor/%s failed: %v", actorID, err)
+						return
+					}
+					if resp.StatusCode != http.StatusOK {
+						t.Errorf("concurrent GET /api/actor/%s returned status %d", actorID, resp.StatusCode)
+					}
+					var details types.ActorDetails
+					_ = json.NewDecoder(resp.Body).Decode(&details)
+					_ = resp.Body.Close()
+
+					if details.ActorID != actorID {
+						t.Errorf("expected actor_id %s, got %s", actorID, details.ActorID)
+					}
+				}
+			}(i)
+		}
+
+		wg.Wait()
+	})
+}
