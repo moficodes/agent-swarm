@@ -444,12 +444,18 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	seq := atomic.AddUint64(&g.attendeeSeq, 1)
-	maxActors := 50
-	if g.maxActors > 0 {
-		maxActors = g.maxActors
+	requestedID := strings.TrimSpace(r.URL.Query().Get("attendee_id"))
+	var attendeeID string
+	if requestedID != "" && strings.HasPrefix(requestedID, "attendee-") {
+		attendeeID = requestedID
+	} else {
+		seq := atomic.AddUint64(&g.attendeeSeq, 1)
+		maxActors := 50
+		if g.maxActors > 0 {
+			maxActors = g.maxActors
+		}
+		attendeeID = fmt.Sprintf("attendee-%02d", (seq-1)%uint64(maxActors)+1)
 	}
-	attendeeID := fmt.Sprintf("attendee-%02d", (seq-1)%uint64(maxActors)+1)
 
 	token := g.MintToken(attendeeID)
 

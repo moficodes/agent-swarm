@@ -261,15 +261,14 @@
     }
 
     try {
-      const resp = await fetch('/api/session', { method: 'GET' });
+      const sessionURL = attendeeParam ? ('/api/session?attendee_id=' + encodeURIComponent(attendeeParam)) : '/api/session';
+      const resp = await fetch(sessionURL, { method: 'GET' });
       if (!resp.ok) {
         throw new Error('HTTP ' + resp.status + ' initializing session');
       }
       const data = await resp.json();
-      if (!attendeeParam) {
-        state.attendeeId = data.attendee_id;
-        localStorage.setItem('conf_attendee_id', state.attendeeId);
-      }
+      state.attendeeId = data.attendee_id;
+      localStorage.setItem('conf_attendee_id', state.attendeeId);
       state.token = data.token;
       localStorage.setItem('conf_attendee_token', state.token);
 
@@ -577,6 +576,13 @@
       });
     });
   }
+
+  // Cleanup on unload
+  window.addEventListener('beforeunload', function() {
+    if (state.eventSource) {
+      state.eventSource.close();
+    }
+  });
 
   // Initialize
   window.addEventListener('DOMContentLoaded', function() {

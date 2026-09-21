@@ -361,7 +361,10 @@
   // -------------------------------------------------------------------------
   // Telemetry Updates
   // -------------------------------------------------------------------------
+  let isTelemetryFetching = false;
   async function fetchTelemetry() {
+    if (isTelemetryFetching) return;
+    isTelemetryFetching = true;
     try {
       const resp = await fetch('/api/stage/telemetry', { cache: 'no-store' });
       if (!resp.ok) return;
@@ -373,6 +376,8 @@
     } catch (err) {
       // Background retry on transient network error
       console.warn('Telemetry poll transient error:', err);
+    } finally {
+      isTelemetryFetching = false;
     }
   }
 
