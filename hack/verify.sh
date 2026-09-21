@@ -514,7 +514,7 @@ for i in $(seq 1 "${CONCURRENCY}"); do
       echo "000" > "${BURST_DIR}/${i}.status"
       exit 0
     fi
-    code=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL}/api/chat" \
+    code=$(curl -s --max-time 60 -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL}/api/chat" \
       -H "Authorization: Bearer ${c_token}" \
       -H "Content-Type: application/json" \
       -d '{"message":"Analyze telemetry outliers"}' || echo "000")

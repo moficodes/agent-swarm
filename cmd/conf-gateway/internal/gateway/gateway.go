@@ -119,6 +119,15 @@ func WithStatusInterval(d time.Duration) Option {
 	}
 }
 
+// WithMaxActors sets the maximum number of pre-provisioned actors to cycle through.
+func WithMaxActors(max int) Option {
+	return func(g *Gateway) {
+		if max > 0 {
+			g.maxActors = max
+		}
+	}
+}
+
 // WithHTTPClient sets the HTTP client used for background polling and upstream requests.
 func WithHTTPClient(client *http.Client) Option {
 	return func(g *Gateway) {
@@ -148,6 +157,7 @@ type Gateway struct {
 	statusInterval time.Duration
 	httpClient     *http.Client
 	staticFS       fs.FS
+	maxActors      int
 
 	mux          *http.ServeMux
 	proxy        *httputil.ReverseProxy
@@ -175,6 +185,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		mux:            http.NewServeMux(),
 		activeActors:   make(map[string]types.ActorLifecycleState),
 		recentEvents:   make([]string, 0),
+		maxActors:      50,
 	}
 
 	for _, opt := range opts {
@@ -364,7 +375,11 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	seq := atomic.AddUint64(&g.attendeeSeq, 1)
-	attendeeID := fmt.Sprintf("attendee-%02d", (seq-1)%100+1)
+	maxActors := 50
+	if g.maxActors > 0 {
+		maxActors = g.maxActors
+	}
+	attendeeID := fmt.Sprintf("attendee-%02d", (seq-1)%uint64(maxActors)+1)
 
 	token := g.MintToken(attendeeID)
 
