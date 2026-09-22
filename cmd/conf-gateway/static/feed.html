@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<!--
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#07090e">
+  <meta name="description" content="Agent Substrate - Dedicated Full-Screen Live Stream Page of Multi-Agent Execution and Reasoning Feed">
+  <title>Substrate Live Stream // Fleeting Agent Action Feed</title>
+  <link rel="stylesheet" href="/static/feed.css">
+  <script src="/static/feed.js" defer></script>
+</head>
+<body>
+  <div class="feed-layout">
+    <!-- Top Navigation & Presentation Header -->
+    <header class="feed-header">
+      <div class="header-left">
+        <div class="brand">
+          <span class="brand-glyph" aria-hidden="true">⬡</span>
+          <div class="brand-info">
+            <h1 class="brand-title">AGENT SUBSTRATE</h1>
+            <span class="brand-subtitle">Live Stream // Action &amp; Reasoning Feed</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <!-- Live Envoy L7 Parking Meter Badge -->
+        <div id="parking-badge" class="parking-badge" title="Requests buffered in Envoy L7 proxy waiting for gVisor worker slots">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <span class="badge-label">Parked in Envoy:</span>
+          <span id="parking-count" class="badge-count">0</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <a href="/stage" class="btn-ctrl btn-nav" title="Switch to 16:9 Presentation Stage Dashboard">
+          <span class="btn-icon" aria-hidden="true">⊞</span> Stage Dashboard
+        </a>
+        <button id="btn-reset-all" class="btn-ctrl btn-reset" title="Suspend all actors to GCS and clear memory">
+          <span class="btn-icon" aria-hidden="true">⟲</span> Reset All
+        </button>
+      </div>
+    </header>
+
+    <!-- Toolbar: Search, State Filters, and Auto-scroll Toggle -->
+    <nav class="feed-toolbar" aria-label="Action Stream Controls">
+      <div class="filter-group" role="radiogroup" aria-label="Filter actions by state">
+        <button type="button" class="btn-filter active" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" class="btn-filter" data-filter="awaiting_approval" aria-pressed="false">Awaiting Approval</button>
+        <button type="button" class="btn-filter" data-filter="running" aria-pressed="false">Running</button>
+        <button type="button" class="btn-filter" data-filter="completed" aria-pressed="false">Completed</button>
+      </div>
+
+      <div class="toolbar-tools">
+        <div class="search-box">
+          <span class="search-icon" aria-hidden="true">🔍</span>
+          <input type="search" id="feed-search" placeholder="Search prompts, code, attendees..." autocomplete="off" spellcheck="false">
+          <button type="button" id="feed-search-clear" class="btn-clear-search" aria-label="Clear search" style="display:none">✕</button>
+        </div>
+
+        <label class="autoscroll-toggle" for="feed-autoscroll" title="Automatically jump to the latest action card as events arrive">
+          <input type="checkbox" id="feed-autoscroll" checked>
+          <span class="toggle-track">
+            <span class="toggle-thumb"></span>
+          </span>
+          <span class="toggle-text">Auto-scroll</span>
+        </label>
+      </div>
+    </nav>
+
+    <!-- Dedicated Full-Screen Live Action Stream Container -->
+    <main id="action-stream" class="action-stream" role="feed" aria-busy="false">
+      <!-- Empty state placeholder (cleared on first action card load) -->
+      <div id="feed-empty-state" class="feed-empty-state">
+        <div class="empty-glyph" aria-hidden="true">⚡</div>
+        <h2 class="empty-title">Fleet Action Stream Active</h2>
+        <p class="empty-desc">Connecting to real-time event pipeline... Waiting for attendee interactions, AI reasoning, and gVisor container sandbox executions.</p>
+        <div class="empty-specs">
+          <span class="spec-pill">Isolated gVisor Sandbox</span>
+          <span class="spec-pill">0 vCPU / 0 RAM in GCS Idle</span>
+          <span class="spec-pill">Envoy L7 Traffic Buffer</span>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

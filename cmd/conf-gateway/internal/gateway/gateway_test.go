@@ -3501,3 +3501,146 @@ drainLoop:
 		t.Errorf("expected preserved Code in history entry")
 	}
 }
+
+func TestFeedRoute(t *testing.T) {
+	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	requiredIDs := []string{
+		`id="action-stream"`,
+		`id="feed-search"`,
+		`id="feed-autoscroll"`,
+		`id="btn-reset-all"`,
+	}
+
+	// 1. GET /feed returns 200 OK with Content-Type: text/html and required DOM IDs
+	respFeed, err := http.Get(ts.URL + "/feed")
+	if err != nil {
+		t.Fatalf("failed to GET /feed: %v", err)
+	}
+	defer respFeed.Body.Close()
+
+	if respFeed.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /feed, got %d", respFeed.StatusCode)
+	}
+	if ct := respFeed.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("expected Content-Type text/html for GET /feed, got %q", ct)
+	}
+
+	bodyBytesFeed, err := io.ReadAll(respFeed.Body)
+	if err != nil {
+		t.Fatalf("failed to read /feed body: %v", err)
+	}
+	bodyFeed := string(bodyBytesFeed)
+	for _, id := range requiredIDs {
+		if !strings.Contains(bodyFeed, id) {
+			t.Errorf("expected GET /feed to contain %q, but was missing", id)
+		}
+	}
+
+	// GET /feed/ returns 200 OK with Content-Type: text/html and required DOM IDs
+	respFeedSlash, err := http.Get(ts.URL + "/feed/")
+	if err != nil {
+		t.Fatalf("failed to GET /feed/: %v", err)
+	}
+	defer respFeedSlash.Body.Close()
+
+	if respFeedSlash.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for GET /feed/, got %d", respFeedSlash.StatusCode)
+	}
+	if ct := respFeedSlash.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("expected Content-Type text/html for GET /feed/, got %q", ct)
+	}
+
+	bodyBytesFeedSlash, err := io.ReadAll(respFeedSlash.Body)
+	if err != nil {
+		t.Fatalf("failed to read /feed/ body: %v", err)
+	}
+	bodyFeedSlash := string(bodyBytesFeedSlash)
+	for _, id := range requiredIDs {
+		if !strings.Contains(bodyFeedSlash, id) {
+			t.Errorf("expected GET /feed/ to contain %q, but was missing", id)
+		}
+	}
+
+	// 2. HEAD /feed returns 200 OK with empty body
+	headResp, err := http.Head(ts.URL + "/feed")
+	if err != nil {
+		t.Fatalf("failed to HEAD /feed: %v", err)
+	}
+	defer headResp.Body.Close()
+
+	if headResp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for HEAD /feed, got %d", headResp.StatusCode)
+	}
+	if ct := headResp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("expected Content-Type text/html for HEAD /feed, got %q", ct)
+	}
+	headBody, _ := io.ReadAll(headResp.Body)
+	if len(headBody) != 0 {
+		t.Errorf("expected empty body for HEAD /feed, got %d bytes", len(headBody))
+	}
+
+	// 3. Subtree path isolation (/feed/subpath returns 404)
+	respSubtree, err := http.Get(ts.URL + "/feed/subpath")
+	if err != nil {
+		t.Fatalf("failed to GET /feed/subpath: %v", err)
+	}
+	defer respSubtree.Body.Close()
+
+	if respSubtree.StatusCode != http.StatusNotFound {
+		t.Errorf("expected status 404 for /feed/subpath, got %d", respSubtree.StatusCode)
+	}
+
+	// 4. Non-GET/HEAD methods return 405 Method Not Allowed
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		req, err := http.NewRequest(method, ts.URL+"/feed", nil)
+		if err != nil {
+			t.Fatalf("failed to create %s request: %v", method, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to execute %s request: %v", method, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("expected status 405 for %s /feed, got %d", method, resp.StatusCode)
+		}
+
+		// Also check /feed/
+		reqSlash, err := http.NewRequest(method, ts.URL+"/feed/", nil)
+		if err != nil {
+			t.Fatalf("failed to create %s request for /feed/: %v", method, err)
+		}
+		respSlash, err := http.DefaultClient.Do(reqSlash)
+		if err != nil {
+			t.Fatalf("failed to execute %s request for /feed/: %v", method, err)
+		}
+		_ = respSlash.Body.Close()
+		if respSlash.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("expected status 405 for %s /feed/, got %d", method, respSlash.StatusCode)
+		}
+	}
+
+	// 5. Static asset delivery: /static/feed.js and /static/feed.css return 200 OK
+	respJS, err := http.Get(ts.URL + "/static/feed.js")
+	if err != nil {
+		t.Fatalf("failed to GET /static/feed.js: %v", err)
+	}
+	defer respJS.Body.Close()
+	if respJS.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for GET /static/feed.js, got %d", respJS.StatusCode)
+	}
+
+	respCSS, err := http.Get(ts.URL + "/static/feed.css")
+	if err != nil {
+		t.Fatalf("failed to GET /static/feed.css: %v", err)
+	}
+	defer respCSS.Body.Close()
+	if respCSS.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200 for GET /static/feed.css, got %d", respCSS.StatusCode)
+	}
+}
