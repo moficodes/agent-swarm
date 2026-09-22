@@ -437,3 +437,83 @@ func TestEnhancementTypesSerialization(t *testing.T) {
 		}
 	})
 }
+
+func TestActionLogEntrySerialization(t *testing.T) {
+	t.Run("all fields populated", func(t *testing.T) {
+		entry := types.ActionLogEntry{
+			ID:            "action-101",
+			AttendeeID:    "attendee-42",
+			Timestamp:     1789910300,
+			Prompt:        "Calculate average latency",
+			ModelResponse: "Running calculation script",
+			Code:          "print(1 + 1)",
+			Language:      "python",
+			RiskLevel:     types.RiskMedium,
+			ApprovalID:    "app-99",
+			Decision:      types.DecisionApprove,
+			Execution: &types.ExecutionResult{
+				Stdout:     "2\n",
+				Stderr:     "",
+				ExitCode:   0,
+				DurationMs: 45,
+			},
+			WorkerPod: "conf-workers-2",
+			State:     types.StateRunningGVisor,
+		}
+
+		data, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatalf("failed to marshal ActionLogEntry: %v", err)
+		}
+
+		var decoded types.ActionLogEntry
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal ActionLogEntry: %v", err)
+		}
+
+		if diff := cmp.Diff(entry, decoded); diff != "" {
+			t.Fatalf("ActionLogEntry mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("optional fields omitted (omitempty)", func(t *testing.T) {
+		minimal := types.ActionLogEntry{
+			ID:         "action-102",
+			AttendeeID: "attendee-43",
+			Timestamp:  1789910400,
+			Prompt:     "Hello agent",
+			State:      types.StateThinkingVertexAI,
+		}
+
+		data, err := json.Marshal(minimal)
+		if err != nil {
+			t.Fatalf("failed to marshal ActionLogEntry: %v", err)
+		}
+
+		jsonStr := string(data)
+		omittedFields := []string{
+			`"model_response"`,
+			`"code"`,
+			`"language"`,
+			`"risk_level"`,
+			`"approval_id"`,
+			`"decision"`,
+			`"execution"`,
+			`"worker_pod"`,
+		}
+		for _, field := range omittedFields {
+			if strings.Contains(jsonStr, field) {
+				t.Errorf("expected field %s to be omitted, got %s", field, jsonStr)
+			}
+		}
+
+		var decoded types.ActionLogEntry
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal ActionLogEntry: %v", err)
+		}
+
+		if diff := cmp.Diff(minimal, decoded); diff != "" {
+			t.Fatalf("ActionLogEntry mismatch (-want +got):\n%s", diff)
+		}
+	})
+}

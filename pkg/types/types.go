@@ -183,3 +183,20 @@ type StateChangeEvent struct {
 	Subtext    string              `json:"subtext"`
 	Timestamp  int64               `json:"timestamp"`
 }
+
+// ActionLogEntry represents a full conversational or execution event streamed across the fleet.
+type ActionLogEntry struct {
+	ID            string              `json:"id"`
+	AttendeeID    string              `json:"attendee_id"`
+	Timestamp     int64               `json:"timestamp"`
+	Prompt        string              `json:"prompt"`
+	ModelResponse string              `json:"model_response,omitempty"`
+	Code          string              `json:"code,omitempty"`
+	Language      string              `json:"language,omitempty"`
+	RiskLevel     RiskLevel           `json:"risk_level,omitempty"`
+	ApprovalID    string              `json:"approval_id,omitempty"`
+	Decision      DecisionType        `json:"decision,omitempty"`
+	Execution     *ExecutionResult    `json:"execution,omitempty"`
+	WorkerPod     string              `json:"worker_pod,omitempty"`
+	State         ActorLifecycleState `json:"state"`
+}
