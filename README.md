@@ -201,10 +201,10 @@ A minute-by-minute cue sheet for presenting the demo on stage:
 |        | Speaker counts down:      | APPROVE at the exact same instant!| approvals hit Envoy; |
 |        | 3... 2... 1... TAP!       | 3... 2... 1... TAP APPROVE!"      | 48 requests park!    |
 +-----------------------------------------------------------------------------------------------+
-| 04:00  | Flip to Live Stream       | "Let's flip to the Live Stream    | Speaker toggles     |
-|        | Click [≡ Live Stream]     | view! Watch every Python script   | [≡ Live Stream];    |
-|        | in stage view switcher.   | execute inside gVisor and stream  | live action cards   |
-|        |                           | terminal stdout in real-time."    | stream over SSE.    |
+| 04:00  | Flip to Live Stream       | "Let's flip to the Live Stream    | Speaker toggles      |
+|        | Click [≡ Live Stream]     | view! Watch every Python script   | [≡ Live Stream];     |
+|        | in stage view switcher.   | execute inside gVisor and stream  | live action cards    |
+|        |                           | terminal stdout in real-time."    | stream over SSE.     |
 +-----------------------------------------------------------------------------------------------+
 | 04:30  | The Unparking Drain       | "Watch the parking meter drain!   | Workers multiplex    |
 |        | Parking meter counts down | Standard K8s would have 503'd.    | 200ms turns; all 50  |

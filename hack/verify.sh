@@ -159,6 +159,9 @@ STREAM_PID=""
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
+  if [[ -n "${PROBE_PID:-}" ]]; then
+    kill "${PROBE_PID}" 2>/dev/null || true
+  fi
   if [[ -n "${STREAM_PID}" ]]; then
     kill "${STREAM_PID}" 2>/dev/null || true
   fi
@@ -924,7 +927,7 @@ fi
 log_ok "SSE stream handshake established (HTTP 200 OK, Content-Type: ${STREAM_CONTENT_TYPE})"
 
 # Trigger an event and verify reading from the live stream
-curl -s -X POST "${GATEWAY_URL}/api/chat" \
+curl -s --max-time 10 -X POST "${GATEWAY_URL}/api/chat" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"message":"Stream verification probe"}' >/dev/null 2>&1 &

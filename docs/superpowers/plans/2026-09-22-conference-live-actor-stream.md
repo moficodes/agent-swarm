@@ -284,7 +284,7 @@ git commit -m "feat(conference): add integrated view switcher on stage between g
 Run: `./hack/verify/boilerplate.sh && ./hack/verify/gofmt.sh && ./hack/verify/go-modules.sh && ./hack/verify/licenses.sh && ./hack/verify/golangci-lint.sh`
 Expected: Clean pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add hack/verify-demo-conference.sh demos/conference/README.md
