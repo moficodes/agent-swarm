@@ -31,6 +31,8 @@
   let currentFilter = 'all';
   let searchQuery = '';
   const MAX_CARDS = 100;
+  let eventSource = null;
+  let parkingPollTimer = null;
 
   // -------------------------------------------------------------------------
   // HTML & String Utilities
@@ -165,7 +167,7 @@
     // Risk Pill
     let riskHTML = '';
     if (entry.risk_level) {
-      const rk = entry.risk_level.toLowerCase();
+      const rk = ['low', 'medium', 'high'].includes(entry.risk_level.toLowerCase()) ? entry.risk_level.toLowerCase() : 'high';
       riskHTML = `<span class="risk-pill ${rk}">${escapeHtml(entry.risk_level)} RISK</span>`;
     }
 
@@ -200,7 +202,7 @@
           <div class="code-header-bar">
             <span class="code-lang-tag">${escapeHtml(lang)}</span>
             <div class="code-actions">
-              <button type="button" class="btn-copy-code" data-code="${escapeAttribute(entry.code)}">
+              <button type="button" class="btn-copy-code">
                 📋 Copy Code
               </button>
             </div>
@@ -234,7 +236,7 @@
     return `
       <div class="card-header-row">
         <div class="card-attendee-meta">
-          <a href="/chat?attendee=${encodeURIComponent(attendeeId)}" target="_blank" class="attendee-link" title="Open chat session in new tab">
+          <a href="/chat?attendee=${encodeURIComponent(attendeeId)}" target="_blank" rel="noopener noreferrer" class="attendee-link" title="Open chat session in new tab">
             <span class="attendee-glyph" aria-hidden="true">👤</span> Attendee #${escapeHtml(attendeeNum)}
           </a>
           <span class="card-timestamp">${formatTimestamp(entry.timestamp)}</span>
@@ -262,13 +264,19 @@
     `;
   }
 
-  function renderOrUpdateCard(entry) {
+  function renderOrUpdateCard(entry, skipScroll) {
     if (!el.actionStream || !entry || !entry.id) return;
 
     // Clear empty state placeholder if present
     const emptyState = document.getElementById('feed-empty-state');
     if (emptyState) {
       emptyState.remove();
+    }
+
+    // Clear clean slate banner if present
+    const cleanSlate = el.actionStream.querySelector('.clean-slate-banner');
+    if (cleanSlate) {
+      cleanSlate.remove();
     }
 
     const cardId = 'action-' + entry.id;
@@ -297,7 +305,7 @@
       }
 
       // Auto-scroll to top when enabled
-      if (el.feedAutoscroll && el.feedAutoscroll.checked) {
+      if (!skipScroll && el.feedAutoscroll && el.feedAutoscroll.checked) {
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
     }
@@ -395,7 +403,7 @@
   // Live SSE Event Stream Connection
   // -------------------------------------------------------------------------
   function connectStream() {
-    const eventSource = new EventSource('/api/stream');
+    eventSource = new EventSource('/api/stream');
 
     eventSource.addEventListener('action_entry', (e) => {
       try {
@@ -441,7 +449,8 @@
       if (Array.isArray(history) && history.length > 0) {
         // history is in chronological order (oldest to newest)
         // rendering each sequentially with prepend puts newest at the top
-        history.forEach(entry => renderOrUpdateCard(entry));
+        history.forEach(entry => renderOrUpdateCard(entry, true));
+        window.scrollTo({ top: 0 });
       }
     } catch (err) {
       console.error('Failed to fetch feed history:', err);
@@ -481,9 +490,12 @@
       el.actionStream.addEventListener('click', (e) => {
         const copyBtn = e.target.closest('.btn-copy-code');
         if (copyBtn) {
-          const code = copyBtn.dataset.code;
-          if (code) {
-            copyTextToClipboard(code, copyBtn);
+          const section = copyBtn.closest('.card-code-section');
+          if (section) {
+            const codeEl = section.querySelector('code');
+            if (codeEl) {
+              copyTextToClipboard(codeEl.textContent, copyBtn);
+            }
           }
         }
       });
@@ -557,13 +569,18 @@
   }
 
   // -------------------------------------------------------------------------
-  // Initialization
+  // Initialization & Lifecycle Cleanup
   // -------------------------------------------------------------------------
+  window.addEventListener('beforeunload', function() {
+    if (eventSource) eventSource.close();
+    if (parkingPollTimer) clearInterval(parkingPollTimer);
+  });
+
   document.addEventListener('DOMContentLoaded', () => {
     initHandlers();
     fetchFeedHistory();
     connectStream();
     pollParkingBadge();
-    setInterval(pollParkingBadge, 1000);
+    parkingPollTimer = setInterval(pollParkingBadge, 1000);
   });
 })();
