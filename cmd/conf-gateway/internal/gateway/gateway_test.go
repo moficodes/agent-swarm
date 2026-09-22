@@ -83,18 +83,33 @@ func (m *mockSuspender) waitForCalls(n int, timeout time.Duration) []suspendCall
 
 type mockSimulationController struct {
 	stopped atomic.Bool
+	running atomic.Bool
+	count   atomic.Int64
 }
 
 func (m *mockSimulationController) Start(count int) error {
+	m.stopped.Store(false)
+	m.running.Store(true)
+	m.count.Store(int64(count))
 	return nil
 }
 
 func (m *mockSimulationController) Stop() {
 	m.stopped.Store(true)
+	m.running.Store(false)
 }
 
 func (m *mockSimulationController) Status() (bool, int) {
-	return !m.stopped.Load(), 0
+	if m.stopped.Load() {
+		return false, 0
+	}
+	return m.running.Load(), int(m.count.Load())
+}
+
+func (m *mockSimulationController) SetStatus(running bool, count int) {
+	m.stopped.Store(!running)
+	m.running.Store(running)
+	m.count.Store(int64(count))
 }
 
 func TestSessionMinting(t *testing.T) {
@@ -3643,4 +3658,221 @@ func TestFeedRoute(t *testing.T) {
 	if respCSS.StatusCode != http.StatusOK {
 		t.Errorf("expected status 200 for GET /static/feed.css, got %d", respCSS.StatusCode)
 	}
+}
+
+func TestSegmentedSessionAllocation(t *testing.T) {
+	requestAttendee := func(t *testing.T, client *http.Client, endpoint string) string {
+		t.Helper()
+		resp, err := client.Get(endpoint)
+		if err != nil {
+			t.Fatalf("failed to GET %s: %v", endpoint, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+		var payload struct {
+			AttendeeID string `json:"attendee_id"`
+			Token      string `json:"token"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode json response: %v", err)
+		}
+		return payload.AttendeeID
+	}
+
+	t.Run("NoSimulationRunning", func(t *testing.T) {
+		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+			gateway.WithJWTSecret("secret"),
+		)
+		defer gw.Close()
+
+		sim := &mockSimulationController{}
+		gw.SetSimulationController(sim)
+
+		ts := httptest.NewServer(gw.Handler())
+		defer ts.Close()
+
+		for i := 1; i <= 5; i++ {
+			expected := fmt.Sprintf("attendee-%02d", i)
+			got := requestAttendee(t, ts.Client(), ts.URL+"/api/session")
+			if got != expected {
+				t.Fatalf("call %d: expected %s, got %s", i, expected, got)
+			}
+		}
+	})
+
+	t.Run("SimulationRunningCount25", func(t *testing.T) {
+		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+			gateway.WithJWTSecret("secret"),
+		)
+		defer gw.Close()
+
+		sim := &mockSimulationController{}
+		sim.SetStatus(true, 25)
+		gw.SetSimulationController(sim)
+
+		ts := httptest.NewServer(gw.Handler())
+		defer ts.Close()
+
+		// Successive calls allocate attendee-26 up to attendee-50
+		for i := 26; i <= 50; i++ {
+			expected := fmt.Sprintf("attendee-%02d", i)
+			got := requestAttendee(t, ts.Client(), ts.URL+"/api/session")
+			if got != expected {
+				t.Fatalf("expected %s, got %s", expected, got)
+			}
+		}
+
+		// Then wraps back to attendee-26
+		gotWrap := requestAttendee(t, ts.Client(), ts.URL+"/api/session")
+		if gotWrap != "attendee-26" {
+			t.Fatalf("expected wrap-around to attendee-26, got %s", gotWrap)
+		}
+	})
+
+	t.Run("SimulationRunningCount50MaxActors100", func(t *testing.T) {
+		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+			gateway.WithJWTSecret("secret"),
+			gateway.WithMaxActors(100),
+		)
+		defer gw.Close()
+
+		sim := &mockSimulationController{}
+		sim.SetStatus(true, 50)
+		gw.SetSimulationController(sim)
+
+		ts := httptest.NewServer(gw.Handler())
+		defer ts.Close()
+
+		// Successive calls allocate attendee-51 up to attendee-100
+		for i := 51; i <= 100; i++ {
+			expected := fmt.Sprintf("attendee-%02d", i)
+			got := requestAttendee(t, ts.Client(), ts.URL+"/api/session")
+			if got != expected {
+				t.Fatalf("expected %s, got %s", expected, got)
+			}
+		}
+
+		// Then wraps back to attendee-51
+		gotWrap := requestAttendee(t, ts.Client(), ts.URL+"/api/session")
+		if gotWrap != "attendee-51" {
+			t.Fatalf("expected wrap-around to attendee-51, got %s", gotWrap)
+		}
+	})
+
+	t.Run("ExplicitAttendeeID", func(t *testing.T) {
+		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+			gateway.WithJWTSecret("secret"),
+		)
+		defer gw.Close()
+
+		sim := &mockSimulationController{}
+		sim.SetStatus(true, 25)
+		gw.SetSimulationController(sim)
+
+		ts := httptest.NewServer(gw.Handler())
+		defer ts.Close()
+
+		// When simulation is running
+		got := requestAttendee(t, ts.Client(), ts.URL+"/api/session?attendee_id=attendee-07")
+		if got != "attendee-07" {
+			t.Fatalf("with simulation running: expected attendee-07, got %s", got)
+		}
+
+		// When simulation is stopped
+		sim.SetStatus(false, 0)
+		gotStopped := requestAttendee(t, ts.Client(), ts.URL+"/api/session?attendee_id=attendee-07")
+		if gotStopped != "attendee-07" {
+			t.Fatalf("with simulation stopped: expected attendee-07, got %s", gotStopped)
+		}
+	})
+
+	t.Run("ConcurrencySafety", func(t *testing.T) {
+		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+			gateway.WithJWTSecret("secret"),
+		)
+		defer gw.Close()
+
+		sim := &mockSimulationController{}
+		gw.SetSimulationController(sim)
+
+		ts := httptest.NewServer(gw.Handler())
+		defer ts.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		var wg sync.WaitGroup
+		// Background goroutine toggling simulation state
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			counts := []int{0, 10, 25, 40, 0}
+			idx := 0
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					c := counts[idx%len(counts)]
+					if c == 0 {
+						sim.SetStatus(false, 0)
+					} else {
+						sim.SetStatus(true, c)
+					}
+					idx++
+					time.Sleep(2 * time.Millisecond)
+				}
+			}
+		}()
+
+		// Multiple worker goroutines requesting sessions
+		const workers = 8
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				client := ts.Client()
+				for i := 0; i < 25; i++ {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					var reqURL string
+					if workerID%2 == 0 {
+						reqURL = ts.URL + "/api/session"
+					} else {
+						reqURL = ts.URL + "/api/session?attendee_id=attendee-07"
+					}
+					resp, err := client.Get(reqURL)
+					if err != nil {
+						t.Errorf("worker %d request failed: %v", workerID, err)
+						return
+					}
+					if resp.StatusCode != http.StatusOK {
+						t.Errorf("worker %d got status %d", workerID, resp.StatusCode)
+						resp.Body.Close()
+						return
+					}
+					var payload struct {
+						AttendeeID string `json:"attendee_id"`
+					}
+					if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+						t.Errorf("worker %d json decode error: %v", workerID, err)
+						resp.Body.Close()
+						return
+					}
+					resp.Body.Close()
+
+					if !strings.HasPrefix(payload.AttendeeID, "attendee-") {
+						t.Errorf("unexpected attendee ID: %s", payload.AttendeeID)
+					}
+				}
+			}(w)
+		}
+
+		wg.Wait()
+	})
 }

@@ -518,12 +518,32 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 	if requestedID != "" && strings.HasPrefix(requestedID, "attendee-") {
 		attendeeID = requestedID
 	} else {
-		seq := atomic.AddUint64(&g.attendeeSeq, 1)
 		maxActors := 50
 		if g.maxActors > 0 {
 			maxActors = g.maxActors
 		}
-		attendeeID = fmt.Sprintf("attendee-%02d", (seq-1)%uint64(maxActors)+1)
+
+		startOffset := 0
+		g.mu.Lock()
+		sc := g.simController
+		g.mu.Unlock()
+
+		if sc != nil {
+			running, count := sc.Status()
+			if running && count > 0 && count < maxActors {
+				startOffset = count
+			}
+		}
+
+		availableRange := maxActors - startOffset
+		if availableRange <= 0 {
+			availableRange = maxActors
+			startOffset = 0
+		}
+
+		seq := atomic.AddUint64(&g.attendeeSeq, 1)
+		index := startOffset + int((seq-1)%uint64(availableRange)) + 1
+		attendeeID = fmt.Sprintf("attendee-%02d", index)
 	}
 
 	token := g.MintToken(attendeeID)
