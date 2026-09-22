@@ -408,6 +408,9 @@ fi
 # Print configuration banner after URLs are finalized
 print_banner
 
+# Ensure clean starting state
+curl -s -X POST "${GATEWAY_URL}/api/reset" >/dev/null 2>&1 || true
+
 # =========================================================================
 # Step 1: Health & Static UI Assets
 # =========================================================================
