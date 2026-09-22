@@ -35,6 +35,10 @@ limitations under the License.
         </div>
       </div>
       <div class="header-controls">
+        <div class="view-switcher" role="toolbar" aria-label="Presentation view mode">
+          <button id="view-mode-grid" class="btn-view active" aria-pressed="true">⊞ Grid Matrix</button>
+          <button id="view-mode-stream" class="btn-view" aria-pressed="false">≡ Live Stream</button>
+        </div>
         <button id="btn-sim-25" class="btn-ctrl">▶ Simulate 25</button>
         <button id="btn-sim-50" class="btn-ctrl">▶ Simulate 50</button>
         <button id="btn-sim-stop" class="btn-ctrl btn-stop" style="display:none">■ Stop</button>
@@ -182,23 +186,25 @@ limitations under the License.
           </div>
         </div>
 
-        <!-- 100 Attendee Fleet Grid -->
+        <!-- 100 Attendee Fleet Grid & Integrated Stream View -->
         <div class="fleet-section">
-          <div class="section-title-row">
-            <div class="fleet-heading">
-              <h3 class="section-label">ATTENDEE AGENT FLEET MATRIX</h3>
-              <span class="section-sub">100 Actors multiplexed over 2 worker pods</span>
+          <!-- Grid View Mode -->
+          <div id="stage-grid-view" class="stage-view-container active">
+            <div class="section-title-row">
+              <div class="fleet-heading">
+                <h3 class="section-label">ATTENDEE AGENT FLEET MATRIX</h3>
+                <span class="section-sub">100 Actors multiplexed over 2 worker pods</span>
+              </div>
+              <!-- Legend for States -->
+              <div class="fleet-legend">
+                <span class="legend-item"><span class="legend-dot suspended"></span> SUSPENDED (in GCS)</span>
+                <span class="legend-item"><span class="legend-dot thinking"></span> THINKING (Vertex AI)</span>
+                <span class="legend-item"><span class="legend-dot awaiting"></span> AWAITING APPROVAL</span>
+                <span class="legend-item"><span class="legend-dot parked"></span> PARKED (in Envoy)</span>
+                <span class="legend-item"><span class="legend-dot running"></span> RUNNING (in gVisor)</span>
+              </div>
             </div>
-            <!-- Legend for States -->
-            <div class="fleet-legend">
-              <span class="legend-item"><span class="legend-dot suspended"></span> SUSPENDED (in GCS)</span>
-              <span class="legend-item"><span class="legend-dot thinking"></span> THINKING (Vertex AI)</span>
-              <span class="legend-item"><span class="legend-dot awaiting"></span> AWAITING APPROVAL</span>
-              <span class="legend-item"><span class="legend-dot parked"></span> PARKED (in Envoy)</span>
-              <span class="legend-item"><span class="legend-dot running"></span> RUNNING (in gVisor)</span>
-            </div>
-          </div>
-          <div id="fleet-grid" class="fleet-grid">
+            <div id="fleet-grid" class="fleet-grid">
             <!-- 100 Attendee Badge Slots (Attendee 01 .. Attendee 100) -->
             <div class="fleet-badge suspended" id="badge-attendee-01" data-id="attendee-01"><span class="badge-dot"></span><span class="badge-name">Attendee 01</span><span class="badge-state-label">SUSPENDED</span></div>
             <div class="fleet-badge suspended" id="badge-attendee-02" data-id="attendee-02"><span class="badge-dot"></span><span class="badge-name">Attendee 02</span><span class="badge-state-label">SUSPENDED</span></div>
@@ -302,6 +308,47 @@ limitations under the License.
             <div class="fleet-badge suspended" id="badge-attendee-100" data-id="attendee-100"><span class="badge-dot"></span><span class="badge-name">Attendee 100</span><span class="badge-state-label">SUSPENDED</span></div>
           </div>
         </div>
+
+        <!-- Integrated Live Stream View Mode -->
+        <div id="stage-stream-view" class="stage-view-container" style="display:none">
+          <!-- Stream Toolbar -->
+          <div class="stage-stream-toolbar">
+            <div class="filter-group" role="toolbar" aria-label="Filter stream actions by state">
+              <button type="button" class="btn-filter active" data-filter="all" aria-pressed="true">All</button>
+              <button type="button" class="btn-filter" data-filter="awaiting_approval" aria-pressed="false">Awaiting Approval</button>
+              <button type="button" class="btn-filter" data-filter="running" aria-pressed="false">Running</button>
+              <button type="button" class="btn-filter" data-filter="completed" aria-pressed="false">Completed</button>
+            </div>
+
+            <div class="toolbar-tools">
+              <div class="search-box">
+                <span class="search-icon" aria-hidden="true">🔍</span>
+                <input type="search" id="stage-stream-search" placeholder="Search prompts, code, attendees..." autocomplete="off" spellcheck="false">
+                <button type="button" id="stage-stream-search-clear" class="btn-clear-search" aria-label="Clear search" style="display:none">✕</button>
+              </div>
+
+              <label class="autoscroll-toggle" for="stage-stream-autoscroll" title="Automatically jump to the latest action card as events arrive">
+                <input type="checkbox" id="stage-stream-autoscroll" checked>
+                <span class="toggle-track">
+                  <span class="toggle-thumb"></span>
+                </span>
+                <span class="toggle-text">Auto-scroll</span>
+              </label>
+
+              <a href="/feed" target="_blank" rel="noopener noreferrer" class="link-fullscreen-feed">↗ Full-Screen Stream</a>
+            </div>
+          </div>
+
+          <!-- Live Action Stream Container -->
+          <div id="stage-action-stream" class="stage-action-stream" role="feed" aria-busy="false">
+            <div id="stage-stream-empty" class="stream-empty-state">
+              <div class="empty-glyph" aria-hidden="true">⚡</div>
+              <h4 class="empty-title">Stage Action Stream Active</h4>
+              <p class="empty-desc">Awaiting real-time stream actions, prompts, and sandbox executions...</p>
+            </div>
+          </div>
+        </div>
+      </div>
       </section>
     </main>
 

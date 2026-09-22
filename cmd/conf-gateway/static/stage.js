@@ -55,6 +55,15 @@
     spotlightCode: document.getElementById('spotlight-code'),
     spotlightOutput: document.getElementById('spotlight-output'),
     spotlightPhoneLink: document.getElementById('spotlight-phone-link'),
+    viewModeGrid: document.getElementById('view-mode-grid'),
+    viewModeStream: document.getElementById('view-mode-stream'),
+    stageGridView: document.getElementById('stage-grid-view'),
+    stageStreamView: document.getElementById('stage-stream-view'),
+    stageActionStream: document.getElementById('stage-action-stream'),
+    stageStreamSearch: document.getElementById('stage-stream-search'),
+    stageStreamSearchClear: document.getElementById('stage-stream-search-clear'),
+    stageStreamAutoscroll: document.getElementById('stage-stream-autoscroll'),
+    streamFilterButtons: document.querySelectorAll('#stage-stream-view .btn-filter'),
   };
 
   // State
@@ -62,6 +71,11 @@
   let simulationActive = false;
   let simulationCount = 0;
   let currentSpotlightActorId = null;
+  let currentStreamFilter = 'all';
+  let streamSearchQuery = '';
+  const MAX_STREAM_CARDS = 100;
+  let streamEventSource = null;
+  let hasFetchedFeedHistory = false;
 
   // -------------------------------------------------------------------------
   // Offline Pure-JS SVG QR Code Generator (ISO/IEC 18004 compliant subset)
@@ -605,40 +619,57 @@
   }
 
   // -------------------------------------------------------------------------
-  // Syntax Highlighter for Code in Spotlight Drawer
+  // Syntax Highlighter for Code in Spotlight Drawer & Stream Cards
   // -------------------------------------------------------------------------
-  function highlightCode(code) {
+  function highlightCode(code, lang) {
     if (!code) return '';
-    const tokenRegex = /(#.*$)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\b(?:def|class|return|import|from|if|elif|else|for|while|try|except|finally|with|as|pass|break|continue|lambda|yield|in|is|not|and|or|print|None|True|False)\b)|(\b[a-zA-Z_][a-zA-Z0-9_]*(?=\s*\())|(\b\d+(?:\.\d+)?\b)/gm;
-    let result = '';
+
+    const commentRegex = /#[^\n]*/;
+    const strRegex = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/;
+    const numRegex = /\b\d+(?:\.\d+)?\b/;
+
+    const pyKeywords = /\b(def|class|return|if|elif|else|while|for|in|try|except|finally|with|as|import|from|pass|break|continue|lambda|yield|async|await|and|or|not|is|raise|global|nonlocal|assert|del|True|False|None)\b/;
+    const bashKeywords = /\b(if|then|else|elif|fi|case|esac|for|while|until|do|done|in|function|select|time|echo|export|exit|source|grep|sed|awk|curl|jq|kubectl|sudo|chmod|cat|ls|rm|mkdir)\b/;
+
+    const isBash = (lang || '').toLowerCase().includes('bash') || (lang || '').toLowerCase().includes('sh');
+    const kwRegex = isBash ? bashKeywords : pyKeywords;
+
+    const tokenRegex = new RegExp(
+      [
+        strRegex.source,
+        commentRegex.source,
+        kwRegex.source,
+        numRegex.source,
+      ].join('|'),
+      'g'
+    );
+
     let lastIndex = 0;
+    let out = '';
     let match;
 
     while ((match = tokenRegex.exec(code)) !== null) {
-      if (match.index > lastIndex) {
-        result += escapeHTML(code.slice(lastIndex, match.index));
+      const matchIndex = match.index;
+      if (matchIndex > lastIndex) {
+        out += escapeHTML(code.slice(lastIndex, matchIndex));
       }
-      const [full, comment, string, keyword, fn, number] = match;
-      if (comment) {
-        result += '<span class="syn-com">' + escapeHTML(comment) + '</span>';
-      } else if (string) {
-        result += '<span class="syn-str">' + escapeHTML(string) + '</span>';
-      } else if (keyword) {
-        result += '<span class="syn-kwd">' + escapeHTML(keyword) + '</span>';
-      } else if (fn) {
-        result += '<span class="syn-fn">' + escapeHTML(fn) + '</span>';
-      } else if (number) {
-        result += '<span class="syn-num">' + escapeHTML(number) + '</span>';
+      const token = match[0];
+      if (token.startsWith('#')) {
+        out += `<span class="syn-com tok-comment">${escapeHTML(token)}</span>`;
+      } else if (token.startsWith('"') || token.startsWith("'")) {
+        out += `<span class="syn-str tok-string">${escapeHTML(token)}</span>`;
+      } else if (/^\d/.test(token)) {
+        out += `<span class="syn-num tok-number">${escapeHTML(token)}</span>`;
       } else {
-        result += escapeHTML(full);
+        out += `<span class="syn-kwd tok-keyword">${escapeHTML(token)}</span>`;
       }
       lastIndex = tokenRegex.lastIndex;
     }
 
     if (lastIndex < code.length) {
-      result += escapeHTML(code.slice(lastIndex));
+      out += escapeHTML(code.slice(lastIndex));
     }
-    return result;
+    return out;
   }
 
   // -------------------------------------------------------------------------
@@ -904,6 +935,7 @@
       }
       await fetchSimulationStatus();
       await fetchTelemetry();
+      handleStreamReset();
       if (currentSpotlightActorId) {
         refreshSpotlightDrawer(currentSpotlightActorId);
       }
@@ -911,6 +943,377 @@
       console.error('Failed to reset cluster:', err);
       el.btnResetAll.textContent = origText;
       el.btnResetAll.disabled = false;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Integrated Stream View Controller
+  // -------------------------------------------------------------------------
+  function switchViewMode(mode) {
+    if (mode === 'grid') {
+      if (el.viewModeGrid) {
+        el.viewModeGrid.classList.add('active');
+        el.viewModeGrid.setAttribute('aria-pressed', 'true');
+      }
+      if (el.viewModeStream) {
+        el.viewModeStream.classList.remove('active');
+        el.viewModeStream.setAttribute('aria-pressed', 'false');
+      }
+      if (el.stageGridView) {
+        el.stageGridView.style.display = '';
+        el.stageGridView.classList.add('active');
+      }
+      if (el.stageStreamView) {
+        el.stageStreamView.style.display = 'none';
+        el.stageStreamView.classList.remove('active');
+      }
+    } else if (mode === 'stream') {
+      if (el.viewModeStream) {
+        el.viewModeStream.classList.add('active');
+        el.viewModeStream.setAttribute('aria-pressed', 'true');
+      }
+      if (el.viewModeGrid) {
+        el.viewModeGrid.classList.remove('active');
+        el.viewModeGrid.setAttribute('aria-pressed', 'false');
+      }
+      if (el.stageStreamView) {
+        el.stageStreamView.style.display = 'flex';
+        el.stageStreamView.classList.add('active');
+      }
+      if (el.stageGridView) {
+        el.stageGridView.style.display = 'none';
+        el.stageGridView.classList.remove('active');
+      }
+      if (!hasFetchedFeedHistory) {
+        fetchStreamFeedHistory();
+      }
+    }
+  }
+
+  function formatStreamTimestamp(ts) {
+    if (!ts) return 'Just now';
+    const date = new Date(ts * 1000);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function getStreamStateBadgeHTML(state) {
+    const s = (state || '').toUpperCase();
+    switch (s) {
+      case 'AWAITING_APPROVAL':
+        return '<span class="status-pill awaiting">⏸️ Awaiting Approval</span>';
+      case 'RUNNING':
+      case 'RUNNING_GVISOR':
+        return '<span class="status-pill running">🚀 Running Sandbox</span>';
+      case 'THINKING_VERTEX_AI':
+        return '<span class="status-pill thinking">🧠 Reasoning (Vertex AI)</span>';
+      case 'PARKED':
+      case 'PARKED_ENVOY':
+        return '<span class="status-pill parked">⏳ Parked in Envoy</span>';
+      case 'SUSPENDED':
+      default:
+        return '<span class="status-pill suspended">⚡ Suspended in GCS</span>';
+    }
+  }
+
+  function getStreamFootprintHTML(state, workerPod) {
+    const s = (state || '').toUpperCase();
+    switch (s) {
+      case 'AWAITING_APPROVAL':
+        return '<span class="footprint-pill idle" title="Process snapshotted to GCS">0 MB RAM in GCS</span>';
+      case 'RUNNING':
+      case 'RUNNING_GVISOR':
+        return `<span class="footprint-pill active" title="Active worker pod">${escapeHTML(workerPod || 'conf-workers-0')} (gVisor)</span>`;
+      case 'THINKING_VERTEX_AI':
+        return '<span class="footprint-pill active" title="Model reasoning">Gemini 2.5 Flash</span>';
+      case 'PARKED':
+      case 'PARKED_ENVOY':
+        return '<span class="footprint-pill active" title="Queued in Envoy buffer">Envoy L7 Buffer</span>';
+      case 'SUSPENDED':
+      default:
+        return '<span class="footprint-pill idle" title="Process snapshotted to GCS">0 vCPU / 0 MB in GCS</span>';
+    }
+  }
+
+  function renderStreamCardInner(entry) {
+    const attendeeId = entry.attendee_id || 'unknown';
+    const attendeeDisplayName = formatActorName(attendeeId);
+    const state = (entry.state || 'SUSPENDED').toUpperCase();
+
+    // Risk Pill
+    let riskHTML = '';
+    if (entry.risk_level) {
+      const rk = ['low', 'medium', 'high'].includes(entry.risk_level.toLowerCase()) ? entry.risk_level.toLowerCase() : 'high';
+      riskHTML = `<span class="risk-pill ${rk}">${escapeHTML(entry.risk_level)} RISK</span>`;
+    }
+
+    // Prompt Section
+    let promptHTML = '';
+    if (entry.prompt) {
+      promptHTML = `
+        <div class="card-prompt-section">
+          <span class="section-label">User Prompt</span>
+          <div class="card-prompt-text">${escapeHTML(entry.prompt)}</div>
+        </div>
+      `;
+    }
+
+    // Model Response Section
+    let responseHTML = '';
+    if (entry.model_response && !entry.model_response.startsWith('Execution completed in ')) {
+      responseHTML = `
+        <div class="card-response-section">
+          <span class="section-label">AI Reasoning &amp; Plan</span>
+          <div class="card-response-text">${escapeHTML(entry.model_response)}</div>
+        </div>
+      `;
+    }
+
+    // Code Block Section
+    let codeHTML = '';
+    if (entry.code) {
+      const lang = entry.language || 'python';
+      codeHTML = `
+        <div class="card-code-section">
+          <div class="code-header-bar">
+            <span class="code-lang-tag">${escapeHTML(lang)}</span>
+            <div class="code-actions">
+              <button type="button" class="btn-copy-code" title="Copy code snippet">
+                📋 Copy Code
+              </button>
+            </div>
+          </div>
+          <pre class="code-pre"><code>${highlightCode(entry.code, lang)}</code></pre>
+        </div>
+      `;
+    }
+
+    // Execution Terminal Section
+    let terminalHTML = '';
+    if (entry.execution) {
+      const exitClass = entry.execution.exit_code === 0 ? 'exit-0' : 'exit-err';
+      terminalHTML = `
+        <div class="card-terminal-section">
+          <div class="terminal-header-bar">
+            <span class="terminal-title">💻 gVisor Sandbox Output</span>
+            <div class="terminal-metrics">
+              <span class="term-exit-status ${exitClass}">Exit ${entry.execution.exit_code}</span>
+              <span class="term-duration">${entry.execution.duration_ms}ms</span>
+            </div>
+          </div>
+          <div class="terminal-body">
+            ${entry.execution.stdout ? `<div class="term-stdout">${escapeHTML(entry.execution.stdout)}</div>` : ''}
+            ${entry.execution.stderr ? `<div class="term-stderr">${escapeHTML(entry.execution.stderr)}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="card-header-row">
+        <div class="card-attendee-meta">
+          <a href="/chat?attendee=${encodeURIComponent(attendeeId)}" class="attendee-link" title="Click to view in Spotlight Drawer">
+            <span class="attendee-glyph" aria-hidden="true">👤</span> ${escapeHTML(attendeeDisplayName)}
+          </a>
+          <span class="card-timestamp">${formatStreamTimestamp(entry.timestamp)}</span>
+        </div>
+        <div class="card-badges">
+          ${getStreamFootprintHTML(state, entry.worker_pod)}
+          ${getStreamStateBadgeHTML(state)}
+          ${riskHTML}
+        </div>
+      </div>
+
+      ${promptHTML}
+      ${responseHTML}
+      ${codeHTML}
+      ${terminalHTML}
+
+      <div class="card-footer-row">
+        <div class="footer-left">
+          <span>Action ID: <code>${escapeHTML(entry.id)}</code></span>
+        </div>
+        <div class="footer-right">
+          <span>Target: <code>ate-demo-conf/${escapeHTML(attendeeId)}</code></span>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderOrUpdateStreamCard(entry, skipScroll) {
+    if (!el.stageActionStream || !entry || !entry.id) return;
+
+    // Clear empty state placeholder if present
+    const emptyState = document.getElementById('stage-stream-empty');
+    if (emptyState) {
+      emptyState.remove();
+    }
+
+    // Clear clean slate banner if present
+    const cleanSlate = el.stageActionStream.querySelector('.clean-slate-banner');
+    if (cleanSlate) {
+      cleanSlate.remove();
+    }
+
+    const cardId = 'stream-action-' + entry.id;
+    let card = document.getElementById(cardId);
+
+    if (card) {
+      // In-place update
+      card.dataset.state = entry.state || '';
+      card.dataset.attendee = entry.attendee_id || '';
+      card.innerHTML = renderStreamCardInner(entry);
+    } else {
+      // Create new card and prepend to top
+      card = document.createElement('article');
+      card.className = 'action-card';
+      card.id = cardId;
+      card.dataset.id = entry.id;
+      card.dataset.state = entry.state || '';
+      card.dataset.attendee = entry.attendee_id || '';
+      card.innerHTML = renderStreamCardInner(entry);
+
+      el.stageActionStream.prepend(card);
+
+      // Memory Bounding: maintain max MAX_STREAM_CARDS in DOM
+      while (el.stageActionStream.children.length > MAX_STREAM_CARDS) {
+        el.stageActionStream.removeChild(el.stageActionStream.lastElementChild);
+      }
+
+      // Auto-scroll to top when enabled
+      if (!skipScroll && el.stageStreamAutoscroll && el.stageStreamAutoscroll.checked) {
+        el.stageActionStream.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+
+    // Apply active filter and search visibility to this card
+    updateStreamCardVisibility(card);
+  }
+
+  function updateStreamCardVisibility(card) {
+    const state = (card.dataset.state || '').toUpperCase();
+    const hasExecution = !!card.querySelector('.card-terminal-section');
+
+    let stateMatch = false;
+    if (currentStreamFilter === 'all') {
+      stateMatch = true;
+    } else if (currentStreamFilter === 'awaiting_approval') {
+      stateMatch = (state === 'AWAITING_APPROVAL');
+    } else if (currentStreamFilter === 'running') {
+      stateMatch = (
+        state === 'RUNNING' ||
+        state === 'RUNNING_GVISOR' ||
+        state === 'THINKING_VERTEX_AI' ||
+        state === 'PARKED' ||
+        state === 'PARKED_ENVOY'
+      );
+    } else if (currentStreamFilter === 'completed') {
+      stateMatch = (state === 'SUSPENDED' || hasExecution);
+    }
+
+    let searchMatch = true;
+    if (streamSearchQuery) {
+      const cardText = card.textContent.toLowerCase();
+      searchMatch = cardText.includes(streamSearchQuery);
+    }
+
+    if (stateMatch && searchMatch) {
+      card.style.display = '';
+    } else {
+      card.style.display = 'none';
+    }
+  }
+
+  function applyAllStreamFilters() {
+    if (!el.stageActionStream) return;
+    const cards = el.stageActionStream.querySelectorAll('.action-card');
+    cards.forEach(card => updateStreamCardVisibility(card));
+  }
+
+  function handleStreamReset() {
+    if (!el.stageActionStream) return;
+    el.stageActionStream.innerHTML = `
+      <div class="clean-slate-banner">
+        <div class="banner-icon" aria-hidden="true">⟲</div>
+        <div class="banner-body">
+          <h4 class="banner-title">Cluster Reset Complete</h4>
+          <p class="banner-desc">All actors suspended to GCS (0 vCPU, 0 RAM). Stream cleared.</p>
+        </div>
+      </div>
+    `;
+  }
+
+  function copyTextToClipboard(text, btn) {
+    const orig = btn.innerHTML;
+    function setSuccess() {
+      btn.innerHTML = '✓ Copied!';
+      btn.style.borderColor = 'var(--neon-cyan)';
+      btn.style.color = 'var(--neon-cyan)';
+      setTimeout(() => {
+        btn.innerHTML = orig;
+        btn.style.borderColor = '';
+        btn.style.color = '';
+      }, 1500);
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(setSuccess).catch(() => {
+        fallbackCopy(text, setSuccess);
+      });
+    } else {
+      fallbackCopy(text, setSuccess);
+    }
+  }
+
+  function fallbackCopy(text, cb) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand('copy');
+      if (cb) cb();
+    } catch (e) {
+      console.warn('Fallback copy failed', e);
+    }
+    document.body.removeChild(ta);
+  }
+
+  function connectStageStream() {
+    if (streamEventSource) return;
+    streamEventSource = new EventSource('/api/stream');
+
+    streamEventSource.addEventListener('action_entry', (e) => {
+      try {
+        const entry = JSON.parse(e.data);
+        renderOrUpdateStreamCard(entry);
+      } catch (err) {
+        console.error('Failed to parse action_entry JSON:', err);
+      }
+    });
+
+    streamEventSource.addEventListener('reset', () => {
+      handleStreamReset();
+    });
+
+    streamEventSource.onerror = (err) => {
+      console.warn('Stage stream SSE connection interrupted, retrying...', err);
+    };
+  }
+
+  async function fetchStreamFeedHistory() {
+    hasFetchedFeedHistory = true;
+    try {
+      const resp = await fetch('/api/feed/history', { cache: 'no-store' });
+      if (!resp.ok) return;
+      const history = await resp.json();
+      if (Array.isArray(history) && history.length > 0) {
+        history.forEach(entry => renderOrUpdateStreamCard(entry, true));
+      }
+    } catch (err) {
+      console.error('Failed to fetch stream feed history:', err);
     }
   }
 
@@ -933,6 +1336,87 @@
     if (el.btnResetAll) {
       el.btnResetAll.addEventListener('click', function() {
         resetAllCluster();
+      });
+    }
+
+    // View Switcher Handlers
+    if (el.viewModeGrid) {
+      el.viewModeGrid.addEventListener('click', function() {
+        switchViewMode('grid');
+      });
+    }
+    if (el.viewModeStream) {
+      el.viewModeStream.addEventListener('click', function() {
+        switchViewMode('stream');
+      });
+    }
+
+    // Stream Filter Buttons
+    if (el.streamFilterButtons) {
+      el.streamFilterButtons.forEach(btn => {
+        btn.addEventListener('click', function() {
+          el.streamFilterButtons.forEach(b => {
+            b.classList.remove('active');
+            b.setAttribute('aria-pressed', 'false');
+          });
+          btn.classList.add('active');
+          btn.setAttribute('aria-pressed', 'true');
+          currentStreamFilter = btn.dataset.filter || 'all';
+          applyAllStreamFilters();
+        });
+      });
+    }
+
+    // Stream Search Input
+    if (el.stageStreamSearch) {
+      el.stageStreamSearch.addEventListener('input', function() {
+        streamSearchQuery = el.stageStreamSearch.value.trim().toLowerCase();
+        if (el.stageStreamSearchClear) {
+          el.stageStreamSearchClear.style.display = streamSearchQuery ? 'inline-block' : 'none';
+        }
+        applyAllStreamFilters();
+      });
+    }
+
+    if (el.stageStreamSearchClear) {
+      el.stageStreamSearchClear.addEventListener('click', function() {
+        if (el.stageStreamSearch) {
+          el.stageStreamSearch.value = '';
+          streamSearchQuery = '';
+          el.stageStreamSearchClear.style.display = 'none';
+          el.stageStreamSearch.focus();
+          applyAllStreamFilters();
+        }
+      });
+    }
+
+    // Stream Action Stream Click Delegation:
+    // Copy code button copies snippet; clicking card opens Spotlight Drawer!
+    if (el.stageActionStream) {
+      el.stageActionStream.addEventListener('click', function(e) {
+        const copyBtn = e.target.closest('.btn-copy-code');
+        if (copyBtn) {
+          e.stopPropagation();
+          const section = copyBtn.closest('.card-code-section');
+          if (section) {
+            const codeEl = section.querySelector('code');
+            if (codeEl) {
+              copyTextToClipboard(codeEl.textContent, copyBtn);
+            }
+          }
+          return;
+        }
+
+        const card = e.target.closest('.action-card');
+        if (card) {
+          const actorId = card.dataset.attendee;
+          if (actorId) {
+            if (e.target.closest('a')) {
+              e.preventDefault();
+            }
+            openSpotlightDrawer(actorId);
+          }
+        }
       });
     }
 
@@ -962,13 +1446,21 @@
   }
 
   // -------------------------------------------------------------------------
-  // Start
+  // Start & Lifecycle Cleanup
   // -------------------------------------------------------------------------
+  window.addEventListener('beforeunload', function() {
+    if (streamEventSource) {
+      streamEventSource.close();
+    }
+  });
+
   document.addEventListener('DOMContentLoaded', function() {
     initOnboardingQR();
     initControls();
     fetchSimulationStatus();
     fetchTelemetry();
+    connectStageStream();
+    fetchStreamFeedHistory();
     setInterval(fetchTelemetry, 500);
     setInterval(fetchSimulationStatus, 2000);
   });
