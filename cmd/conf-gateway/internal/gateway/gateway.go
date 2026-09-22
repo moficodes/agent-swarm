@@ -239,6 +239,7 @@ type Gateway struct {
 	chatHistories    map[string][]types.ChatMessage
 	lastResults      map[string]*types.ExecutionResult
 	recentEvents     []string
+	actionFeed       []types.ActionLogEntry
 	parkedCount      int
 	simController    SimulationController
 	workerSlots      chan struct{}
@@ -265,6 +266,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		chatHistories:    make(map[string][]types.ChatMessage),
 		lastResults:      make(map[string]*types.ExecutionResult),
 		recentEvents:     make([]string, 0),
+		actionFeed:       make([]types.ActionLogEntry, 0),
 		maxActors:        50,
 		workerSlots:      make(chan struct{}, 2),
 	}
@@ -358,6 +360,8 @@ func (g *Gateway) routes() {
 	})
 	g.mux.HandleFunc("/api/session", g.handleSession)
 	g.mux.HandleFunc("/api/events", g.handleEvents)
+	g.mux.HandleFunc("/api/stream", g.handleActionStream)
+	g.mux.HandleFunc("/api/feed/history", g.handleFeedHistory)
 	g.mux.HandleFunc("/api/actor/", g.handleActorDetails)
 	g.mux.HandleFunc("/api/actor", g.handleActorDetails)
 	g.mux.HandleFunc("/api/stage/telemetry", g.handleTelemetry)
@@ -634,6 +638,83 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (g *Gateway) handleFeedHistory(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/feed/history" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	history := g.GetFeedHistory()
+
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodHead {
+		return
+	}
+	_ = json.NewEncoder(w).Encode(history)
+}
+
+func (g *Gateway) handleActionStream(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/stream" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	actionCh := g.broker.SubscribeActions()
+	defer g.broker.UnsubscribeActions(actionCh)
+
+	resetCh := g.broker.SubscribeReset()
+	defer g.broker.UnsubscribeReset(resetCh)
+
+	ctxDone := r.Context().Done()
+	for {
+		select {
+		case <-ctxDone:
+			return
+		case entry, ok := <-actionCh:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "event: action_entry\ndata: %s\n\n", data); err != nil {
+				return
+			}
+			flusher.Flush()
+		case _, ok := <-resetCh:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "event: reset\ndata: {}\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
 func stateToLabel(state types.ActorLifecycleState) string {
 	switch state {
 	case types.StateThinkingVertexAI:
@@ -696,6 +777,15 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 	copy(historyCopy, g.chatHistories[attendeeID])
 	g.mu.Unlock()
 
+	actionID := fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
+	g.RecordActionEntry(types.ActionLogEntry{
+		ID:         actionID,
+		AttendeeID: attendeeID,
+		Timestamp:  time.Now().Unix(),
+		Prompt:     req.Message,
+		State:      types.StateThinkingVertexAI,
+	})
+
 	g.BroadcastStateChange(attendeeID, types.StateThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -719,8 +809,28 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 
 	if assistantMsg.Approval != nil {
 		g.BroadcastStateChange(attendeeID, types.StateAwaitingApproval, "Awaiting Approval", assistantMsg.Approval.Summary)
+		g.RecordActionEntry(types.ActionLogEntry{
+			ID:            actionID,
+			AttendeeID:    attendeeID,
+			Timestamp:     time.Now().Unix(),
+			Prompt:        req.Message,
+			ModelResponse: assistantMsg.Content,
+			Code:          assistantMsg.Approval.Code,
+			Language:      assistantMsg.Approval.Language,
+			RiskLevel:     assistantMsg.Approval.RiskLevel,
+			ApprovalID:    assistantMsg.Approval.ApprovalID,
+			State:         types.StateAwaitingApproval,
+		})
 	} else {
 		g.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Turn completed - suspended to GCS")
+		g.RecordActionEntry(types.ActionLogEntry{
+			ID:            actionID,
+			AttendeeID:    attendeeID,
+			Timestamp:     time.Now().Unix(),
+			Prompt:        req.Message,
+			ModelResponse: assistantMsg.Content,
+			State:         types.StateSuspended,
+		})
 	}
 
 	// Zero-cost suspension while attendee reviews code or when turn is complete
@@ -775,11 +885,32 @@ func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 		g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: executing in gVisor", attendeeID, req.ApprovalID))
 		g.mu.Unlock()
 		g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing code in gVisor sandbox")
+		g.RecordActionEntry(types.ActionLogEntry{
+			ID:         fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano()),
+			AttendeeID: attendeeID,
+			Timestamp:  time.Now().Unix(),
+			ApprovalID: req.ApprovalID,
+			Decision:   req.Decision,
+			Code:       req.Code,
+			Language:   req.Language,
+			State:      types.StateRunningGVisor,
+			WorkerPod:  "conf-workers-0",
+		})
 	default:
 		g.activeActors[attendeeID] = types.StateParkedEnvoy
 		g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: queued in Envoy L7 buffer", attendeeID, req.ApprovalID))
 		g.mu.Unlock()
 		g.BroadcastStateChange(attendeeID, types.StateParkedEnvoy, "Parked in Envoy", "Queued in Envoy L7 buffer — waiting for worker slot...")
+		g.RecordActionEntry(types.ActionLogEntry{
+			ID:         fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano()),
+			AttendeeID: attendeeID,
+			Timestamp:  time.Now().Unix(),
+			ApprovalID: req.ApprovalID,
+			Decision:   req.Decision,
+			Code:       req.Code,
+			Language:   req.Language,
+			State:      types.StateParkedEnvoy,
+		})
 
 		select {
 		case <-r.Context().Done():
@@ -789,6 +920,17 @@ func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 			slotAcquired = true
 			g.setActorState(attendeeID, types.StateRunningGVisor)
 			g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing code in gVisor sandbox")
+			g.RecordActionEntry(types.ActionLogEntry{
+				ID:         fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano()),
+				AttendeeID: attendeeID,
+				Timestamp:  time.Now().Unix(),
+				ApprovalID: req.ApprovalID,
+				Decision:   req.Decision,
+				Code:       req.Code,
+				Language:   req.Language,
+				State:      types.StateRunningGVisor,
+				WorkerPod:  "conf-workers-0",
+			})
 		}
 	}
 
@@ -835,6 +977,32 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 				g.mu.Lock()
 				g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], userMsg)
 				g.mu.Unlock()
+				g.RecordActionEntry(types.ActionLogEntry{
+					ID:         fmt.Sprintf("act-chat-%s-%d", attendeeID, time.Now().UnixNano()),
+					AttendeeID: attendeeID,
+					Timestamp:  time.Now().Unix(),
+					Prompt:     chatReq.Message,
+					State:      types.StateRunning,
+				})
+			}
+		}
+	} else if r.URL.Path == "/api/approve" && r.Body != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			var apprReq types.ApprovalResponse
+			if err := json.Unmarshal(bodyBytes, &apprReq); err == nil {
+				g.RecordActionEntry(types.ActionLogEntry{
+					ID:         fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano()),
+					AttendeeID: attendeeID,
+					Timestamp:  time.Now().Unix(),
+					ApprovalID: apprReq.ApprovalID,
+					Decision:   apprReq.Decision,
+					Code:       apprReq.Code,
+					Language:   apprReq.Language,
+					State:      types.StateRunningGVisor,
+					WorkerPod:  "conf-workers-0",
+				})
 			}
 		}
 	}
@@ -937,6 +1105,54 @@ func (g *Gateway) SubscriberCount(attendeeID string) int {
 	return g.broker.SubscriberCount(attendeeID)
 }
 
+// ActionSubscriberCount returns the current number of active action stream subscribers.
+func (g *Gateway) ActionSubscriberCount() int {
+	if g.broker == nil {
+		return 0
+	}
+	return g.broker.ActionSubscriberCount()
+}
+
+// RecordActionEntry appends or updates an entry in the action feed (retaining up to 100 items)
+// and broadcasts it to action subscribers.
+func (g *Gateway) RecordActionEntry(entry types.ActionLogEntry) {
+	if entry.Timestamp == 0 {
+		entry.Timestamp = time.Now().Unix()
+	}
+	if entry.ID == "" {
+		entry.ID = fmt.Sprintf("action-%d", time.Now().UnixNano())
+	}
+	g.mu.Lock()
+	updated := false
+	for i, existing := range g.actionFeed {
+		if existing.ID == entry.ID {
+			g.actionFeed[i] = entry
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		g.actionFeed = append(g.actionFeed, entry)
+		if len(g.actionFeed) > 100 {
+			g.actionFeed = g.actionFeed[len(g.actionFeed)-100:]
+		}
+	}
+	g.mu.Unlock()
+
+	if g.broker != nil {
+		g.broker.PublishAction(entry)
+	}
+}
+
+// GetFeedHistory returns a copy of the current action log entries.
+func (g *Gateway) GetFeedHistory() []types.ActionLogEntry {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	res := make([]types.ActionLogEntry, len(g.actionFeed))
+	copy(res, g.actionFeed)
+	return res
+}
+
 func (g *Gateway) modifyResponse(resp *http.Response) error {
 	attendeeID, _ := resp.Request.Context().Value(attendeeContextKey{}).(string)
 	if attendeeID == "" {
@@ -970,10 +1186,14 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 
 	// Record execution result if returned
 	var execRes types.ExecutionResult
+	var hasNewExec bool
+	var newExec types.ExecutionResult
 	if err := json.Unmarshal(bodyBytes, &execRes); err == nil && (execRes.Stdout != "" || execRes.Stderr != "" || execRes.ExitCode != 0 || execRes.DurationMs > 0) {
 		g.mu.Lock()
 		g.lastResults[attendeeID] = &execRes
 		g.mu.Unlock()
+		hasNewExec = true
+		newExec = execRes
 	} else if hasChatMsg {
 		if strings.HasPrefix(chatMsg.Content, "Execution completed in ") {
 			var durationMs int64
@@ -989,22 +1209,26 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 					stderr = stdout[stderrIdx+len("\nStderr:\n"):]
 					stdout = stdout[:stderrIdx]
 				}
-				g.mu.Lock()
-				g.lastResults[attendeeID] = &types.ExecutionResult{
+				newExec = types.ExecutionResult{
 					Stdout:     stdout,
 					Stderr:     stderr,
 					ExitCode:   exitCode,
 					DurationMs: durationMs,
 				}
+				g.mu.Lock()
+				g.lastResults[attendeeID] = &newExec
 				g.mu.Unlock()
+				hasNewExec = true
 			}
 		} else if strings.HasPrefix(chatMsg.Content, "Execution error:") {
-			g.mu.Lock()
-			g.lastResults[attendeeID] = &types.ExecutionResult{
+			newExec = types.ExecutionResult{
 				Stderr:   chatMsg.Content,
 				ExitCode: 1,
 			}
+			g.mu.Lock()
+			g.lastResults[attendeeID] = &newExec
 			g.mu.Unlock()
+			hasNewExec = true
 		}
 	}
 
@@ -1022,6 +1246,17 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.mu.Unlock()
 
 		g.BroadcastStateChange(attendeeID, types.StateAwaitingApproval, "Awaiting Approval", "Awaiting human approval")
+		g.RecordActionEntry(types.ActionLogEntry{
+			ID:            fmt.Sprintf("act-appr-req-%s-%d", attendeeID, time.Now().UnixNano()),
+			AttendeeID:    attendeeID,
+			Timestamp:     time.Now().Unix(),
+			ModelResponse: chatMsg.Content,
+			Code:          chatMsg.Approval.Code,
+			Language:      chatMsg.Approval.Language,
+			RiskLevel:     chatMsg.Approval.RiskLevel,
+			ApprovalID:    chatMsg.Approval.ApprovalID,
+			State:         types.StateAwaitingApproval,
+		})
 		g.asyncSuspendActor(attendeeID)
 	} else if resp.StatusCode == http.StatusOK {
 		g.mu.Lock()
@@ -1037,6 +1272,24 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.mu.Unlock()
 
 		g.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Turn completed - suspended to GCS")
+		if hasNewExec {
+			g.RecordActionEntry(types.ActionLogEntry{
+				ID:         fmt.Sprintf("act-exec-%s-%d", attendeeID, time.Now().UnixNano()),
+				AttendeeID: attendeeID,
+				Timestamp:  time.Now().Unix(),
+				Execution:  &newExec,
+				WorkerPod:  "conf-workers-0",
+				State:      types.StateSuspended,
+			})
+		} else if hasChatMsg {
+			g.RecordActionEntry(types.ActionLogEntry{
+				ID:            fmt.Sprintf("act-done-%s-%d", attendeeID, time.Now().UnixNano()),
+				AttendeeID:    attendeeID,
+				Timestamp:     time.Now().Unix(),
+				ModelResponse: chatMsg.Content,
+				State:         types.StateSuspended,
+			})
+		}
 		g.asyncSuspendActor(attendeeID)
 	}
 
@@ -1143,8 +1396,13 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	g.pendingApprovals = make(map[string]*types.ApprovalRequest)
 	g.chatHistories = make(map[string][]types.ChatMessage)
 	g.lastResults = make(map[string]*types.ExecutionResult)
+	g.actionFeed = make([]types.ActionLogEntry, 0)
 	g.addEventLocked("Cluster reset: all actors suspended to GCS, worker pods freed")
 	g.mu.Unlock()
+
+	if g.broker != nil {
+		g.broker.PublishReset()
+	}
 
 	// Also sweep cluster for any running actors if commandSuspender is used
 	if cmdSusp, ok := g.suspender.(*commandSuspender); ok {

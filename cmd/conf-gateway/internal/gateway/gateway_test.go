@@ -2765,3 +2765,482 @@ func TestSimulationEndpoint(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+func TestActionStreamEndpoints(t *testing.T) {
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-stream-chat-1",
+			Sender:    types.SenderAssistant,
+			Content:   "WAITING_FOR_APPROVAL: generate report",
+			Timestamp: time.Now().Unix(),
+			Approval: &types.ApprovalRequest{
+				ApprovalID: "appr-flow-1",
+				Summary:    "Generate report",
+				Code:       "print('report generated')",
+				Language:   "python",
+				RiskLevel:  types.RiskLow,
+			},
+		})
+	})
+	upstreamMux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ExecutionResult{
+			Stdout:     "report generated\n",
+			ExitCode:   0,
+			DurationMs: 55,
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	suspender := &mockSuspender{}
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithAtespace("ate-demo-conf"),
+		gateway.WithSuspender(suspender),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	t.Run("FeedHistoryEndpoints", func(t *testing.T) {
+		// Non-GET/HEAD methods return 405 Method Not Allowed
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+			req, err := http.NewRequest(method, ts.URL+"/api/feed/history", nil)
+			if err != nil {
+				t.Fatalf("failed to create %s request: %v", method, err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("failed to execute %s request: %v", method, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("expected status 405 for %s /api/feed/history, got %d", method, resp.StatusCode)
+			}
+		}
+
+		// HEAD /api/feed/history returns 200 OK with application/json
+		headResp, err := http.Head(ts.URL + "/api/feed/history")
+		if err != nil {
+			t.Fatalf("failed HEAD /api/feed/history: %v", err)
+		}
+		_ = headResp.Body.Close()
+		if headResp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 for HEAD /api/feed/history, got %d", headResp.StatusCode)
+		}
+		if ct := headResp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+			t.Errorf("expected application/json for HEAD, got %q", ct)
+		}
+
+		// Initial GET /api/feed/history returns 200 OK and empty array []
+		getResp, err := http.Get(ts.URL + "/api/feed/history")
+		if err != nil {
+			t.Fatalf("failed GET /api/feed/history: %v", err)
+		}
+		defer getResp.Body.Close()
+
+		if getResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 for GET /api/feed/history, got %d", getResp.StatusCode)
+		}
+		if ct := getResp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+			t.Errorf("expected application/json for GET, got %q", ct)
+		}
+
+		bodyBytes, err := io.ReadAll(getResp.Body)
+		if err != nil {
+			t.Fatalf("failed to read body: %v", err)
+		}
+		if strings.TrimSpace(string(bodyBytes)) != "[]" {
+			t.Errorf("expected empty JSON array '[]', got %q", string(bodyBytes))
+		}
+
+		var initialEntries []types.ActionLogEntry
+		if err := json.Unmarshal(bodyBytes, &initialEntries); err != nil {
+			t.Fatalf("failed to unmarshal JSON: %v", err)
+		}
+		if len(initialEntries) != 0 {
+			t.Errorf("expected 0 entries initially, got %d", len(initialEntries))
+		}
+
+		// Record a single entry and check retrieval
+		singleEntry := types.ActionLogEntry{
+			ID:            "test-entry-1",
+			AttendeeID:    "attendee-01",
+			Timestamp:     time.Now().Unix(),
+			Prompt:        "Analyze cluster health",
+			ModelResponse: "Here is your analysis",
+			Code:          "print('cluster healthy')",
+			Language:      "python",
+			RiskLevel:     types.RiskLow,
+			ApprovalID:    "app-test-1",
+			Decision:      types.DecisionApprove,
+			State:         types.StateRunningGVisor,
+		}
+		gw.RecordActionEntry(singleEntry)
+
+		respAfterOne, err := http.Get(ts.URL + "/api/feed/history")
+		if err != nil {
+			t.Fatalf("failed GET after recording entry: %v", err)
+		}
+		defer respAfterOne.Body.Close()
+
+		var entriesAfterOne []types.ActionLogEntry
+		if err := json.NewDecoder(respAfterOne.Body).Decode(&entriesAfterOne); err != nil {
+			t.Fatalf("failed to decode entries: %v", err)
+		}
+		if len(entriesAfterOne) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(entriesAfterOne))
+		}
+		if entriesAfterOne[0].ID != singleEntry.ID || entriesAfterOne[0].Prompt != singleEntry.Prompt {
+			t.Errorf("entry mismatch: got %+v, want %+v", entriesAfterOne[0], singleEntry)
+		}
+
+		// Buffer cap test: append 105 entries and ensure exactly last 100 entries retained
+		for i := 0; i < 105; i++ {
+			gw.RecordActionEntry(types.ActionLogEntry{
+				ID:         fmt.Sprintf("entry-buffer-%d", i),
+				AttendeeID: fmt.Sprintf("attendee-%02d", i%10),
+				Timestamp:  time.Now().Unix(),
+				Prompt:     fmt.Sprintf("Prompt %d", i),
+				State:      types.StateThinkingVertexAI,
+			})
+		}
+
+		feed := gw.GetFeedHistory()
+		if len(feed) != 100 {
+			t.Fatalf("expected buffer cap of 100 entries, got %d", len(feed))
+		}
+		if feed[0].ID != "entry-buffer-5" {
+			t.Errorf("expected oldest entry to be entry-buffer-5, got %s", feed[0].ID)
+		}
+		if feed[99].ID != "entry-buffer-104" {
+			t.Errorf("expected newest entry to be entry-buffer-104, got %s", feed[99].ID)
+		}
+	})
+
+	t.Run("ActionStreamSSE", func(t *testing.T) {
+		// Non-GET methods return 405 Method Not Allowed
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+			req, err := http.NewRequest(method, ts.URL+"/api/stream", nil)
+			if err != nil {
+				t.Fatalf("failed to create %s request: %v", method, err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("failed to execute %s request: %v", method, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("expected status 405 for %s /api/stream, got %d", method, resp.StatusCode)
+			}
+		}
+
+		// Connect client to GET /api/stream
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/stream", nil)
+		if err != nil {
+			t.Fatalf("failed to create SSE request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("failed to connect to /api/stream: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK from /api/stream, got %d", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+			t.Errorf("expected text/event-stream, got %q", ct)
+		}
+		if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+			t.Errorf("expected Cache-Control no-cache, got %q", cc)
+		}
+
+		if count := gw.ActionSubscriberCount(); count != 1 {
+			t.Errorf("expected 1 action subscriber, got %d", count)
+		}
+
+		reader := bufio.NewReader(resp.Body)
+		actionChan := make(chan types.ActionLogEntry, 5)
+		resetChan := make(chan struct{}, 5)
+		errChan := make(chan error, 1)
+
+		go func() {
+			var currentEvent string
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					errChan <- err
+					return
+				}
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "event:") {
+					currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				} else if strings.HasPrefix(line, "data:") {
+					dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+					if currentEvent == "action_entry" {
+						var entry types.ActionLogEntry
+						if err := json.Unmarshal([]byte(dataStr), &entry); err == nil {
+							actionChan <- entry
+						}
+					} else if currentEvent == "reset" {
+						resetChan <- struct{}{}
+					}
+					currentEvent = ""
+				}
+			}
+		}()
+
+		// Broadcast action entry
+		broadcastEntry := types.ActionLogEntry{
+			ID:         "entry-sse-test-1",
+			AttendeeID: "attendee-77",
+			Timestamp:  time.Now().Unix(),
+			Prompt:     "Stream test prompt",
+			State:      types.StateThinkingVertexAI,
+		}
+		gw.RecordActionEntry(broadcastEntry)
+
+		select {
+		case received := <-actionChan:
+			if received.ID != broadcastEntry.ID {
+				t.Errorf("expected ID %s, got %s", broadcastEntry.ID, received.ID)
+			}
+			if received.AttendeeID != broadcastEntry.AttendeeID {
+				t.Errorf("expected AttendeeID %s, got %s", broadcastEntry.AttendeeID, received.AttendeeID)
+			}
+			if received.Prompt != broadcastEntry.Prompt {
+				t.Errorf("expected Prompt %q, got %q", broadcastEntry.Prompt, received.Prompt)
+			}
+		case err := <-errChan:
+			t.Fatalf("error reading SSE stream: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for action_entry SSE event")
+		}
+
+		// Test reset event broadcast
+		resetResp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
+		if err != nil {
+			t.Fatalf("failed to call /api/reset: %v", err)
+		}
+		_ = resetResp.Body.Close()
+		if resetResp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 OK from /api/reset, got %d", resetResp.StatusCode)
+		}
+
+		select {
+		case <-resetChan:
+			// Reset received as expected
+		case err := <-errChan:
+			t.Fatalf("error reading SSE stream during reset: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for reset SSE event")
+		}
+
+		// Verify feed history cleared after reset
+		if history := gw.GetFeedHistory(); len(history) != 0 {
+			t.Errorf("expected empty feed history after reset, got %d entries", len(history))
+		}
+
+		// Clean client disconnect test
+		cancel()
+
+		deadline := time.Now().Add(2 * time.Second)
+		cleanedUp := false
+		for time.Now().Before(deadline) {
+			if gw.ActionSubscriberCount() == 0 {
+				cleanedUp = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !cleanedUp {
+			t.Errorf("expected action subscriber count 0 after disconnect, got %d", gw.ActionSubscriberCount())
+		}
+	})
+
+	t.Run("ChatAndApprovalFlowActionStream", func(t *testing.T) {
+		// Connect to stream to monitor full flow
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		defer streamCancel()
+
+		streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, ts.URL+"/api/stream", nil)
+		if err != nil {
+			t.Fatalf("failed to create stream request: %v", err)
+		}
+		streamResp, err := http.DefaultClient.Do(streamReq)
+		if err != nil {
+			t.Fatalf("failed to connect to stream: %v", err)
+		}
+		defer streamResp.Body.Close()
+
+		reader := bufio.NewReader(streamResp.Body)
+		streamEvents := make(chan types.ActionLogEntry, 20)
+		go func() {
+			var currentEvent string
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					return
+				}
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "event:") {
+					currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				} else if strings.HasPrefix(line, "data:") {
+					dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+					if currentEvent == "action_entry" {
+						var entry types.ActionLogEntry
+						if err := json.Unmarshal([]byte(dataStr), &entry); err == nil {
+							streamEvents <- entry
+						}
+					}
+					currentEvent = ""
+				}
+			}
+		}()
+
+		// 1. Chat Prompt
+		token := gw.MintToken("attendee-99")
+		chatReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"generate monthly report"}`))
+		if err != nil {
+			t.Fatalf("failed to build chat request: %v", err)
+		}
+		chatReq.Header.Set("Content-Type", "application/json")
+		chatReq.Header.Set("Authorization", "Bearer "+token)
+
+		chatResp, err := http.DefaultClient.Do(chatReq)
+		if err != nil {
+			t.Fatalf("failed chat request: %v", err)
+		}
+		_ = chatResp.Body.Close()
+		if chatResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK from chat, got %d", chatResp.StatusCode)
+		}
+
+		// Check that an action entry arrived over stream for chat turn
+		var receivedChat types.ActionLogEntry
+		select {
+		case receivedChat = <-streamEvents:
+			if receivedChat.AttendeeID != "attendee-99" {
+				t.Errorf("expected attendee-99, got %s", receivedChat.AttendeeID)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for chat turn action entry on stream")
+		}
+
+		// 2. Approval & Execution
+		apprReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"appr-flow-1","decision":"approve"}`))
+		if err != nil {
+			t.Fatalf("failed to build approve request: %v", err)
+		}
+		apprReq.Header.Set("Content-Type", "application/json")
+		apprReq.Header.Set("Authorization", "Bearer "+token)
+
+		apprResp, err := http.DefaultClient.Do(apprReq)
+		if err != nil {
+			t.Fatalf("failed approve request: %v", err)
+		}
+		_ = apprResp.Body.Close()
+		if apprResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK from approve, got %d", apprResp.StatusCode)
+		}
+
+		// Check that an action entry arrived over stream for approval / execution
+		var receivedAppr types.ActionLogEntry
+		select {
+		case receivedAppr = <-streamEvents:
+			if receivedAppr.AttendeeID != "attendee-99" {
+				t.Errorf("expected attendee-99, got %s", receivedAppr.AttendeeID)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for approve turn action entry on stream")
+		}
+
+		// Verify entries recorded in feed history
+		history := gw.GetFeedHistory()
+		if len(history) < 2 {
+			t.Errorf("expected at least 2 entries in feed history after chat and approve, got %d", len(history))
+		}
+	})
+
+	t.Run("ConcurrencySafety", func(t *testing.T) {
+		const goroutines = 8
+		const iterations = 25
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var subscriberWg sync.WaitGroup
+		// Stream subscriber goroutines
+		for i := 0; i < 3; i++ {
+			subscriberWg.Add(1)
+			go func() {
+				defer subscriberWg.Done()
+				subReq, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/stream", nil)
+				if err != nil {
+					return
+				}
+				subResp, err := http.DefaultClient.Do(subReq)
+				if err != nil {
+					return
+				}
+				defer subResp.Body.Close()
+
+				reader := bufio.NewReader(subResp.Body)
+				for {
+					_, err := reader.ReadString('\n')
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+
+		var producerWg sync.WaitGroup
+		// Producer / reader / reset goroutines
+		for g := 0; g < goroutines; g++ {
+			producerWg.Add(1)
+			go func(gid int) {
+				defer producerWg.Done()
+				for i := 0; i < iterations; i++ {
+					switch i % 4 {
+					case 0:
+						gw.RecordActionEntry(types.ActionLogEntry{
+							ID:         fmt.Sprintf("entry-conc-%d-%d", gid, i),
+							AttendeeID: fmt.Sprintf("attendee-%d", gid),
+							Timestamp:  time.Now().Unix(),
+							Prompt:     "Concurrent test prompt",
+							State:      types.StateThinkingVertexAI,
+						})
+					case 1:
+						_ = gw.GetFeedHistory()
+					case 2:
+						resp, err := http.Get(ts.URL + "/api/feed/history")
+						if err == nil {
+							var entries []types.ActionLogEntry
+							_ = json.NewDecoder(resp.Body).Decode(&entries)
+							_ = resp.Body.Close()
+						}
+					case 3:
+						if i == iterations-1 {
+							resp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
+							if err == nil {
+								_ = resp.Body.Close()
+							}
+						}
+					}
+				}
+			}(g)
+		}
+
+		producerWg.Wait()
+		cancel()
+		subscriberWg.Wait()
+	})
+}

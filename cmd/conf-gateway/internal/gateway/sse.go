@@ -22,14 +22,18 @@ import (
 
 // EventBroker maintains active SSE subscribers and dispatches lifecycle events.
 type EventBroker struct {
-	mu          sync.RWMutex
-	subscribers map[string][]chan types.StateChangeEvent
+	mu                sync.RWMutex
+	subscribers       map[string][]chan types.StateChangeEvent
+	actionSubscribers []chan types.ActionLogEntry
+	resetSubscribers  []chan struct{}
 }
 
 // NewEventBroker initializes and returns a new EventBroker.
 func NewEventBroker() *EventBroker {
 	return &EventBroker{
-		subscribers: make(map[string][]chan types.StateChangeEvent),
+		subscribers:       make(map[string][]chan types.StateChangeEvent),
+		actionSubscribers: make([]chan types.ActionLogEntry, 0),
+		resetSubscribers:  make([]chan struct{}, 0),
 	}
 }
 
@@ -76,4 +80,79 @@ func (b *EventBroker) SubscriberCount(attendeeID string) int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return len(b.subscribers[attendeeID])
+}
+
+// SubscribeActions creates and registers an action event channel for global action stream events.
+func (b *EventBroker) SubscribeActions() chan types.ActionLogEntry {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ch := make(chan types.ActionLogEntry, 64)
+	b.actionSubscribers = append(b.actionSubscribers, ch)
+	return ch
+}
+
+// UnsubscribeActions deregisters and closes the action log event channel.
+func (b *EventBroker) UnsubscribeActions(ch chan types.ActionLogEntry) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, sub := range b.actionSubscribers {
+		if sub == ch {
+			b.actionSubscribers = append(b.actionSubscribers[:i], b.actionSubscribers[i+1:]...)
+			close(ch)
+			break
+		}
+	}
+}
+
+// PublishAction broadcasts an action entry to all active action stream subscribers.
+func (b *EventBroker) PublishAction(entry types.ActionLogEntry) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, ch := range b.actionSubscribers {
+		select {
+		case ch <- entry:
+		default:
+		}
+	}
+}
+
+// ActionSubscriberCount returns the current number of active action subscribers.
+func (b *EventBroker) ActionSubscriberCount() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.actionSubscribers)
+}
+
+// SubscribeReset creates and registers a reset event channel.
+func (b *EventBroker) SubscribeReset() chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ch := make(chan struct{}, 8)
+	b.resetSubscribers = append(b.resetSubscribers, ch)
+	return ch
+}
+
+// UnsubscribeReset deregisters and closes a reset event channel.
+func (b *EventBroker) UnsubscribeReset(ch chan struct{}) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, sub := range b.resetSubscribers {
+		if sub == ch {
+			b.resetSubscribers = append(b.resetSubscribers[:i], b.resetSubscribers[i+1:]...)
+			close(ch)
+			break
+		}
+	}
+}
+
+// PublishReset broadcasts a reset signal to all reset subscribers.
+func (b *EventBroker) PublishReset() {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, ch := range b.resetSubscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
