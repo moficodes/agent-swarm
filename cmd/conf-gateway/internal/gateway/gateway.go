@@ -84,6 +84,39 @@ func (c *commandSuspender) SuspendActor(ctx context.Context, atespace, actorID s
 	return nil
 }
 
+func (c *commandSuspender) getClusterRunningActors(ctx context.Context, atespace string) []string {
+	var cmd *exec.Cmd
+	if _, err := exec.LookPath("kubectl-ate"); err == nil {
+		cmd = exec.CommandContext(ctx, "kubectl-ate", "get", "actors", "-a", atespace, "-o", "json")
+	} else {
+		cmd = exec.CommandContext(ctx, "kubectl", "ate", "get", "actors", "-a", atespace, "-o", "json")
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var data struct {
+		Actors []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				State string `json:"state"`
+			} `json:"status"`
+		} `json:"actors"`
+	}
+	if err := json.Unmarshal(out, &data); err != nil {
+		return nil
+	}
+	var res []string
+	for _, a := range data.Actors {
+		if a.Status.State == "ACTOR_STATE_RUNNING" || a.Status.State == "ACTOR_STATE_PAUSED" {
+			res = append(res, a.Metadata.Name)
+		}
+	}
+	return res
+}
+
 // Claims represents the decoded JWT payload.
 type Claims struct {
 	Sub   string `json:"sub"`
@@ -1079,6 +1112,26 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	g.lastResults = make(map[string]*types.ExecutionResult)
 	g.addEventLocked("Cluster reset: all actors suspended to GCS, worker pods freed")
 	g.mu.Unlock()
+
+	// Also sweep cluster for any running actors if commandSuspender is used
+	if cmdSusp, ok := g.suspender.(*commandSuspender); ok {
+		sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		clusterRunning := cmdSusp.getClusterRunningActors(sweepCtx, g.atespace)
+		sweepCancel()
+		for _, name := range clusterRunning {
+			found := false
+			for _, id := range actorsToSuspend {
+				if id == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				actorsToSuspend = append(actorsToSuspend, name)
+			}
+		}
+		sort.Strings(actorsToSuspend)
+	}
 
 	if g.suspender != nil && len(actorsToSuspend) > 0 {
 		baseCtx := g.ctx
