@@ -524,9 +524,7 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 
 		startOffset := 0
-		g.mu.Lock()
-		sc := g.simController
-		g.mu.Unlock()
+		sc := g.SimulationController()
 
 		if sc != nil {
 			running, count := sc.Status()
