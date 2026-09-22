@@ -517,15 +517,21 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	g.mu.RLock()
 	actorsCopy := make(map[string]types.ActorLifecycleState, len(g.activeActors))
 	var runningActors []string
+	var parkedActorsCount int
 	for k, v := range g.activeActors {
 		actorsCopy[k] = v
-		if v == types.StateRunning || v == types.StateRunningGVisor || v == types.StateThinkingVertexAI {
+		if v == types.StateRunning || v == types.StateRunningGVisor {
 			runningActors = append(runningActors, k)
+		} else if v == types.StateParked || v == types.StateParkedEnvoy {
+			parkedActorsCount++
 		}
 	}
 	eventsCopy := make([]string, len(g.recentEvents))
 	copy(eventsCopy, g.recentEvents)
 	parked := g.parkedCount
+	if parkedActorsCount > parked {
+		parked = parkedActorsCount
+	}
 	g.mu.RUnlock()
 
 	sort.Strings(runningActors)
