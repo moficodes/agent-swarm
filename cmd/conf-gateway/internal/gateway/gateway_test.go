@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/substrate/demos/conference/pkg/ai"
+	"github.com/agent-substrate/substrate/demos/conference/pkg/engine"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -3123,17 +3125,6 @@ func TestActionStreamEndpoints(t *testing.T) {
 			t.Fatalf("expected 200 OK from chat, got %d", chatResp.StatusCode)
 		}
 
-		// Check that an action entry arrived over stream for chat turn
-		var receivedChat types.ActionLogEntry
-		select {
-		case receivedChat = <-streamEvents:
-			if receivedChat.AttendeeID != "attendee-99" {
-				t.Errorf("expected attendee-99, got %s", receivedChat.AttendeeID)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for chat turn action entry on stream")
-		}
-
 		// 2. Approval & Execution
 		apprReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"appr-flow-1","decision":"approve"}`))
 		if err != nil {
@@ -3151,21 +3142,92 @@ func TestActionStreamEndpoints(t *testing.T) {
 			t.Fatalf("expected 200 OK from approve, got %d", apprResp.StatusCode)
 		}
 
-		// Check that an action entry arrived over stream for approval / execution
-		var receivedAppr types.ActionLogEntry
-		select {
-		case receivedAppr = <-streamEvents:
-			if receivedAppr.AttendeeID != "attendee-99" {
-				t.Errorf("expected attendee-99, got %s", receivedAppr.AttendeeID)
+		// Drain and assert the specific sequence of states from action stream
+		var events []types.ActionLogEntry
+		deadline := time.Now().Add(3 * time.Second)
+	drainLoop:
+		for time.Now().Before(deadline) {
+			select {
+			case ev := <-streamEvents:
+				if ev.AttendeeID == "attendee-99" {
+					events = append(events, ev)
+					if ev.Execution != nil && (ev.State == types.StateSuspended || ev.State == types.StateRunningGVisor) {
+						break drainLoop
+					}
+				}
+			case <-time.After(100 * time.Millisecond):
+				if len(events) >= 4 {
+					break drainLoop
+				}
 			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for approve turn action entry on stream")
 		}
 
-		// Verify entries recorded in feed history
+		var chatEvent *types.ActionLogEntry
+		var approvalEvent *types.ActionLogEntry
+		var executionEvent *types.ActionLogEntry
+		var completedEntry *types.ActionLogEntry
+
+		for i := range events {
+			ev := &events[i]
+			if chatEvent == nil && (ev.State == types.StateThinkingVertexAI || ev.State == types.StateRunning) {
+				chatEvent = ev
+			}
+			if approvalEvent == nil && ev.State == types.StateAwaitingApproval {
+				approvalEvent = ev
+			}
+			if executionEvent == nil && (ev.State == types.StateRunningGVisor || ev.State == types.StateSuspended) {
+				executionEvent = ev
+			}
+			if completedEntry == nil && ev.Execution != nil {
+				completedEntry = ev
+			}
+		}
+
+		if chatEvent == nil {
+			t.Fatalf("expected chat event with state StateThinkingVertexAI or StateRunning, none found in %d events", len(events))
+		}
+		if approvalEvent == nil {
+			t.Fatalf("expected approval event with state StateAwaitingApproval, none found in %d events", len(events))
+		}
+		if executionEvent == nil {
+			t.Fatalf("expected execution event with state StateRunningGVisor or StateSuspended, none found in %d events", len(events))
+		}
+		if completedEntry == nil {
+			t.Fatalf("expected completed entry with Execution result, none found in %d events", len(events))
+		}
+		if completedEntry.Execution == nil || completedEntry.Execution.Stdout == "" {
+			t.Errorf("expected non-empty Execution result on completed action entry, got %+v", completedEntry.Execution)
+		}
+
+		// Assert action ID correlation across lifecycle phases
+		if chatEvent.ID != approvalEvent.ID || chatEvent.ID != completedEntry.ID {
+			t.Errorf("expected action ID correlation across lifecycle: chat=%s, approval=%s, completed=%s",
+				chatEvent.ID, approvalEvent.ID, completedEntry.ID)
+		}
+
+		// Verify entries recorded in feed history and merged properly
 		history := gw.GetFeedHistory()
-		if len(history) < 2 {
-			t.Errorf("expected at least 2 entries in feed history after chat and approve, got %d", len(history))
+		if len(history) == 0 {
+			t.Fatalf("expected non-empty feed history, got %d entries", len(history))
+		}
+		var historyEntry *types.ActionLogEntry
+		for i := range history {
+			if history[i].AttendeeID == "attendee-99" {
+				historyEntry = &history[i]
+				break
+			}
+		}
+		if historyEntry == nil {
+			t.Fatalf("expected feed history entry for attendee-99")
+		}
+		if historyEntry.Execution == nil {
+			t.Errorf("expected Execution result present on feed history entry for attendee-99")
+		}
+		if historyEntry.Prompt != "generate monthly report" {
+			t.Errorf("expected preserved Prompt %q, got %q", "generate monthly report", historyEntry.Prompt)
+		}
+		if historyEntry.Code != "print('report generated')" {
+			t.Errorf("expected preserved Code %q, got %q", "print('report generated')", historyEntry.Code)
 		}
 	})
 
@@ -3243,4 +3305,199 @@ func TestActionStreamEndpoints(t *testing.T) {
 		cancel()
 		subscriberWg.Wait()
 	})
+}
+
+func TestChatAndApprovalFlowActionStream_WithAIClient(t *testing.T) {
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ExecutionResult{
+			Stdout:     "anomaly scan complete: no anomalies found\n",
+			ExitCode:   0,
+			DurationMs: 42,
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	suspender := &mockSuspender{}
+	aiClient := ai.NewGeminiClient(ai.WithProject(""), ai.WithGeminiMockEngine(engine.NewMockEngine()))
+	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+		gateway.WithAtespace("ate-demo-conf"),
+		gateway.WithSuspender(suspender),
+		gateway.WithAIClient(aiClient),
+	)
+	defer gw.Close()
+
+	ts := httptest.NewServer(gw.Handler())
+	defer ts.Close()
+
+	// Connect SSE stream
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	defer streamCancel()
+
+	streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, ts.URL+"/api/stream", nil)
+	if err != nil {
+		t.Fatalf("failed to create stream request: %v", err)
+	}
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("failed to connect to stream: %v", err)
+	}
+	defer streamResp.Body.Close()
+
+	reader := bufio.NewReader(streamResp.Body)
+	streamEvents := make(chan types.ActionLogEntry, 20)
+	go func() {
+		var currentEvent string
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "event:") {
+				currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			} else if strings.HasPrefix(line, "data:") {
+				dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				if currentEvent == "action_entry" {
+					var entry types.ActionLogEntry
+					if err := json.Unmarshal([]byte(dataStr), &entry); err == nil {
+						streamEvents <- entry
+					}
+				}
+				currentEvent = ""
+			}
+		}
+	}()
+
+	token := gw.MintToken("attendee-42")
+
+	// 1. Chat Prompt
+	chatReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"check telemetry anomalies"}`))
+	if err != nil {
+		t.Fatalf("failed to build chat request: %v", err)
+	}
+	chatReq.Header.Set("Content-Type", "application/json")
+	chatReq.Header.Set("Authorization", "Bearer "+token)
+
+	chatResp, err := http.DefaultClient.Do(chatReq)
+	if err != nil {
+		t.Fatalf("failed chat request: %v", err)
+	}
+	defer chatResp.Body.Close()
+	if chatResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from chat, got %d", chatResp.StatusCode)
+	}
+
+	var chatMsg types.ChatMessage
+	if err := json.NewDecoder(chatResp.Body).Decode(&chatMsg); err != nil {
+		t.Fatalf("failed to decode chat message: %v", err)
+	}
+	if chatMsg.Approval == nil {
+		t.Fatalf("expected approval request in chat message, got nil")
+	}
+
+	// 2. Approval & Execution
+	apprBody := fmt.Sprintf(`{"approval_id":%q,"decision":"APPROVE"}`, chatMsg.Approval.ApprovalID)
+	apprReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(apprBody))
+	if err != nil {
+		t.Fatalf("failed to build approve request: %v", err)
+	}
+	apprReq.Header.Set("Content-Type", "application/json")
+	apprReq.Header.Set("Authorization", "Bearer "+token)
+
+	apprResp, err := http.DefaultClient.Do(apprReq)
+	if err != nil {
+		t.Fatalf("failed approve request: %v", err)
+	}
+	defer apprResp.Body.Close()
+	if apprResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK from approve, got %d", apprResp.StatusCode)
+	}
+
+	// Drain and assert stream events
+	var events []types.ActionLogEntry
+	deadline := time.Now().Add(3 * time.Second)
+drainLoop:
+	for time.Now().Before(deadline) {
+		select {
+		case ev := <-streamEvents:
+			if ev.AttendeeID == "attendee-42" {
+				events = append(events, ev)
+				if ev.Execution != nil && (ev.State == types.StateSuspended || ev.State == types.StateRunningGVisor) {
+					break drainLoop
+				}
+			}
+		case <-time.After(100 * time.Millisecond):
+			if len(events) >= 4 {
+				break drainLoop
+			}
+		}
+	}
+
+	var chatEvent *types.ActionLogEntry
+	var approvalEvent *types.ActionLogEntry
+	var executionEvent *types.ActionLogEntry
+	var completedEntry *types.ActionLogEntry
+
+	for i := range events {
+		ev := &events[i]
+		if chatEvent == nil && ev.State == types.StateThinkingVertexAI {
+			chatEvent = ev
+		}
+		if approvalEvent == nil && ev.State == types.StateAwaitingApproval {
+			approvalEvent = ev
+		}
+		if executionEvent == nil && (ev.State == types.StateRunningGVisor || ev.State == types.StateSuspended) {
+			executionEvent = ev
+		}
+		if completedEntry == nil && ev.Execution != nil {
+			completedEntry = ev
+		}
+	}
+
+	if chatEvent == nil {
+		t.Fatalf("expected StateThinkingVertexAI chat event, none found in %d events", len(events))
+	}
+	if approvalEvent == nil {
+		t.Fatalf("expected StateAwaitingApproval event, none found in %d events", len(events))
+	}
+	if executionEvent == nil {
+		t.Fatalf("expected StateRunningGVisor or StateSuspended event, none found in %d events", len(events))
+	}
+	if completedEntry == nil {
+		t.Fatalf("expected completed entry with Execution result, none found in %d events", len(events))
+	}
+
+	// Assert action ID correlation across all phases
+	if chatEvent.ID != approvalEvent.ID || chatEvent.ID != completedEntry.ID {
+		t.Errorf("expected correlated action ID across lifecycle: chat=%s, approval=%s, completed=%s",
+			chatEvent.ID, approvalEvent.ID, completedEntry.ID)
+	}
+
+	// Verify merged feed history
+	history := gw.GetFeedHistory()
+	if len(history) == 0 {
+		t.Fatalf("expected non-empty feed history")
+	}
+	var historyEntry *types.ActionLogEntry
+	for i := range history {
+		if history[i].AttendeeID == "attendee-42" {
+			historyEntry = &history[i]
+			break
+		}
+	}
+	if historyEntry == nil {
+		t.Fatalf("expected feed history entry for attendee-42")
+	}
+	if historyEntry.Execution == nil {
+		t.Errorf("expected Execution result present in history entry")
+	}
+	if historyEntry.Prompt != "check telemetry anomalies" {
+		t.Errorf("expected preserved Prompt %q, got %q", "check telemetry anomalies", historyEntry.Prompt)
+	}
+	if historyEntry.Code == "" {
+		t.Errorf("expected preserved Code in history entry")
+	}
 }

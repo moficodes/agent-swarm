@@ -53,7 +53,9 @@ func (b *EventBroker) Unsubscribe(attendeeID string, ch chan types.StateChangeEv
 	subs := b.subscribers[attendeeID]
 	for i, sub := range subs {
 		if sub == ch {
-			b.subscribers[attendeeID] = append(subs[:i], subs[i+1:]...)
+			copy(subs[i:], subs[i+1:])
+			subs[len(subs)-1] = nil
+			b.subscribers[attendeeID] = subs[:len(subs)-1]
 			close(ch)
 			break
 		}
@@ -97,7 +99,9 @@ func (b *EventBroker) UnsubscribeActions(ch chan types.ActionLogEntry) {
 	defer b.mu.Unlock()
 	for i, sub := range b.actionSubscribers {
 		if sub == ch {
-			b.actionSubscribers = append(b.actionSubscribers[:i], b.actionSubscribers[i+1:]...)
+			copy(b.actionSubscribers[i:], b.actionSubscribers[i+1:])
+			b.actionSubscribers[len(b.actionSubscribers)-1] = nil
+			b.actionSubscribers = b.actionSubscribers[:len(b.actionSubscribers)-1]
 			close(ch)
 			break
 		}
@@ -138,7 +142,9 @@ func (b *EventBroker) UnsubscribeReset(ch chan struct{}) {
 	defer b.mu.Unlock()
 	for i, sub := range b.resetSubscribers {
 		if sub == ch {
-			b.resetSubscribers = append(b.resetSubscribers[:i], b.resetSubscribers[i+1:]...)
+			copy(b.resetSubscribers[i:], b.resetSubscribers[i+1:])
+			b.resetSubscribers[len(b.resetSubscribers)-1] = nil
+			b.resetSubscribers = b.resetSubscribers[:len(b.resetSubscribers)-1]
 			close(ch)
 			break
 		}
