@@ -796,8 +796,6 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 	actionID := fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
 
 	g.mu.Lock()
-	g.activeActors[attendeeID] = types.StateThinkingVertexAI
-	g.addEventLocked(fmt.Sprintf("Attendee %s analyzing prompt with Vertex AI", attendeeID))
 	userMsg := types.ChatMessage{
 		ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
 		Sender:    types.SenderUser,
@@ -808,7 +806,49 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 	g.currentActionID[attendeeID] = actionID
 	historyCopy := make([]types.ChatMessage, len(g.chatHistories[attendeeID]))
 	copy(historyCopy, g.chatHistories[attendeeID])
-	g.mu.Unlock()
+
+	// Strict capacity gate (capacity 2 matching physical worker pods):
+	// An actor CANNOT run or think without acquiring an available worker slot!
+	var slotAcquired bool
+	select {
+	case g.workerSlots <- struct{}{}:
+		slotAcquired = true
+		g.activeActors[attendeeID] = types.StateRunning
+		g.addEventLocked(fmt.Sprintf("Attendee %s allocated worker pod: starting turn", attendeeID))
+		g.mu.Unlock()
+		g.BroadcastStateChange(attendeeID, types.StateRunning, "Running on Pod", "Allocated to worker pod on GKE")
+	default:
+		g.activeActors[attendeeID] = types.StateParkedEnvoy
+		g.addEventLocked(fmt.Sprintf("Attendee %s queued: waiting for available worker pod slot", attendeeID))
+		g.mu.Unlock()
+		g.BroadcastStateChange(attendeeID, types.StateParkedEnvoy, "Parked in Envoy", "Queued in Envoy L7 buffer — waiting for worker slot...")
+		g.RecordActionEntry(types.ActionLogEntry{
+			ID:         actionID,
+			AttendeeID: attendeeID,
+			Timestamp:  time.Now().Unix(),
+			Prompt:     req.Message,
+			State:      types.StateParkedEnvoy,
+		})
+
+		select {
+		case <-r.Context().Done():
+			g.setActorState(attendeeID, types.StateSuspended)
+			return
+		case g.workerSlots <- struct{}{}:
+			slotAcquired = true
+			g.setActorState(attendeeID, types.StateRunning)
+			g.BroadcastStateChange(attendeeID, types.StateRunning, "Running on Pod", "Allocated to worker pod on GKE")
+		}
+	}
+
+	if slotAcquired {
+		defer func() { <-g.workerSlots }()
+	}
+
+	// Now that worker compute is allocated, transition to thinking on Vertex AI
+	g.setActorState(attendeeID, types.StateThinkingVertexAI)
+	g.addEventLocked(fmt.Sprintf("Attendee %s analyzing prompt with Vertex AI", attendeeID))
+	g.BroadcastStateChange(attendeeID, types.StateThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
 
 	g.RecordActionEntry(types.ActionLogEntry{
 		ID:         actionID,
@@ -817,8 +857,6 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 		Prompt:     req.Message,
 		State:      types.StateThinkingVertexAI,
 	})
-
-	g.BroadcastStateChange(attendeeID, types.StateThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
