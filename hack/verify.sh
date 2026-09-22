@@ -23,7 +23,7 @@
 #   Step 4: Turn 2 Approval & Sandbox Execution (/api/approve -> exit code 0 & stdout)
 #   Step 5: Audience Burst & Request Parking (concurrent load, 0 dropped/503s, parking check)
 #   Step 6: Telemetry Endpoint (/api/stage/telemetry -> actors, workers, parking)
-#   Step 7: Audience Simulation Engine (/api/simulation -> start/stop lifecycle)
+#   Step 7: Audience Simulation Engine (/api/simulation -> start/stop lifecycle & segmented allocation)
 #   Step 8: Actor Spotlight Inspector API (/api/actor/{id} -> snapshot metadata & execution state)
 #   Step 9: 1-Click Cluster Reset Controller (/api/reset -> parallel suspend sweep & state reset)
 #   Step 10: Dedicated Live Feed Page (/feed -> DOM elements & static assets)
@@ -691,6 +691,24 @@ if [[ "${SIM_RUNNING}" != "true" ]]; then
 fi
 log_ok "GET /api/simulation verified running: true"
 
+# Verify segmented attendee allocation while simulation is active (count=5)
+HUMAN_SESSION_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/session")
+HUMAN_ATTENDEE_ID=$(printf "%s" "${HUMAN_SESSION_RESP}" | jq -r .attendee_id 2>/dev/null || true)
+
+if [[ -z "${HUMAN_ATTENDEE_ID}" || "${HUMAN_ATTENDEE_ID}" == "null" || ! "${HUMAN_ATTENDEE_ID}" =~ ^attendee-([0-9]+)$ ]]; then
+  log_err "Invalid or missing attendee_id in session response during simulation: ${HUMAN_SESSION_RESP}"
+  log_fail "Step 7: Audience Simulation Engine"
+  exit 1
+fi
+
+HUMAN_INDEX=$((10#${BASH_REMATCH[1]}))
+if [[ ${HUMAN_INDEX} -lt 6 ]]; then
+  log_err "Expected segmented attendee ID index >= 6 with count=5, got ${HUMAN_ATTENDEE_ID} (index ${HUMAN_INDEX})"
+  log_fail "Step 7: Audience Simulation Engine"
+  exit 1
+fi
+log_ok "Segmented session allocation verified: human assigned ${HUMAN_ATTENDEE_ID} (unreserved partition beyond simulation count=5)"
+
 # Stop simulation via POST /api/simulation ({"action":"stop"})
 SIM_STOP_PAYLOAD='{"action":"stop"}'
 SIM_STOP_CODE=$(curl -s -o "${TMP_DIR}/sim_stop.json" -w "%{http_code}" --max-time 10 -X POST "${GATEWAY_URL}/api/simulation" \
@@ -713,6 +731,22 @@ if [[ "${SIM_RUNNING_STOPPED}" != "false" ]]; then
   exit 1
 fi
 log_ok "GET /api/simulation verified running: false"
+
+# Verify GET /api/session allocates normally after simulation stopped
+POST_SIM_SESSION_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/session")
+POST_SIM_ATTENDEE_ID=$(printf "%s" "${POST_SIM_SESSION_RESP}" | jq -r .attendee_id 2>/dev/null || true)
+if [[ -z "${POST_SIM_ATTENDEE_ID}" || "${POST_SIM_ATTENDEE_ID}" == "null" || ! "${POST_SIM_ATTENDEE_ID}" =~ ^attendee-([0-9]+)$ ]]; then
+  log_err "Invalid or missing attendee_id in session response after stopping simulation: ${POST_SIM_SESSION_RESP}"
+  log_fail "Step 7: Audience Simulation Engine"
+  exit 1
+fi
+POST_SIM_INDEX=$((10#${BASH_REMATCH[1]}))
+if [[ ${POST_SIM_INDEX} -lt 1 || ${POST_SIM_INDEX} -gt 50 ]]; then
+  log_err "Expected attendee ID index within 1..50 after stopping simulation, got ${POST_SIM_ATTENDEE_ID} (index ${POST_SIM_INDEX})"
+  log_fail "Step 7: Audience Simulation Engine"
+  exit 1
+fi
+log_ok "Session allocation after simulation verified: assigned ${POST_SIM_ATTENDEE_ID} (normal allocation)"
 log_pass "Step 7: Audience Simulation Engine Verified"
 
 # =========================================================================

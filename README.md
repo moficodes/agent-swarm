@@ -124,6 +124,13 @@ Attendees prompt their agents to perform real-time telemetry analysis and code e
 - **In-Memory Ring Buffer**: `conf-gateway` maintains an in-memory ring buffer of the last 100 action events exposed via `GET /api/feed/history`, allowing newly connected dashboards to instantly hydrate full conversation and execution history.
 - **Dedicated Live Streaming Dashboard**: Available at `/feed`, offering a full-page cyber-themed dashboard with real-time state filtering, instant full-text search, auto-scrolling terminal cards, and syntax-highlighted code execution logs.
 
+### 11. Segmented Attendee Allocation (Zero Human/Swarm Collision)
+- **The Challenge**: When background virtual swarms are active (e.g., 25 simulated attendees occupying `attendee-01`..`attendee-25`), real humans scanning the QR code at `/chat` could collide with simulated actors if IDs were allocated sequentially from 1. This would cause hijacked conversations, conflicting prompts, or corrupted HITL states.
+- **Dynamic Range Partitioning**: `conf-gateway` (`GET /api/session`) inspects the active `SimulationController` status. When simulation is active with count $N$, newly connected human attendees are dynamically partitioned into the unreserved range from $N+1$ up to `maxActors` (e.g., `attendee-26` through `attendee-50` when `count=25`), cycling safely within this partition.
+- **Fair Multi-Tenant Competition**: Human and virtual attendees share the exact same 2 physical worker pods (`conf-workers-0`, `conf-workers-1`). Humans experience authentic Envoy L7 request parking and sub-300ms container wake-ups under swarm load with zero session collisions.
+- **Explicit Actor Overrides**: URL parameters (`/chat?attendee_id=attendee-07`) continue to be honored directly for reproducible testing, specific attendee demonstrations, and presenter spotlighting.
+- **Graceful Lifecycle Reversion**: Halting simulation or triggering 1-click reset dynamically restores attendee session allocation to the full unpartitioned range (`1..maxActors`) without server restart.
+
 ---
 
 ## User Interface Guide
@@ -182,10 +189,10 @@ A minute-by-minute cue sheet for presenting the demo on stage:
 |        | 2 idle workers and empty  | to get your own isolated agent."  | in SUSPENDED state.  |
 |        | fleet matrix.             |                                   |                      |
 +-----------------------------------------------------------------------------------------------+
-| 01:00  | The Virtual Swarm         | "Need a full room? Watch this:    | POST /api/simulation |
-|        | Click [▶ Simulate 25]     | with one click, 25 virtual        | launches background  |
-|        | in stage header.          | attendees start prompting agents  | attendees streaming  |
-|        |                           | across the fleet!"                | real SSE events.     |
+| 01:00  | The Virtual Swarm &       | "Need a full room? Watch this:    | POST /api/simulation |
+|        | Segmented Allocation      | 25 virtual bots start prompting.  | launches swarm 01-25;|
+|        | Click [▶ Simulate 25]     | If you scan now, you get assigned | /api/session assigns |
+|        | in stage header.          | attendee-26+ with zero collision! | attendee-26+ cleanly.|
 +-----------------------------------------------------------------------------------------------+
 | 01:45  | The Prompt & Spotlight    | "Let's inspect Attendee #07. Click| Drawer fetches       |
 |        | Click badge attendee-07   | the badge to open the Spotlight   | /api/actor/attendee-07|
@@ -216,6 +223,9 @@ A minute-by-minute cue sheet for presenting the demo on stage:
 |        | in stage header.          | the cluster for the next talk."   | actors, clearing pods|
 +-----------------------------------------------------------------------------------------------+
 ```
+
+> **Presenter Cue — Segmented Attendee Allocation (Zero Human/Swarm Collision)**:
+> When running a simulated swarm during live talks, `conf-gateway` automatically partitions newly onboarding human phones into attendee IDs beyond the simulation count (e.g., `attendee-26`..`attendee-50` when `count=25`). Both real attendees and virtual bots compete for execution turns across the same 2 physical worker pods, allowing human audience members to experience authentic L7 request parking and sub-300ms container wake-ups without collision with background bots. For controlled demonstrations of specific actors, pass explicit query parameters (e.g. `/chat?attendee_id=attendee-07`).
 
 ---
 
@@ -328,7 +338,7 @@ The automated verification script validates all conference subsystems end-to-end
 4. **Step 4: Turn 2 Approval & Sandbox Execution**: Submits `POST /api/approve` and asserts execution inside the gVisor sandbox, confirming exit code 0 and stdout metrics.
 5. **Step 5: Audience Burst & Request Parking**: Fires concurrent requests across multiple attendees, asserting that request parking is engaged, with **zero dropped packets and zero HTTP 503 errors**.
 6. **Step 6: Telemetry Endpoint**: Verifies `GET /api/stage/telemetry`, checking physical worker slots (`conf-workers-0`, `conf-workers-1`), active actor tracking, and live cluster events.
-7. **Step 7: Audience Simulation Engine**: Verifies `/api/simulation` by starting 5 virtual attendees (`POST /api/simulation` with `action: start`), asserting `GET /api/simulation` reports `running: true`, stopping simulation (`action: stop`), and confirming `running: false`.
+7. **Step 7: Audience Simulation Engine**: Verifies `/api/simulation` by starting 5 virtual attendees (`POST /api/simulation` with `action: start`), asserting `GET /api/simulation` reports `running: true`, asserting segmented human attendee allocation beyond the simulation batch (`GET /api/session` assigns `attendee-06` or higher), stopping simulation (`action: stop`), confirming `running: false`, and verifying normal session allocation resumes.
 8. **Step 8: Actor Spotlight Inspector API**: Verifies `GET /api/actor/attendee-01`, asserting HTTP 200 OK and validating presence of `actor_id`, `state`, `snapshot_location`, and `snapshot_size_bytes`.
 9. **Step 9: 1-Click Cluster Reset Controller**: Submits `POST /api/reset`, verifies `HTTP 200 OK` with `status: ok`, and asserts `GET /api/actor/attendee-01` transitions to `SUSPENDED`.
 10. **Step 10: Dedicated Live Feed Page (`/feed`)**: Verifies `GET /feed` returns HTTP 200 OK with `text/html`, asserts presence of `#action-stream`, `#feed-search`, `#feed-autoscroll`, and `#btn-reset-all`, and confirms `/static/feed.js` and `/static/feed.css` return HTTP 200.
