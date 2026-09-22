@@ -702,8 +702,8 @@ if [[ -z "${HUMAN_ATTENDEE_ID}" || "${HUMAN_ATTENDEE_ID}" == "null" || ! "${HUMA
 fi
 
 HUMAN_INDEX=$((10#${BASH_REMATCH[1]}))
-if [[ ${HUMAN_INDEX} -lt 6 ]]; then
-  log_err "Expected segmented attendee ID index >= 6 with count=5, got ${HUMAN_ATTENDEE_ID} (index ${HUMAN_INDEX})"
+if [[ ${HUMAN_INDEX} -lt 6 || ${HUMAN_INDEX} -gt 50 ]]; then
+  log_err "Expected segmented attendee ID index within 6..50 with count=5, got ${HUMAN_ATTENDEE_ID} (index ${HUMAN_INDEX})"
   log_fail "Step 7: Audience Simulation Engine"
   exit 1
 fi
