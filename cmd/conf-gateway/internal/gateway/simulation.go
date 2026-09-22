@@ -164,6 +164,33 @@ func (s *SimulationRunner) jitter(base time.Duration) time.Duration {
 	return time.Duration(rand.Intn(maxJitterMs)) * time.Millisecond
 }
 
+func (s *SimulationRunner) calculateReviewDelay(offset int, rDelay time.Duration) time.Duration {
+	if rDelay < 100*time.Millisecond {
+		return rDelay + s.jitter(rDelay)
+	}
+	// Archetypes for conference presentation:
+	// - Fast Reviewers (30%): 5s - 8s
+	// - Standard Reviewers (50%): 9s - 15s
+	// - Thorough / Distracted Reviewers (20%): 16s - 25s
+	bucket := offset % 10
+	switch {
+	case bucket < 3:
+		return time.Duration(5000+rand.Intn(3000)) * time.Millisecond
+	case bucket < 8:
+		return time.Duration(9000+rand.Intn(6000)) * time.Millisecond
+	default:
+		return time.Duration(16000+rand.Intn(9000)) * time.Millisecond
+	}
+}
+
+func (s *SimulationRunner) calculateInterTurnDelay(lDelay time.Duration) time.Duration {
+	if lDelay < 100*time.Millisecond {
+		return lDelay + s.jitter(lDelay)
+	}
+	// Between 10s and 20s pause between conversation turns
+	return time.Duration(10000+rand.Intn(10000)) * time.Millisecond
+}
+
 func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, offset int, rDelay, lDelay time.Duration) {
 	defer s.wg.Done()
 
@@ -204,7 +231,7 @@ func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, o
 		}
 
 		if chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
-			sleepDur := rDelay + s.jitter(rDelay)
+			sleepDur := s.calculateReviewDelay(offset, rDelay)
 			if sleepDur > 0 {
 				select {
 				case <-ctx.Done():
@@ -216,7 +243,7 @@ func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, o
 			_ = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
 		}
 
-		sleepDur := lDelay + s.jitter(lDelay)
+		sleepDur := s.calculateInterTurnDelay(lDelay)
 		if sleepDur > 0 {
 			select {
 			case <-ctx.Done():

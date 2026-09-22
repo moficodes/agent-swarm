@@ -241,6 +241,7 @@ type Gateway struct {
 	recentEvents     []string
 	parkedCount      int
 	simController    SimulationController
+	workerSlots      chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -265,6 +266,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		lastResults:      make(map[string]*types.ExecutionResult),
 		recentEvents:     make([]string, 0),
 		maxActors:        50,
+		workerSlots:      make(chan struct{}, 2),
 	}
 
 	for _, opt := range opts {
@@ -757,11 +759,36 @@ func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 		req.Language = app.Language
 		delete(g.pendingApprovals, attendeeID)
 	}
-	g.activeActors[attendeeID] = types.StateRunningGVisor
-	g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: executing in gVisor", attendeeID, req.ApprovalID))
-	g.mu.Unlock()
 
-	g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing code in gVisor sandbox")
+	// Gated by workerSlots (capacity 2): max 2 running in gVisor, excess are PARKED in Envoy buffer!
+	var slotAcquired bool
+	select {
+	case g.workerSlots <- struct{}{}:
+		slotAcquired = true
+		g.activeActors[attendeeID] = types.StateRunningGVisor
+		g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: executing in gVisor", attendeeID, req.ApprovalID))
+		g.mu.Unlock()
+		g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing code in gVisor sandbox")
+	default:
+		g.activeActors[attendeeID] = types.StateParkedEnvoy
+		g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: queued in Envoy L7 buffer", attendeeID, req.ApprovalID))
+		g.mu.Unlock()
+		g.BroadcastStateChange(attendeeID, types.StateParkedEnvoy, "Parked in Envoy", "Queued in Envoy L7 buffer — waiting for worker slot...")
+
+		select {
+		case <-r.Context().Done():
+			g.setActorState(attendeeID, types.StateSuspended)
+			return
+		case g.workerSlots <- struct{}{}:
+			slotAcquired = true
+			g.setActorState(attendeeID, types.StateRunningGVisor)
+			g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing code in gVisor sandbox")
+		}
+	}
+
+	if slotAcquired {
+		defer func() { <-g.workerSlots }()
+	}
 
 	// Forward the approval with code to the actor via reverse proxy!
 	updatedBody, _ := json.Marshal(req)
