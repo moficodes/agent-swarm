@@ -527,13 +527,21 @@
 
       switch (rawState) {
         case 'PARKED':
+        case 'PARKED_ENVOY':
           stateClass = 'parked';
           stateLabel = 'PARKED';
           break;
         case 'RUNNING':
+        case 'RUNNING_GVISOR':
           stateClass = 'running';
           stateLabel = 'RUNNING';
           break;
+        case 'THINKING':
+        case 'THINKING_VERTEX_AI':
+          stateClass = 'thinking';
+          stateLabel = 'THINKING';
+          break;
+        case 'AWAITING':
         case 'AWAITING_APPROVAL':
           stateClass = 'awaiting';
           stateLabel = 'AWAITING APPROVAL';

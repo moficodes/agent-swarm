@@ -723,6 +723,24 @@ html, body {
   color: var(--neon-purple);
 }
 
+/* 5. Thinking (Neon cyan / active Vertex AI generation) */
+.fleet-badge.thinking {
+  border-color: var(--neon-cyan);
+  background: rgba(0, 255, 204, 0.14);
+  box-shadow: 0 0 14px rgba(0, 255, 204, 0.35);
+  transform: translateY(-2px);
+}
+.fleet-badge.thinking .badge-dot {
+  background: var(--neon-cyan);
+  box-shadow: 0 0 8px var(--neon-cyan);
+}
+.fleet-badge.thinking .badge-name {
+  color: #38bdf8;
+}
+.fleet-badge.thinking .badge-state-label {
+  color: var(--neon-cyan);
+}
+
 /* Footer: Live Activity Ticker */
 .stage-footer {
   display: flex;

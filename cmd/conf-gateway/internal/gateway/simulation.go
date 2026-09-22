@@ -171,10 +171,14 @@ func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, o
 
 	// Stagger attendee startup slightly to distribute requests
 	if offset > 0 {
+		stagger := time.Duration((offset%20)*150) * time.Millisecond
+		if rDelay < 100*time.Millisecond {
+			stagger = time.Duration((offset%5)*5) * time.Millisecond
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Duration((offset%5)*20) * time.Millisecond):
+		case <-time.After(stagger):
 		}
 	}
 
