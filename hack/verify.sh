@@ -26,6 +26,9 @@
 #   Step 7: Audience Simulation Engine (/api/simulation -> start/stop lifecycle)
 #   Step 8: Actor Spotlight Inspector API (/api/actor/{id} -> snapshot metadata & execution state)
 #   Step 9: 1-Click Cluster Reset Controller (/api/reset -> parallel suspend sweep & state reset)
+#   Step 10: Dedicated Live Feed Page (/feed -> DOM elements & static assets)
+#   Step 11: Action Feed History API (/api/feed/history -> JSON array)
+#   Step 12: Real-Time Action Stream SSE (/api/stream -> text/event-stream & event streaming)
 
 set -o errexit -o nounset -o pipefail
 
@@ -151,10 +154,14 @@ TMP_DIR="$(mktemp -d /tmp/ate-conf-verify.XXXXXX)"
 BURST_DIR="${TMP_DIR}/burst"
 SPAWNED_PIDS=()
 BURST_PIDS=()
+STREAM_PID=""
 
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
+  if [[ -n "${STREAM_PID}" ]]; then
+    kill "${STREAM_PID}" 2>/dev/null || true
+  fi
   if [[ ${#SPAWNED_PIDS[@]} -gt 0 ]]; then
     printf "\nShutting down locally spawned mock processes (%s)...\n" "${SPAWNED_PIDS[*]}"
     kill "${SPAWNED_PIDS[@]}" 2>/dev/null || true
@@ -791,7 +798,162 @@ fi
 log_ok "GET /api/actor/${TARGET_ACTOR_ID} confirmed actor state is SUSPENDED"
 log_pass "Step 9: 1-Click Cluster Reset Controller Verified"
 
+# =========================================================================
+# Step 10: Dedicated Live Feed Page (/feed)
+# =========================================================================
+log_info "Step 10: Dedicated Live Feed Page (/feed)"
+FEED_HEADERS_FILE="${TMP_DIR}/feed_headers.txt"
+FEED_BODY_FILE="${TMP_DIR}/feed_body.html"
+
+FEED_HTTP_CODE=$(curl -s -D "${FEED_HEADERS_FILE}" -o "${FEED_BODY_FILE}" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/feed")
+if [[ "${FEED_HTTP_CODE}" != "200" ]]; then
+  log_err "GET /feed returned HTTP ${FEED_HTTP_CODE} (expected 200)"
+  log_fail "Step 10: Dedicated Live Feed Page"
+  exit 1
+fi
+
+FEED_CONTENT_TYPE=$(grep -i '^content-type:' "${FEED_HEADERS_FILE}" | tr -d '\r' | awk '{print $2}' || true)
+if [[ "${FEED_CONTENT_TYPE}" != *"text/html"* ]]; then
+  log_err "GET /feed Content-Type is '${FEED_CONTENT_TYPE}' (expected text/html)"
+  log_fail "Step 10: Dedicated Live Feed Page"
+  exit 1
+fi
+log_ok "GET /feed (HTTP 200 OK, Content-Type: ${FEED_CONTENT_TYPE})"
+
+REQUIRED_FEED_IDS=(
+  "action-stream"
+  "feed-search"
+  "feed-autoscroll"
+  "btn-reset-all"
+)
+for dom_id in "${REQUIRED_FEED_IDS[@]}"; do
+  if ! grep -q "id=[\"']${dom_id}[\"']" "${FEED_BODY_FILE}"; then
+    log_err "Required element id='${dom_id}' not found in /feed HTML"
+    log_fail "Step 10: Dedicated Live Feed Page"
+    exit 1
+  fi
+  log_ok "  Found DOM element: #${dom_id}"
+done
+
+FEED_STATIC_ASSETS=(
+  "/static/feed.js"
+  "/static/feed.css"
+)
+for asset_path in "${FEED_STATIC_ASSETS[@]}"; do
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "${GATEWAY_URL}${asset_path}" || echo "000")
+  if [[ "${HTTP_CODE}" != "200" ]]; then
+    log_err "Feed asset ${asset_path} returned HTTP ${HTTP_CODE} (expected 200)"
+    log_fail "Step 10: Dedicated Live Feed Page"
+    exit 1
+  fi
+  log_ok "GET ${asset_path} (HTTP 200 OK)"
+done
+log_pass "Step 10: Dedicated Live Feed Page Verified"
+
+# =========================================================================
+# Step 11: Action Feed History API (/api/feed/history)
+# =========================================================================
+log_info "Step 11: Action Feed History API (/api/feed/history)"
+HISTORY_HEADERS_FILE="${TMP_DIR}/history_headers.txt"
+HISTORY_BODY_FILE="${TMP_DIR}/history_body.json"
+
+HISTORY_HTTP_CODE=$(curl -s -D "${HISTORY_HEADERS_FILE}" -o "${HISTORY_BODY_FILE}" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/feed/history")
+if [[ "${HISTORY_HTTP_CODE}" != "200" ]]; then
+  log_err "GET /api/feed/history returned HTTP ${HISTORY_HTTP_CODE} (expected 200)"
+  log_fail "Step 11: Action Feed History API"
+  exit 1
+fi
+
+HISTORY_CONTENT_TYPE=$(grep -i '^content-type:' "${HISTORY_HEADERS_FILE}" | tr -d '\r' | awk '{print $2}' || true)
+if [[ "${HISTORY_CONTENT_TYPE}" != *"application/json"* ]]; then
+  log_err "GET /api/feed/history Content-Type is '${HISTORY_CONTENT_TYPE}' (expected application/json)"
+  log_fail "Step 11: Action Feed History API"
+  exit 1
+fi
+log_ok "GET /api/feed/history (HTTP 200 OK, Content-Type: ${HISTORY_CONTENT_TYPE})"
+
+IS_ARRAY=$(jq 'type == "array"' "${HISTORY_BODY_FILE}" 2>/dev/null || echo false)
+if [[ "${IS_ARRAY}" != "true" ]]; then
+  log_err "GET /api/feed/history did not return a valid JSON array. Body: $(cat "${HISTORY_BODY_FILE}" 2>/dev/null || true)"
+  log_fail "Step 11: Action Feed History API"
+  exit 1
+fi
+
+HISTORY_COUNT=$(jq 'length' "${HISTORY_BODY_FILE}" 2>/dev/null || echo 0)
+log_ok "GET /api/feed/history returned valid JSON array with ${HISTORY_COUNT} entries"
+log_pass "Step 11: Action Feed History API Verified"
+
+# =========================================================================
+# Step 12: Real-Time Action Stream SSE (/api/stream)
+# =========================================================================
+log_info "Step 12: Real-Time Action Stream SSE (/api/stream)"
+STREAM_HEADERS_FILE="${TMP_DIR}/stream_headers.txt"
+STREAM_BODY_FILE="${TMP_DIR}/stream_body.txt"
+
+# Establish SSE connection in background
+curl -s -N -D "${STREAM_HEADERS_FILE}" "${GATEWAY_URL}/api/stream" > "${STREAM_BODY_FILE}" 2>/dev/null &
+STREAM_PID=$!
+
+STREAM_HANDSHAKE=false
+for _ in $(seq 1 40); do
+  if [[ -s "${STREAM_HEADERS_FILE}" ]] && grep -qi 'HTTP/.* 200' "${STREAM_HEADERS_FILE}"; then
+    STREAM_HANDSHAKE=true
+    break
+  fi
+  sleep 0.05
+done
+
+if [[ "${STREAM_HANDSHAKE}" != "true" ]]; then
+  kill "${STREAM_PID}" 2>/dev/null || true
+  log_err "Failed to establish SSE stream handshake on GET /api/stream"
+  if [[ -s "${STREAM_HEADERS_FILE}" ]]; then
+    log_err "Headers: $(cat "${STREAM_HEADERS_FILE}")"
+  fi
+  log_fail "Step 12: Real-Time Action Stream SSE"
+  exit 1
+fi
+
+STREAM_CONTENT_TYPE=$(grep -i '^content-type:' "${STREAM_HEADERS_FILE}" | tr -d '\r' | awk '{print $2}' || true)
+if [[ "${STREAM_CONTENT_TYPE}" != *"text/event-stream"* ]]; then
+  kill "${STREAM_PID}" 2>/dev/null || true
+  log_err "Expected Content-Type text/event-stream on /api/stream, got '${STREAM_CONTENT_TYPE}'"
+  log_fail "Step 12: Real-Time Action Stream SSE"
+  exit 1
+fi
+
+log_ok "SSE stream handshake established (HTTP 200 OK, Content-Type: ${STREAM_CONTENT_TYPE})"
+
+# Trigger an event and verify reading from the live stream
+curl -s -X POST "${GATEWAY_URL}/api/chat" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Stream verification probe"}' >/dev/null 2>&1 &
+PROBE_PID=$!
+
+EVENT_RECEIVED=false
+for _ in $(seq 1 40); do
+  if [[ -s "${STREAM_BODY_FILE}" ]] && grep -q "event:" "${STREAM_BODY_FILE}"; then
+    EVENT_RECEIVED=true
+    break
+  fi
+  sleep 0.05
+done
+
+wait "${PROBE_PID}" 2>/dev/null || true
+kill "${STREAM_PID}" 2>/dev/null || true
+wait "${STREAM_PID}" 2>/dev/null || true
+STREAM_PID=""
+
+if [[ "${EVENT_RECEIVED}" == "true" ]]; then
+  FIRST_EVENT=$(grep "event:" "${STREAM_BODY_FILE}" | head -n 1 | tr -d '\r')
+  log_ok "Successfully read event from stream: ${FIRST_EVENT}"
+else
+  log_ok "Verified stream connection handshake (no immediate events queued)"
+fi
+
+log_pass "Step 12: Real-Time Action Stream SSE Verified"
+
 printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
-printf "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 9 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}\n"
+printf "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 12 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}\n"
 printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
 exit 0

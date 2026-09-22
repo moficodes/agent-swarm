@@ -269,17 +269,17 @@ git commit -m "feat(conference): add integrated view switcher on stage between g
 - Modify: `hack/verify-demo-conference.sh`
 - Modify: `demos/conference/README.md`
 
-- [ ] **Step 1: Update `hack/verify-demo-conference.sh`**
+- [x] **Step 1: Update `hack/verify-demo-conference.sh`**
   - Add Step 10: Verify `GET /feed` serves 200 OK.
   - Add Step 11: Verify `GET /api/feed/history` returns valid JSON history array.
   - Add Step 12: Verify `GET /api/stream` establishes SSE connection.
   - Update banner to "ALL 12 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)".
 
-- [ ] **Step 2: Update `demos/conference/README.md`**
+- [x] **Step 2: Update `demos/conference/README.md`**
   - Document `/feed` and the stage view switcher.
   - Update speaker playbook with live stream presentation cues.
 
-- [ ] **Step 3: Run repository linters**
+- [x] **Step 3: Run repository linters**
 
 Run: `./hack/verify/boilerplate.sh && ./hack/verify/gofmt.sh && ./hack/verify/go-modules.sh && ./hack/verify/licenses.sh && ./hack/verify/golangci-lint.sh`
 Expected: Clean pass.
