@@ -579,9 +579,10 @@ html, body {
 }
 
 .legend-dot.suspended { background: var(--slate-gray); }
+.legend-dot.thinking { background: var(--neon-cyan); box-shadow: 0 0 6px var(--neon-cyan); }
+.legend-dot.awaiting { background: var(--neon-purple); box-shadow: 0 0 6px var(--neon-purple); }
 .legend-dot.parked { background: var(--neon-amber); box-shadow: 0 0 6px var(--neon-amber); }
 .legend-dot.running { background: var(--neon-green); box-shadow: 0 0 6px var(--neon-green); }
-.legend-dot.awaiting { background: var(--neon-purple); box-shadow: 0 0 6px var(--neon-purple); }
 
 /* 100 Badge Matrix */
 .fleet-grid {
