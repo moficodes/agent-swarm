@@ -482,6 +482,7 @@ html, body {
 .action-card {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   gap: 0.85rem;
   background: var(--bg-card);
   border: 1px solid var(--border-card);
@@ -492,6 +493,10 @@ html, body {
   position: relative;
   overflow: hidden;
   animation: card-enter 0.25s ease-out;
+}
+
+.action-card > * {
+  flex-shrink: 0;
 }
 
 @keyframes card-enter {
