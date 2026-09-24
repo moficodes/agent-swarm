@@ -27,6 +27,7 @@ func (g *Gateway) beginTurn(attendee string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.turnsInFlight[attendee]++
+	g.turnSeq[attendee]++
 	if t, ok := g.suspendTimers[attendee]; ok {
 		if t.Stop() {
 			g.wg.Done()
@@ -54,11 +55,12 @@ func (g *Gateway) suspendAfterTurnLocked(attendee string) {
 	if g.control == nil || g.closed {
 		return
 	}
+	seq := g.turnSeq[attendee]
 	g.wg.Add(1)
 	if g.suspendAfter <= 0 {
 		go func() {
 			defer g.wg.Done()
-			g.suspendActor(attendee)
+			g.suspendIfIdle(attendee, seq)
 		}()
 		return
 	}
@@ -73,9 +75,26 @@ func (g *Gateway) suspendAfterTurnLocked(attendee string) {
 			delete(g.suspendTimers, attendee)
 		}
 		g.mu.Unlock()
-		g.suspendActor(attendee)
+		g.suspendIfIdle(attendee, seq)
 	})
 	g.suspendTimers[attendee] = t
+}
+
+// suspendIfIdle suspends the attendee's actor unless a turn has started
+// since the suspend was scheduled at turn seq. A turn that starts after this
+// check can still race the suspend; closing that gap needs ateapi to drain
+// in-flight requests before it checkpoints.
+func (g *Gateway) suspendIfIdle(attendee string, seq uint64) {
+	if g.beforeSuspendCheck != nil {
+		g.beforeSuspendCheck(attendee)
+	}
+	g.mu.Lock()
+	busy := g.turnsInFlight[attendee] > 0 || g.turnSeq[attendee] != seq
+	g.mu.Unlock()
+	if busy {
+		return
+	}
+	g.suspendActor(attendee)
 }
 
 func (g *Gateway) suspendActor(attendee string) {

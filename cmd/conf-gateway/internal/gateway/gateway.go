@@ -209,6 +209,12 @@ type Gateway struct {
 	// turnsInFlight counts each attendee's proxied turns that have not
 	// finished. An actor is only scheduled for suspend when it reaches zero.
 	turnsInFlight map[string]int
+	// turnSeq counts each attendee's turns, so a scheduled suspend can tell
+	// that a newer turn has started since it was scheduled.
+	turnSeq map[string]uint64
+	// beforeSuspendCheck, when set by tests, runs just before a scheduled
+	// suspend re-checks for newer turns.
+	beforeSuspendCheck func(attendee string)
 	// closed is set by Close; no background work starts after it.
 	closed bool
 
@@ -234,6 +240,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		recentEvents:    make([]string, 0),
 		suspendTimers:   make(map[string]*time.Timer),
 		turnsInFlight:   make(map[string]int),
+		turnSeq:         make(map[string]uint64),
 		maxActors:       50,
 	}
 

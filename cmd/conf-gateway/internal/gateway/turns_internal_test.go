@@ -197,3 +197,69 @@ func TestSuspendCanceledByCloseIsNotReported(t *testing.T) {
 		}
 	}
 }
+
+// holdSuspendCheck makes each scheduled suspend announce itself on the
+// returned channel and wait for release to close before it re-checks for
+// new turns.
+func holdSuspendCheck(gw *Gateway) (reached chan string, release chan struct{}) {
+	reached, release = make(chan string, 4), make(chan struct{})
+	gw.beforeSuspendCheck = func(attendee string) {
+		reached <- attendee
+		<-release
+	}
+	return reached, release
+}
+
+func TestScheduledSuspendSkippedWhenTurnInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		suspendAfter time.Duration
+	}{
+		{"immediate", 0},
+		{"fired timer", time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actor, srv := newHeldActor(t, "one", "two")
+			ctrl := &recordingControl{suspended: make(chan string, 4)}
+			gw := newTurnGateway(t, srv.URL, ctrl, tc.suspendAfter)
+			reached, release := holdSuspendCheck(gw)
+
+			close(actor.release["one"])
+			chat(gw, "attendee-05", "one")
+			<-reached // the suspend is scheduled and past any timer
+
+			done := make(chan struct{})
+			go func() { defer close(done); chat(gw, "attendee-05", "two") }()
+			<-actor.reached // "one"
+			<-actor.reached // "two" is in flight
+
+			close(release)
+			gw.Close() // waits for the scheduled suspend
+			if n := len(ctrl.suspended); n != 0 {
+				t.Errorf("%d suspends ran while a turn was in flight, want none", n)
+			}
+			close(actor.release["two"])
+			<-done
+		})
+	}
+}
+
+func TestScheduledSuspendSkippedAfterNewerTurn(t *testing.T) {
+	actor, srv := newHeldActor(t, "one", "two")
+	ctrl := &recordingControl{suspended: make(chan string, 4)}
+	gw := newTurnGateway(t, srv.URL, ctrl, 0)
+	reached, release := holdSuspendCheck(gw)
+
+	close(actor.release["one"])
+	close(actor.release["two"])
+	chat(gw, "attendee-06", "one")
+	<-reached
+	chat(gw, "attendee-06", "two") // starts and ends inside the window
+	<-reached
+
+	close(release)
+	gw.Close()
+	if n := len(ctrl.suspended); n != 1 {
+		t.Errorf("%d suspends ran, want only the newer turn's", n)
+	}
+}
