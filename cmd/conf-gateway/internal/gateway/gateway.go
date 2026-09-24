@@ -190,9 +190,12 @@ type Gateway struct {
 	mockLLM      bool
 	statePollMs  atomic.Int64
 
-	mux             *http.ServeMux
-	proxy           *actorproxy.Proxy
-	attendeeSeq     uint64
+	mux         *http.ServeMux
+	proxy       *actorproxy.Proxy
+	attendeeSeq uint64
+	// mu guards chatHistories through closed. Lock order: mu first, then the locks
+	// inside actorproxy (approvals) and feed (Log, Broker) as leaves. Those
+	// packages never call back into the gateway while holding their own lock.
 	mu              sync.RWMutex
 	chatHistories   map[string][]types.ChatMessage
 	lastResults     map[string]*types.ExecutionResult

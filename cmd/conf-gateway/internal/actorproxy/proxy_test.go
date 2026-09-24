@@ -163,3 +163,22 @@ func TestClaimApproval_RejectsBadPayload(t *testing.T) {
 		t.Fatalf("bad json: ok=%v status=%d", ok, rec.Code)
 	}
 }
+
+func TestProxy_StripsModelKeyFromErrorResponse(t *testing.T) {
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(types.ModelKeyHeader, "leaked")
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	defer router.Close()
+	u, _ := url.Parse(router.URL)
+	p := New(u, "space", []byte("s"), nil, Hooks{})
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, WithAttendee(httptest.NewRequest(http.MethodPost, "/api/chat", nil), "attendee-01"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get(types.ModelKeyHeader); got != "" {
+		t.Errorf("model key header reached the client on an error response: %q", got)
+	}
+}
