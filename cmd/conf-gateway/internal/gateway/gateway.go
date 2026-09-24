@@ -43,6 +43,7 @@ import (
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/auth"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/feed"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
@@ -203,7 +204,8 @@ type Gateway struct {
 	httpClient     *http.Client
 	staticFS       fs.FS
 	maxActors      int
-	broker         *EventBroker
+	broker         *feed.Broker
+	actions        *feed.Log
 
 	control      actorstate.ActorControl
 	board        *actorstate.Board
@@ -225,7 +227,6 @@ type Gateway struct {
 	lastResults       map[string]*types.ExecutionResult
 	currentActionID   map[string]string
 	recentEvents      []string
-	actionFeed        []types.ActionLogEntry
 	parking           atomic.Pointer[routerstatus.Snapshot]
 	simController     SimulationController
 	// suspendTimers holds each attendee's pending auto-suspend when
@@ -250,7 +251,8 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		statusInterval:    500 * time.Millisecond,
 		pollInterval:      time.Second,
 		httpClient:        &http.Client{Timeout: 5 * time.Second},
-		broker:            NewEventBroker(),
+		broker:            feed.NewBroker(),
+		actions:           feed.NewLog(100),
 		mux:               http.NewServeMux(),
 		pendingApprovals:  make(map[string]*types.ApprovalRequest),
 		approvalsInFlight: make(map[string]string),
@@ -258,7 +260,6 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		lastResults:       make(map[string]*types.ExecutionResult),
 		currentActionID:   make(map[string]string),
 		recentEvents:      make([]string, 0),
-		actionFeed:        make([]types.ActionLogEntry, 0),
 		suspendTimers:     make(map[string]*time.Timer),
 		turnsInFlight:     make(map[string]int),
 		maxActors:         50,
@@ -384,28 +385,7 @@ func (g *Gateway) setActivity(attendee string, a types.Activity) {
 // publishView sends a changed view to that attendee's SSE subscribers. It
 // runs inside Board updates, so it must not read the Board.
 func (g *Gateway) publishView(v types.ActorView) {
-	g.sendToAttendee(v.ActorID, "actor_view", v)
-}
-
-// sendToAttendee sends one SSE event to every subscriber of an attendee.
-func (g *Gateway) sendToAttendee(attendee, event string, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("[gateway] encoding %s event: %v", event, err)
-		return
-	}
-	g.broker.Publish(attendee, sseEvent{event: event, data: data})
-}
-
-// broadcastAll sends one SSE event to every attendee subscriber and signals
-// every action stream subscriber.
-func (g *Gateway) broadcastAll(event string, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("[gateway] encoding %s event: %v", event, err)
-		return
-	}
-	g.broker.PublishAll(sseEvent{event: event, data: data})
+	g.broker.SendToAttendee(v.ActorID, "actor_view", v)
 }
 
 // ActorView returns the current view of one attendee's actor.
@@ -548,12 +528,12 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/approve", jsonPOST(g.proxyToActor))
 
 	chat := g.page("chat.html", false, "/chat", "/chat/")
-	feed := g.page("feed.html", true, "/feed", "/feed/")
+	feedPage := g.page("feed.html", true, "/feed", "/feed/")
 	stage := g.page("stage.html", true, "/stage", "/stage/", "/")
 	g.mux.HandleFunc("/chat", chat)
 	g.mux.HandleFunc("/chat/", chat)
-	g.mux.HandleFunc("/feed", feed)
-	g.mux.HandleFunc("/feed/", feed)
+	g.mux.HandleFunc("/feed", feedPage)
+	g.mux.HandleFunc("/feed/", feedPage)
 	g.mux.HandleFunc("/stage", stage)
 	g.mux.HandleFunc("/stage/", stage)
 	g.mux.HandleFunc("/", stage)
@@ -782,46 +762,7 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	// Subscribe before the client sees 200 so no view published after that
-	// is missed.
-	ch := g.broker.Subscribe(attendeeID)
-	defer g.broker.Unsubscribe(attendeeID, ch)
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	if initData, err := json.Marshal(g.currentView(attendeeID)); err == nil {
-		if _, err := fmt.Fprintf(w, "event: actor_view\ndata: %s\n\n", initData); err != nil {
-			return
-		}
-		flusher.Flush()
-	}
-
-	ctxDone := r.Context().Done()
-	for {
-		select {
-		case <-ctxDone:
-			return
-		case event, ok := <-ch:
-			if !ok {
-				return
-			}
-			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.event, event.data); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-	}
+	g.broker.ServeAttendee(w, r, attendeeID, func() any { return g.currentView(attendeeID) })
 }
 
 func (g *Gateway) handleFeedHistory(w http.ResponseWriter, r *http.Request) {
@@ -853,52 +794,7 @@ func (g *Gateway) handleActionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	actionCh := g.broker.SubscribeActions()
-	defer g.broker.UnsubscribeActions(actionCh)
-
-	resetCh := g.broker.SubscribeReset()
-	defer g.broker.UnsubscribeReset(resetCh)
-
-	ctxDone := r.Context().Done()
-	for {
-		select {
-		case <-ctxDone:
-			return
-		case entry, ok := <-actionCh:
-			if !ok {
-				return
-			}
-			data, err := json.Marshal(entry)
-			if err != nil {
-				continue
-			}
-			if _, err := fmt.Fprintf(w, "event: action_entry\ndata: %s\n\n", data); err != nil {
-				return
-			}
-			flusher.Flush()
-		case _, ok := <-resetCh:
-			if !ok {
-				return
-			}
-			if _, err := fmt.Fprintf(w, "event: reset\ndata: {}\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-	}
+	g.broker.ServeActions(w, r)
 }
 
 // MaxRequestBodyBytes caps JSON request bodies accepted by the gateway.
@@ -1108,69 +1004,7 @@ func (g *Gateway) ActionSubscriberCount() int {
 // RecordActionEntry appends or updates an entry in the action feed (retaining up to 100 items)
 // and broadcasts it to action subscribers.
 func (g *Gateway) RecordActionEntry(entry types.ActionLogEntry) {
-	if entry.Timestamp == 0 {
-		entry.Timestamp = time.Now().Unix()
-	}
-	if entry.ID == "" {
-		entry.ID = fmt.Sprintf("action-%d", time.Now().UnixNano())
-	}
-	g.mu.Lock()
-	updated := false
-	for i, existing := range g.actionFeed {
-		if existing.ID == entry.ID {
-			merged := existing
-			if entry.AttendeeID != "" {
-				merged.AttendeeID = entry.AttendeeID
-			}
-			if entry.Timestamp != 0 {
-				merged.Timestamp = entry.Timestamp
-			}
-			if entry.Prompt != "" {
-				merged.Prompt = entry.Prompt
-			}
-			if entry.ModelResponse != "" {
-				merged.ModelResponse = entry.ModelResponse
-			}
-			if entry.Code != "" {
-				merged.Code = entry.Code
-			}
-			if entry.Language != "" {
-				merged.Language = entry.Language
-			}
-			if entry.RiskLevel != "" {
-				merged.RiskLevel = entry.RiskLevel
-			}
-			if entry.ApprovalID != "" {
-				merged.ApprovalID = entry.ApprovalID
-			}
-			if entry.Decision != "" {
-				merged.Decision = entry.Decision
-			}
-			if entry.Execution != nil {
-				merged.Execution = entry.Execution
-			}
-			if entry.WorkerPod != "" {
-				merged.WorkerPod = entry.WorkerPod
-			}
-			// Each entry records the activity the actor moved to, idle included.
-			merged.Activity = entry.Activity
-			if entry.Source != "" {
-				merged.Source = entry.Source
-			}
-			g.actionFeed[i] = merged
-			entry = merged
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		g.actionFeed = append(g.actionFeed, entry)
-		if len(g.actionFeed) > 100 {
-			g.actionFeed = g.actionFeed[len(g.actionFeed)-100:]
-		}
-	}
-	g.mu.Unlock()
-
+	entry = g.actions.Record(entry)
 	if g.broker != nil {
 		g.broker.PublishAction(entry)
 	}
@@ -1178,11 +1012,7 @@ func (g *Gateway) RecordActionEntry(entry types.ActionLogEntry) {
 
 // GetFeedHistory returns a copy of the current action log entries.
 func (g *Gateway) GetFeedHistory() []types.ActionLogEntry {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	res := make([]types.ActionLogEntry, len(g.actionFeed))
-	copy(res, g.actionFeed)
-	return res
+	return g.actions.History()
 }
 
 func (g *Gateway) modifyResponse(resp *http.Response) error {
@@ -1394,7 +1224,7 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	g.chatHistories = make(map[string][]types.ChatMessage)
 	g.lastResults = make(map[string]*types.ExecutionResult)
 	g.currentActionID = make(map[string]string)
-	g.actionFeed = make([]types.ActionLogEntry, 0)
+	g.actions.Reset()
 	g.addEventLocked("Stage reset: chats cleared, running actors suspended")
 	g.mu.Unlock()
 
@@ -1402,7 +1232,7 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	if g.usage != nil {
 		g.usage.ResetUsage()
 	}
-	g.broadcastAll("reset", struct{}{})
+	g.broker.Broadcast("reset", struct{}{})
 
 	var failed atomic.Int64
 	if g.control != nil {
