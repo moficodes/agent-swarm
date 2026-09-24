@@ -28,6 +28,7 @@
     parkingPulseDot: document.getElementById('parking-pulse-dot'),
     workerList: document.getElementById('worker-list'),
     fleetGrid: document.getElementById('fleet-grid'),
+    fleetSub: document.getElementById('fleet-sub'),
     eventTicker: document.getElementById('event-ticker'),
     btnSim25: document.getElementById('btn-sim-25'),
     btnSim50: document.getElementById('btn-sim-50'),
@@ -495,35 +496,39 @@
     return id;
   }
 
+  // renderFleetGrid draws one badge per actor the gateway reports, in ID
+  // order, and drops badges for actors it no longer reports.
   function renderFleetGrid(actorsMap) {
+    if (!el.fleetGrid) return;
     const actors = actorsMap || {};
-    // Iterate over 100 badge slots (Attendee 01 .. Attendee 100)
-    for (let i = 1; i <= 100; i++) {
-      const numStr = String(i).padStart(2, '0');
-      const actorID = 'attendee-' + numStr;
-      let badge = document.getElementById('badge-' + actorID);
+    const ids = window.ActorView.fleetIDs(actors);
+    if (el.fleetSub && ids.length > 0) {
+      el.fleetSub.textContent = ids.length + ' actors multiplexed onto shared worker pods';
+    }
+    const keep = new Set(ids.map((id) => 'badge-' + id));
+    Array.from(el.fleetGrid.children).forEach((child) => {
+      if (!keep.has(child.id)) child.remove();
+    });
 
-      if (!badge && el.fleetGrid) {
+    ids.forEach((actorID, i) => {
+      let badge = document.getElementById('badge-' + actorID);
+      if (!badge) {
         badge = document.createElement('div');
         badge.id = 'badge-' + actorID;
         badge.dataset.id = actorID;
-        badge.className = 'fleet-badge unknown';
-        badge.innerHTML = `<span class="badge-dot"></span><span class="badge-name">Attendee ${numStr}</span><span class="badge-state-label">Unknown</span>`;
-        el.fleetGrid.appendChild(badge);
+        badge.innerHTML = '<span class="badge-dot"></span><span class="badge-name"></span>' +
+          '<span class="badge-state-label"></span><span class="badge-state-sub"></span>';
+        badge.querySelector('.badge-name').textContent = formatActorName(actorID);
       }
-      if (!badge) continue;
-
-      // The initial label is Unknown until the first telemetry poll arrives.
-      const view = actors[actorID] || actors[actorID.toLowerCase()] || null;
-      const s = window.ActorView.state(view);
-      const a = window.ActorView.activity(view);
-
-      badge.className = 'fleet-badge ' + s.cls;
-      const labelEl = badge.querySelector('.badge-state-label');
-      if (labelEl) {
-        labelEl.textContent = a ? s.label + ' · ' + a.label : s.label;
+      if (el.fleetGrid.children[i] !== badge) {
+        el.fleetGrid.insertBefore(badge, el.fleetGrid.children[i] || null);
       }
-    }
+
+      const b = window.ActorView.badge(actors[actorID]);
+      badge.className = 'fleet-badge ' + b.cls;
+      badge.querySelector('.badge-state-label').textContent = b.label;
+      badge.querySelector('.badge-state-sub').textContent = b.sub;
+    });
   }
   const updateFleetGrid = renderFleetGrid;
 

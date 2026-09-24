@@ -71,5 +71,24 @@
     return SOURCES[src] || null;
   }
 
-  window.ActorView = { state: state, activity: activity, source: source };
+  // badge maps an ActorView to the fleet grid's {label, sub, cls}. What the
+  // actor is doing for its attendee leads, since "Awaiting approval" is the
+  // one that needs a human; the substrate state moves to the sub line. A
+  // crash or unreadable state outranks activity.
+  function badge(view) {
+    const s = state(view);
+    if (view && ['CRASHED', 'UNAVAILABLE'].includes(view.state)) {
+      return { label: s.label, sub: s.sub, cls: 'problem' };
+    }
+    const a = activity(view);
+    if (a) return { label: a.label, sub: s.label, cls: a.cls };
+    return s;
+  }
+
+  // fleetIDs returns the actor IDs in a telemetry actors map, sorted.
+  function fleetIDs(actorsMap) {
+    return Object.keys(actorsMap || {}).sort();
+  }
+
+  window.ActorView = { state: state, activity: activity, source: source, badge: badge, fleetIDs: fleetIDs };
 })();

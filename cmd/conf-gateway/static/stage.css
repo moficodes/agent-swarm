@@ -641,23 +641,18 @@ html, body {
 }
 
 .legend-dot.never-started,
-.legend-dot.unknown,
 .legend-dot.suspended { background: var(--slate-gray); }
-.legend-dot.unavailable { background: var(--text-muted); border: 1px dashed var(--text-muted); }
 .legend-dot.resuming,
-.legend-dot.suspending,
-.legend-dot.thinking { background: var(--neon-cyan); box-shadow: 0 0 6px var(--neon-cyan); }
-.legend-dot.transition,
+.legend-dot.suspending { background: var(--neon-cyan); box-shadow: 0 0 6px var(--neon-cyan); }
+.legend-dot.thinking { background: var(--neon-pink); box-shadow: 0 0 6px var(--neon-pink); }
 .legend-dot.awaiting { background: var(--neon-purple); box-shadow: 0 0 6px var(--neon-purple); }
-.legend-dot.paused,
 .legend-dot.executing { background: var(--neon-amber); box-shadow: 0 0 6px var(--neon-amber); }
-.legend-dot.crashed { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
 .legend-dot.running { background: var(--neon-green); box-shadow: 0 0 6px var(--neon-green); }
 
-/* 100 Badge Matrix */
+/* Fleet Badge Matrix */
 .fleet-grid {
   display: grid;
-  grid-template-columns: repeat(10, 1fr);
+  grid-template-columns: repeat(10, minmax(0, 1fr));
   gap: 0.5rem;
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
@@ -668,25 +663,26 @@ html, body {
 
 @media (max-width: 1400px) {
   .fleet-grid {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 900px) {
   .fleet-grid {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 600px) {
   .fleet-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 .fleet-badge {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   padding: 0.45rem 0.5rem;
   border-radius: 6px;
   border: 1px solid var(--border-subtle);
@@ -724,7 +720,16 @@ html, body {
   text-transform: uppercase;
 }
 
-/* Badge States: the ten ActorView badge classes (see actorview.js). */
+.fleet-badge .badge-state-sub {
+  font-size: 0.55rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 0.8rem;
+}
+
+/* Badge classes: every class ActorView.badge returns (see actorview.js). */
 .fleet-badge.never-started,
 .fleet-badge.unknown,
 .fleet-badge.suspended {
@@ -739,18 +744,6 @@ html, body {
 .fleet-badge.never-started .badge-state-label,
 .fleet-badge.unknown .badge-state-label,
 .fleet-badge.suspended .badge-state-label {
-  color: var(--text-muted);
-}
-
-.fleet-badge.unavailable {
-  border-color: #334155;
-  border-style: dashed;
-  background: #090e18;
-}
-.fleet-badge.unavailable .badge-dot {
-  background: var(--text-muted);
-}
-.fleet-badge.unavailable .badge-state-label {
   color: var(--text-muted);
 }
 
@@ -797,17 +790,63 @@ html, body {
   color: var(--neon-amber);
 }
 
-.fleet-badge.crashed {
+.fleet-badge.problem {
   border-color: #ef4444;
   background: rgba(239, 68, 68, 0.14);
   box-shadow: 0 0 14px rgba(239, 68, 68, 0.35);
 }
-.fleet-badge.crashed .badge-dot {
+.fleet-badge.problem .badge-dot {
   background: #ef4444;
   box-shadow: 0 0 8px #ef4444;
 }
-.fleet-badge.crashed .badge-state-label {
+.fleet-badge.problem .badge-state-label {
   color: #fca5a5;
+}
+
+.fleet-badge.thinking {
+  border-color: var(--neon-pink);
+  background: rgba(236, 72, 153, 0.12);
+  box-shadow: 0 0 12px rgba(236, 72, 153, 0.3);
+}
+.fleet-badge.thinking .badge-dot {
+  background: var(--neon-pink);
+  box-shadow: 0 0 8px var(--neon-pink);
+}
+.fleet-badge.thinking .badge-state-label {
+  color: var(--neon-pink);
+}
+
+/* Awaiting approval is the state that needs a human, so it pulses. */
+.fleet-badge.awaiting {
+  border-color: var(--neon-purple);
+  background: rgba(168, 85, 247, 0.18);
+  box-shadow: 0 0 16px rgba(168, 85, 247, 0.5);
+  animation: pulse-awaiting 1.6s ease-in-out infinite;
+}
+.fleet-badge.awaiting .badge-dot {
+  background: var(--neon-purple);
+  box-shadow: 0 0 10px var(--neon-purple);
+}
+.fleet-badge.awaiting .badge-state-label {
+  color: #d8b4fe;
+}
+
+@keyframes pulse-awaiting {
+  0%, 100% { box-shadow: 0 0 8px rgba(168, 85, 247, 0.35); }
+  50% { box-shadow: 0 0 20px rgba(168, 85, 247, 0.75); }
+}
+
+.fleet-badge.executing {
+  border-color: var(--neon-amber);
+  background: rgba(245, 158, 11, 0.12);
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.35);
+}
+.fleet-badge.executing .badge-dot {
+  background: var(--neon-amber);
+  box-shadow: 0 0 8px var(--neon-amber);
+}
+.fleet-badge.executing .badge-state-label {
+  color: var(--neon-amber);
 }
 
 .fleet-badge.transition {

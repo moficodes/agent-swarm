@@ -3426,3 +3426,22 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+func TestSimulation_CountIsCappedAtTheActorCount(t *testing.T) {
+	gw := newTestGateway(t, "", gateway.WithMaxActors(10))
+	ts := httptest.NewServer(asPresenter(gw))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/simulation", "application/json", strings.NewReader(`{"action":"start","count":11}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("start with 11 of 10 actors = %d %s, want 400", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "10 actors") {
+		t.Errorf("error = %q, want it to name the actor count", body)
+	}
+}

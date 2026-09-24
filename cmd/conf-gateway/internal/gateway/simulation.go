@@ -114,6 +114,12 @@ func (g *Gateway) handleSimulation(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Virtual attendees map one-to-one onto actors, and there are no
+		// more than maxActors of them.
+		if req.Action == "start" && req.Count > g.maxActors {
+			http.Error(w, fmt.Sprintf("invalid count: %d (the demo has %d actors)", req.Count, g.maxActors), http.StatusBadRequest)
+			return
+		}
 
 		switch req.Action {
 		case "start":

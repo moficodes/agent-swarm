@@ -81,3 +81,56 @@ func TestStatic_ActorViewIsServed(t *testing.T) {
 		t.Errorf("GET /static/actorview.js = %d", rec.Code)
 	}
 }
+
+func readStatic(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(staticDir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestStatic_StageLegendListsOnlyReachableStates checks that the stage legend
+// lists the states the demo produces, and none of the ones it never does.
+func TestStatic_StageLegendListsOnlyReachableStates(t *testing.T) {
+	html := readStatic(t, "stage.html")
+	start := strings.Index(html, `class="fleet-legend"`)
+	if start < 0 {
+		t.Fatal("stage.html has no fleet legend")
+	}
+	legend := html[start:]
+	legend = legend[:strings.Index(legend, "</div>")]
+	for _, want := range []string{"Never started", "Suspended", "Resuming", "Running", "Suspending", "Thinking", "Awaiting approval", "Executing"} {
+		if !strings.Contains(legend, want) {
+			t.Errorf("legend is missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"Paused", "Crashed", "Deleting", "Reverting", "State unavailable", "Unknown"} {
+		if strings.Contains(legend, unwanted) {
+			t.Errorf("legend lists %q, which the demo never produces", unwanted)
+		}
+	}
+}
+
+// TestStatic_StageHasNoFixedBadgeSlots checks that the fleet grid is built
+// from telemetry instead of a fixed set of attendee slots.
+func TestStatic_StageHasNoFixedBadgeSlots(t *testing.T) {
+	if html := readStatic(t, "stage.html"); strings.Contains(html, `id="badge-attendee-`) {
+		t.Error("stage.html hard-codes attendee badges")
+	}
+	if js := readStatic(t, "stage.js"); !strings.Contains(js, "ActorView.fleetIDs(") {
+		t.Error("stage.js does not build the fleet grid from ActorView.fleetIDs")
+	}
+}
+
+// TestStatic_StageStylesEveryBadgeClass checks that stage.css styles each
+// class ActorView.badge can return.
+func TestStatic_StageStylesEveryBadgeClass(t *testing.T) {
+	css := readStatic(t, "stage.css")
+	for _, cls := range []string{"never-started", "unknown", "suspended", "resuming", "suspending", "running", "thinking", "awaiting", "executing", "problem"} {
+		if !strings.Contains(css, ".fleet-badge."+cls) {
+			t.Errorf("stage.css has no .fleet-badge.%s rule", cls)
+		}
+	}
+}

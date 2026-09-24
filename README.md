@@ -183,7 +183,18 @@ ateapi (for example `kubectl-ate` failed, or the gateway is running with
 `LOCAL_MODE=true`); it is not a claim about the actor itself.
 
 A separate activity chip shows what the actor is doing right now: Thinking,
-Awaiting approval, or Executing, with nothing shown when idle. A reply may
+Awaiting approval, or Executing, with nothing shown when idle.
+
+The stage's fleet grid draws one badge per actor the gateway reports. When
+an actor has an activity, the activity is the badge's label and color and
+the substrate state moves to the line below, so an actor waiting on a human
+shows a pulsing purple "Awaiting approval" over "Suspended". No substrate
+state says an actor is waiting for a human; while it waits, ateapi reports
+it Suspended. A CRASHED or UNAVAILABLE actor shows a red badge, whatever its
+activity. The legend lists only the states the demo produces: it never
+pauses, reverts or deletes a running actor.
+
+A reply may
 also carry a source tag: "Mock reply" or "Mock (model error)"; a real
 Gemini reply carries no tag.
 
