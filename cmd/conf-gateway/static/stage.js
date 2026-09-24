@@ -17,6 +17,7 @@
 
   // DOM Elements
   const el = {
+    mockBanner: document.getElementById('mock-banner'),
     qrCode: document.getElementById('qr-code'),
     qrLink: document.getElementById('qr-link'),
     qrUrlText: document.getElementById('qr-url-text'),
@@ -25,18 +26,7 @@
     parkingStateText: document.getElementById('parking-state-text'),
     parkingProgressBar: document.getElementById('parking-progress-bar'),
     parkingPulseDot: document.getElementById('parking-pulse-dot'),
-    workerPod0: document.getElementById('worker-pod-0'),
-    workerBadge0: document.getElementById('worker-badge-0'),
-    workerActor0: document.getElementById('worker-actor-0'),
-    workerTask0: document.getElementById('worker-task-0'),
-    workerTimer0: document.getElementById('worker-timer-0'),
-    workerDot0: document.getElementById('worker-dot-0'),
-    workerPod1: document.getElementById('worker-pod-1'),
-    workerBadge1: document.getElementById('worker-badge-1'),
-    workerActor1: document.getElementById('worker-actor-1'),
-    workerTask1: document.getElementById('worker-task-1'),
-    workerTimer1: document.getElementById('worker-timer-1'),
-    workerDot1: document.getElementById('worker-dot-1'),
+    workerList: document.getElementById('worker-list'),
     fleetGrid: document.getElementById('fleet-grid'),
     eventTicker: document.getElementById('event-ticker'),
     btnSim25: document.getElementById('btn-sim-25'),
@@ -47,6 +37,7 @@
     spotlightBackdrop: document.getElementById('spotlight-backdrop'),
     spotlightTitle: document.getElementById('spotlight-title'),
     spotlightState: document.getElementById('spotlight-state'),
+    spotlightActivity: document.getElementById('spotlight-activity'),
     spotlightClose: document.getElementById('spotlight-close'),
     spotlightWorker: document.getElementById('spotlight-worker'),
     spotlightSnapshot: document.getElementById('spotlight-snapshot'),
@@ -399,20 +390,36 @@
     if (!data) return;
 
     // 1. Update Envoy L7 Parking Meter
-    updateParkingMeter(data.parked_requests ?? data.ParkedRequests ?? 0);
+    updateParkingMeter(data.parked_requests || 0, data.parking_available);
 
     // 2. Update Worker Pod Cards
-    updateWorkerCards(data.workers || data.Workers || []);
+    updateWorkerCards(data.workers || []);
 
     // 3. Update Attendee Fleet Badges
-    renderFleetGrid(data.actors || data.Actors || {});
+    renderFleetGrid(data.actors || {});
 
     // 4. Update Event Feed
-    updateEventTicker(data.recent_events || data.RecentEvents || []);
+    updateEventTicker(data.recent_events || []);
+
+    // 5. Update Mock LLM Banner
+    updateMockBanner(!!data.mock_llm);
   }
 
-  function updateParkingMeter(parkedCount) {
+  function updateParkingMeter(parkedCount, parkingAvailable) {
     if (!el.parkingCount) return;
+
+    if (!parkingAvailable) {
+      el.parkingCount.textContent = '--';
+      if (el.parkingProgressBar) el.parkingProgressBar.style.width = '0%';
+      if (el.parkingMeter) el.parkingMeter.classList.remove('active-parking');
+      if (el.parkingPulseDot) el.parkingPulseDot.classList.remove('pulsing');
+      if (el.parkingStateText) {
+        el.parkingStateText.textContent = 'Parking: unavailable';
+        el.parkingStateText.className = 'parking-state';
+      }
+      return;
+    }
+
     el.parkingCount.textContent = parkedCount;
 
     // Compute progress gauge bar (0 to 50 scale)
@@ -439,67 +446,44 @@
     }
   }
 
-  function updateWorkerCards(workers) {
-    // Pod 0
-    if (workers.length > 0) {
-      renderWorkerCard(
-        workers[0],
-        el.workerPod0,
-        el.workerBadge0,
-        el.workerActor0,
-        el.workerTask0,
-        el.workerTimer0,
-        el.workerDot0
-      );
-    }
-    // Pod 1
-    if (workers.length > 1) {
-      renderWorkerCard(
-        workers[1],
-        el.workerPod1,
-        el.workerBadge1,
-        el.workerActor1,
-        el.workerTask1,
-        el.workerTimer1,
-        el.workerDot1
-      );
-    }
+  // updateMockBanner shows the "Mock LLM" banner when the gateway is
+  // configured without a real Vertex AI backend.
+  function updateMockBanner(mockLLM) {
+    if (el.mockBanner) el.mockBanner.hidden = !mockLLM;
   }
 
-  function renderWorkerCard(w, card, badge, actor, task, timer, dot) {
-    if (!card || !w) return;
-    const activeActor = w.active_actor || w.ActiveActor;
-    const isBusy = activeActor && activeActor !== 'idle';
-    const taskName = w.current_task || w.CurrentTask || (isBusy ? 'Running gVisor workload' : 'Waiting for actor dispatch');
-    const elapsed = w.elapsed_ms ?? w.ElapsedMs ?? 0;
+  // renderWorkerCardHTML renders one real worker pod: its name, the actor it
+  // is running (if any), and the actor's substrate state.
+  function renderWorkerCardHTML(w) {
+    const activeActor = w.active_actor || '';
+    const isBusy = !!activeActor;
+    const s = window.ActorView.state({ state: w.state });
+    return `
+      <div class="card worker-card${isBusy ? ' active' : ''}">
+        <div class="worker-card-header">
+          <div class="worker-id">
+            <span class="worker-dot${isBusy ? ' active' : ''}"></span>
+            <span class="worker-title">${escapeHTML(w.pod_name || 'worker')}</span>
+          </div>
+          <span class="worker-status-badge ${s.cls}">${escapeHTML(s.label)}</span>
+        </div>
+        <div class="worker-body">
+          <div class="worker-stat">
+            <span class="stat-name">ACTIVE ACTOR</span>
+            <span class="stat-value active-actor-val${isBusy ? ' running' : ''}">${escapeHTML(isBusy ? formatActorName(activeActor) : 'idle')}</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
 
-    if (isBusy) {
-      card.classList.add('active');
-      if (badge) {
-        badge.textContent = 'ACTIVE';
-        badge.className = 'worker-status-badge active';
-      }
-      if (dot) dot.className = 'worker-dot active';
-      if (actor) {
-        actor.textContent = formatActorName(activeActor);
-        actor.className = 'stat-value active-actor-val running';
-      }
-      if (task) task.textContent = taskName;
-      if (timer) timer.textContent = elapsed + ' ms';
-    } else {
-      card.classList.remove('active');
-      if (badge) {
-        badge.textContent = 'IDLE';
-        badge.className = 'worker-status-badge idle';
-      }
-      if (dot) dot.className = 'worker-dot idle';
-      if (actor) {
-        actor.textContent = 'idle';
-        actor.className = 'stat-value active-actor-val';
-      }
-      if (task) task.textContent = taskName;
-      if (timer) timer.textContent = elapsed + ' ms';
+  function updateWorkerCards(workers) {
+    if (!el.workerList) return;
+    if (!workers || workers.length === 0) {
+      el.workerList.innerHTML = '<p class="workers-empty">No actors running</p>';
+      return;
     }
+    el.workerList.innerHTML = workers.map(renderWorkerCardHTML).join('');
   }
 
   function formatActorName(id) {
@@ -523,53 +507,21 @@
         badge = document.createElement('div');
         badge.id = 'badge-' + actorID;
         badge.dataset.id = actorID;
-        badge.className = 'fleet-badge suspended';
-        badge.innerHTML = `<span class="badge-dot"></span><span class="badge-name">Attendee ${numStr}</span><span class="badge-state-label">SUSPENDED</span>`;
+        badge.className = 'fleet-badge unknown';
+        badge.innerHTML = `<span class="badge-dot"></span><span class="badge-name">Attendee ${numStr}</span><span class="badge-state-label">Unknown</span>`;
         el.fleetGrid.appendChild(badge);
       }
       if (!badge) continue;
 
-      const rawState = (
-        actors[actorID] ||
-        actors[actorID.toLowerCase()] ||
-        actors['attendee-' + i] ||
-        'SUSPENDED'
-      ).toUpperCase();
+      // The initial label is Unknown until the first telemetry poll arrives.
+      const view = actors[actorID] || actors[actorID.toLowerCase()] || null;
+      const s = window.ActorView.state(view);
+      const a = window.ActorView.activity(view);
 
-      let stateClass = 'suspended';
-      let stateLabel = 'SUSPENDED';
-
-      switch (rawState) {
-        case 'PARKED':
-        case 'PARKED_ENVOY':
-          stateClass = 'parked';
-          stateLabel = 'PARKED';
-          break;
-        case 'RUNNING':
-        case 'RUNNING_GVISOR':
-          stateClass = 'running';
-          stateLabel = 'RUNNING';
-          break;
-        case 'THINKING':
-        case 'THINKING_VERTEX_AI':
-          stateClass = 'thinking';
-          stateLabel = 'THINKING';
-          break;
-        case 'AWAITING':
-        case 'AWAITING_APPROVAL':
-          stateClass = 'awaiting';
-          stateLabel = 'AWAITING APPROVAL';
-          break;
-        default:
-          stateClass = 'suspended';
-          stateLabel = 'SUSPENDED';
-          break;
-      }
-
-      badge.className = 'fleet-badge ' + stateClass;
+      badge.className = 'fleet-badge ' + s.cls;
       const labelEl = badge.querySelector('.badge-state-label');
       if (labelEl) {
-        labelEl.textContent = stateLabel;
+        labelEl.textContent = a ? s.label + ' · ' + a.label : s.label;
       }
     }
   }
@@ -715,64 +667,47 @@
       el.spotlightTitle.textContent = formatActorName(actorId);
     }
 
-    // State badge
-    const rawState = (data.state || 'SUSPENDED').toUpperCase();
-    let stateClass = 'suspended';
-    let stateLabel = rawState.replace(/_/g, ' ');
-
-    if (rawState.includes('PARKED')) {
-      stateClass = 'parked';
-      stateLabel = 'PARKED (Envoy)';
-    } else if (rawState.includes('RUNNING') || rawState.includes('THINKING')) {
-      stateClass = 'running';
-      stateLabel = rawState.includes('THINKING') ? 'THINKING (Vertex AI)' : 'RUNNING (gVisor)';
-    } else if (rawState.includes('AWAITING')) {
-      stateClass = 'awaiting';
-      stateLabel = 'AWAITING APPROVAL';
-    } else {
-      stateClass = 'suspended';
-      stateLabel = 'SUSPENDED (GCS)';
-    }
+    // State badge and activity chip
+    const s = window.ActorView.state(data);
+    const a = window.ActorView.activity(data);
 
     if (el.spotlightState) {
-      el.spotlightState.textContent = stateLabel;
-      el.spotlightState.className = 'drawer-state-badge ' + stateClass;
+      el.spotlightState.textContent = s.label;
+      el.spotlightState.className = 'drawer-state-badge ' + s.cls;
+    }
+    if (el.spotlightActivity) {
+      el.spotlightActivity.hidden = !a;
+      if (a) {
+        el.spotlightActivity.className = 'activity-chip ' + a.cls;
+        el.spotlightActivity.textContent = a.label;
+      }
     }
 
     // Worker pod
     if (el.spotlightWorker) {
-      if (data.worker_pod) {
-        el.spotlightWorker.textContent = data.worker_pod;
-        el.spotlightWorker.className = 'drawer-metric-value highlight-cyan';
-      } else {
-        el.spotlightWorker.textContent = 'None (Suspended to GCS)';
-        el.spotlightWorker.className = 'drawer-metric-value';
-      }
+      el.spotlightWorker.textContent = data.worker_pod || 'None';
+      el.spotlightWorker.className = 'drawer-metric-value' + (data.worker_pod ? ' highlight-cyan' : '');
     }
 
-    // Snapshot location
+    // Snapshot
     if (el.spotlightSnapshot) {
-      if (data.snapshot_location) {
-        const sizeStr = data.snapshot_size_bytes ? ` (${Math.round(data.snapshot_size_bytes / 1024)} KB)` : '';
-        el.spotlightSnapshot.textContent = data.snapshot_location + sizeStr;
-        el.spotlightSnapshot.title = data.snapshot_location;
+      if (data.snapshot_uri) {
+        el.spotlightSnapshot.textContent = data.snapshot_uri;
+        el.spotlightSnapshot.title = data.snapshot_uri;
       } else {
-        el.spotlightSnapshot.textContent = 'In-memory / No snapshot';
+        el.spotlightSnapshot.textContent = 'No snapshot';
+        el.spotlightSnapshot.removeAttribute('title');
       }
     }
 
-    // Footprint pill
+    // Model usage: calls, prompt/candidate tokens, and last call latency.
     if (el.spotlightFootprint) {
-      if (rawState.includes('RUNNING') || rawState.includes('THINKING')) {
-        el.spotlightFootprint.textContent = '1 vCPU / 256 MB (Active Pod)';
-        el.spotlightFootprint.className = 'drawer-metric-value highlight-cyan';
-      } else if (rawState.includes('PARKED')) {
-        el.spotlightFootprint.textContent = '0 vCPU / 0 MB (Held in Envoy)';
-        el.spotlightFootprint.className = 'drawer-metric-value highlight-amber';
-      } else {
-        el.spotlightFootprint.textContent = '0 vCPU / 0 MB in GCS';
-        el.spotlightFootprint.className = 'drawer-metric-value highlight-green';
-      }
+      const usage = data.usage || {};
+      el.spotlightFootprint.textContent =
+        (usage.calls || 0) + ' calls · ' +
+        (usage.prompt_tokens || 0) + '/' + (usage.candidate_tokens || 0) + ' tokens · ' +
+        (usage.last_latency_ms || 0) + ' ms last call';
+      el.spotlightFootprint.className = 'drawer-metric-value';
     }
 
     // Prompt block
@@ -819,10 +754,8 @@
         if (!outputText) outputText = '(execution returned 0 output)';
         const meta = `\n\n--- Process exited code ${res.exit_code ?? 0} (${res.duration_ms ?? 0} ms) ---`;
         el.spotlightOutput.textContent = outputText + meta;
-      } else if (rawState === 'AWAITING_APPROVAL') {
-        el.spotlightOutput.textContent = '[PAUSED] Execution paused waiting for operator approval in mobile view.';
-      } else if (rawState.includes('RUNNING') || rawState.includes('THINKING')) {
-        el.spotlightOutput.textContent = '[RUNNING] Executing inside gVisor sandbox container...';
+      } else if (a) {
+        el.spotlightOutput.textContent = '[' + a.label.toUpperCase() + '] Waiting on the actor to finish...';
       } else {
         el.spotlightOutput.textContent = 'Awaiting execution output...';
       }
@@ -996,48 +929,22 @@
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
-  function getStreamStateBadgeHTML(state) {
-    const s = (state || '').toUpperCase();
-    switch (s) {
-      case 'AWAITING_APPROVAL':
-        return '<span class="status-pill awaiting">⏸️ Awaiting Approval</span>';
-      case 'RUNNING':
-      case 'RUNNING_GVISOR':
-        return '<span class="status-pill running">🚀 Running Sandbox</span>';
-      case 'THINKING_VERTEX_AI':
-        return '<span class="status-pill thinking">🧠 Reasoning (Vertex AI)</span>';
-      case 'PARKED':
-      case 'PARKED_ENVOY':
-        return '<span class="status-pill parked">⏳ Parked in Envoy</span>';
-      case 'SUSPENDED':
-      default:
-        return '<span class="status-pill suspended">⚡ Suspended in GCS</span>';
+  // getStreamActivityHTML mirrors feed.js's getActivityHTML: it renders what
+  // the gateway actually observed for this entry, not an invented state.
+  function getStreamActivityHTML(entry) {
+    const a = window.ActorView.activity({ activity: entry.activity });
+    const src = window.ActorView.source(entry.source);
+    let html = a ? `<span class="status-pill ${a.cls}">${escapeHTML(a.label)}</span>` : '';
+    if (src) html += `<span class="source-tag ${src.cls}">${escapeHTML(src.label)}</span>`;
+    if (entry.worker_pod) {
+      html += `<span class="footprint-pill" title="Worker pod">${escapeHTML(entry.worker_pod)}</span>`;
     }
-  }
-
-  function getStreamFootprintHTML(state, workerPod) {
-    const s = (state || '').toUpperCase();
-    switch (s) {
-      case 'AWAITING_APPROVAL':
-        return '<span class="footprint-pill idle" title="Process snapshotted to GCS">0 MB RAM in GCS</span>';
-      case 'RUNNING':
-      case 'RUNNING_GVISOR':
-        return `<span class="footprint-pill active" title="Active worker pod">${escapeHTML(workerPod || 'conf-workers-0')} (gVisor)</span>`;
-      case 'THINKING_VERTEX_AI':
-        return '<span class="footprint-pill active" title="Model reasoning">Gemini 2.5 Flash</span>';
-      case 'PARKED':
-      case 'PARKED_ENVOY':
-        return '<span class="footprint-pill active" title="Queued in Envoy buffer">Envoy L7 Buffer</span>';
-      case 'SUSPENDED':
-      default:
-        return '<span class="footprint-pill idle" title="Process snapshotted to GCS">0 vCPU / 0 MB in GCS</span>';
-    }
+    return html;
   }
 
   function renderStreamCardInner(entry) {
     const attendeeId = entry.attendee_id || 'unknown';
     const attendeeDisplayName = formatActorName(attendeeId);
-    const state = (entry.state || 'SUSPENDED').toUpperCase();
 
     // Risk Pill
     let riskHTML = '';
@@ -1117,8 +1024,7 @@
           <span class="card-timestamp">${formatStreamTimestamp(entry.timestamp)}</span>
         </div>
         <div class="card-badges">
-          ${getStreamFootprintHTML(state, entry.worker_pod)}
-          ${getStreamStateBadgeHTML(state)}
+          ${getStreamActivityHTML(entry)}
           ${riskHTML}
         </div>
       </div>
@@ -1159,7 +1065,7 @@
 
     if (card) {
       // In-place update
-      card.dataset.state = entry.state || '';
+      card.dataset.activity = entry.activity || '';
       card.dataset.attendee = entry.attendee_id || '';
       card.innerHTML = renderStreamCardInner(entry);
     } else {
@@ -1168,7 +1074,7 @@
       card.className = 'action-card';
       card.id = cardId;
       card.dataset.id = entry.id;
-      card.dataset.state = entry.state || '';
+      card.dataset.activity = entry.activity || '';
       card.dataset.attendee = entry.attendee_id || '';
       card.innerHTML = renderStreamCardInner(entry);
 
@@ -1190,24 +1096,18 @@
   }
 
   function updateStreamCardVisibility(card) {
-    const state = (card.dataset.state || '').toUpperCase();
+    const activity = (card.dataset.activity || '').toUpperCase();
     const hasExecution = !!card.querySelector('.card-terminal-section');
 
     let stateMatch = false;
     if (currentStreamFilter === 'all') {
       stateMatch = true;
-    } else if (currentStreamFilter === 'awaiting_approval') {
-      stateMatch = (state === 'AWAITING_APPROVAL');
-    } else if (currentStreamFilter === 'running') {
-      stateMatch = (
-        state === 'RUNNING' ||
-        state === 'RUNNING_GVISOR' ||
-        state === 'THINKING_VERTEX_AI' ||
-        state === 'PARKED' ||
-        state === 'PARKED_ENVOY'
-      );
-    } else if (currentStreamFilter === 'completed') {
-      stateMatch = (state === 'SUSPENDED' || hasExecution);
+    } else if (currentStreamFilter === 'thinking') {
+      stateMatch = (activity === 'THINKING');
+    } else if (currentStreamFilter === 'awaiting') {
+      stateMatch = (activity === 'AWAITING_APPROVAL');
+    } else if (currentStreamFilter === 'executed') {
+      stateMatch = hasExecution;
     }
 
     let searchMatch = true;
@@ -1236,7 +1136,7 @@
         <div class="banner-icon" aria-hidden="true">⟲</div>
         <div class="banner-body">
           <h4 class="banner-title">Cluster Reset Complete</h4>
-          <p class="banner-desc">All actors suspended to GCS (0 vCPU, 0 RAM). Stream cleared.</p>
+          <p class="banner-desc">All actors reset. Stream cleared.</p>
         </div>
       </div>
     `;

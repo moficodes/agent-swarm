@@ -58,9 +58,10 @@ limitations under the License.
           <span class="spec-value">gVisor runsc</span>
         </div>
         <div class="spec-card">
-          <span class="spec-label">IDLE FOOTPRINT</span>
-          <span class="spec-value highlight-green">0 vCPU / 0 MB in GCS</span>
+          <span class="spec-label">ACTOR STATE</span>
+          <span class="spec-value highlight-green">Live from ateapi</span>
         </div>
+        <span id="mock-banner" class="mock-banner" hidden>Mock LLM</span>
       </div>
     </header>
 
@@ -133,56 +134,8 @@ limitations under the License.
             <h3 class="section-label">WORKER POOL HARDWARE EXECUTION</h3>
             <span class="section-sub">2 Replicas // Active Execution Seats</span>
           </div>
-          <div class="workers-grid">
-            <!-- Worker Pod 0 -->
-            <div id="worker-pod-0" class="card worker-card">
-              <div class="worker-card-header">
-                <div class="worker-id">
-                  <span class="worker-dot" id="worker-dot-0"></span>
-                  <span class="worker-title">Worker Pod 0</span>
-                </div>
-                <span class="worker-status-badge" id="worker-badge-0">IDLE</span>
-              </div>
-              <div class="worker-body">
-                <div class="worker-stat">
-                  <span class="stat-name">ACTIVE ACTOR</span>
-                  <span class="stat-value active-actor-val" id="worker-actor-0">idle</span>
-                </div>
-                <div class="worker-stat">
-                  <span class="stat-name">CURRENT TASK</span>
-                  <span class="stat-value" id="worker-task-0">Waiting for actor dispatch</span>
-                </div>
-                <div class="worker-stat">
-                  <span class="stat-name">RUN TIMER</span>
-                  <span class="stat-value timer-val" id="worker-timer-0">0 ms</span>
-                </div>
-              </div>
-            </div>
-
-            <!-- Worker Pod 1 -->
-            <div id="worker-pod-1" class="card worker-card">
-              <div class="worker-card-header">
-                <div class="worker-id">
-                  <span class="worker-dot" id="worker-dot-1"></span>
-                  <span class="worker-title">Worker Pod 1</span>
-                </div>
-                <span class="worker-status-badge" id="worker-badge-1">IDLE</span>
-              </div>
-              <div class="worker-body">
-                <div class="worker-stat">
-                  <span class="stat-name">ACTIVE ACTOR</span>
-                  <span class="stat-value active-actor-val" id="worker-actor-1">idle</span>
-                </div>
-                <div class="worker-stat">
-                  <span class="stat-name">CURRENT TASK</span>
-                  <span class="stat-value" id="worker-task-1">Waiting for actor dispatch</span>
-                </div>
-                <div class="worker-stat">
-                  <span class="stat-name">RUN TIMER</span>
-                  <span class="stat-value timer-val" id="worker-timer-1">0 ms</span>
-                </div>
-              </div>
-            </div>
+          <div id="worker-list" class="workers-grid">
+            <p class="workers-empty">No actors running</p>
           </div>
         </div>
 
@@ -197,115 +150,123 @@ limitations under the License.
               </div>
               <!-- Legend for States -->
               <div class="fleet-legend">
-                <span class="legend-item"><span class="legend-dot suspended"></span> SUSPENDED (in GCS)</span>
-                <span class="legend-item"><span class="legend-dot thinking"></span> THINKING (Vertex AI)</span>
-                <span class="legend-item"><span class="legend-dot awaiting"></span> AWAITING APPROVAL</span>
-                <span class="legend-item"><span class="legend-dot parked"></span> PARKED (in Envoy)</span>
-                <span class="legend-item"><span class="legend-dot running"></span> RUNNING (in gVisor)</span>
+                <span class="legend-item"><span class="legend-dot never-started"></span> Never started</span>
+                <span class="legend-item"><span class="legend-dot suspended"></span> Suspended</span>
+                <span class="legend-item"><span class="legend-dot resuming"></span> Resuming</span>
+                <span class="legend-item"><span class="legend-dot running"></span> Running</span>
+                <span class="legend-item"><span class="legend-dot suspending"></span> Suspending</span>
+                <span class="legend-item"><span class="legend-dot paused"></span> Paused</span>
+                <span class="legend-item"><span class="legend-dot crashed"></span> Crashed</span>
+                <span class="legend-item"><span class="legend-dot transition"></span> Deleting / Reverting</span>
+                <span class="legend-item"><span class="legend-dot unavailable"></span> State unavailable</span>
+                <span class="legend-item"><span class="legend-dot unknown"></span> Unknown</span>
+                <span class="legend-item"><span class="legend-dot thinking"></span> Thinking</span>
+                <span class="legend-item"><span class="legend-dot awaiting"></span> Awaiting approval</span>
+                <span class="legend-item"><span class="legend-dot executing"></span> Executing</span>
               </div>
             </div>
             <div id="fleet-grid" class="fleet-grid">
             <!-- 100 Attendee Badge Slots (Attendee 01 .. Attendee 100) -->
-            <div class="fleet-badge suspended" id="badge-attendee-01" data-id="attendee-01"><span class="badge-dot"></span><span class="badge-name">Attendee 01</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-02" data-id="attendee-02"><span class="badge-dot"></span><span class="badge-name">Attendee 02</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-03" data-id="attendee-03"><span class="badge-dot"></span><span class="badge-name">Attendee 03</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-04" data-id="attendee-04"><span class="badge-dot"></span><span class="badge-name">Attendee 04</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-05" data-id="attendee-05"><span class="badge-dot"></span><span class="badge-name">Attendee 05</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-06" data-id="attendee-06"><span class="badge-dot"></span><span class="badge-name">Attendee 06</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-07" data-id="attendee-07"><span class="badge-dot"></span><span class="badge-name">Attendee 07</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-08" data-id="attendee-08"><span class="badge-dot"></span><span class="badge-name">Attendee 08</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-09" data-id="attendee-09"><span class="badge-dot"></span><span class="badge-name">Attendee 09</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-10" data-id="attendee-10"><span class="badge-dot"></span><span class="badge-name">Attendee 10</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-11" data-id="attendee-11"><span class="badge-dot"></span><span class="badge-name">Attendee 11</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-12" data-id="attendee-12"><span class="badge-dot"></span><span class="badge-name">Attendee 12</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-13" data-id="attendee-13"><span class="badge-dot"></span><span class="badge-name">Attendee 13</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-14" data-id="attendee-14"><span class="badge-dot"></span><span class="badge-name">Attendee 14</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-15" data-id="attendee-15"><span class="badge-dot"></span><span class="badge-name">Attendee 15</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-16" data-id="attendee-16"><span class="badge-dot"></span><span class="badge-name">Attendee 16</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-17" data-id="attendee-17"><span class="badge-dot"></span><span class="badge-name">Attendee 17</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-18" data-id="attendee-18"><span class="badge-dot"></span><span class="badge-name">Attendee 18</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-19" data-id="attendee-19"><span class="badge-dot"></span><span class="badge-name">Attendee 19</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-20" data-id="attendee-20"><span class="badge-dot"></span><span class="badge-name">Attendee 20</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-21" data-id="attendee-21"><span class="badge-dot"></span><span class="badge-name">Attendee 21</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-22" data-id="attendee-22"><span class="badge-dot"></span><span class="badge-name">Attendee 22</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-23" data-id="attendee-23"><span class="badge-dot"></span><span class="badge-name">Attendee 23</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-24" data-id="attendee-24"><span class="badge-dot"></span><span class="badge-name">Attendee 24</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-25" data-id="attendee-25"><span class="badge-dot"></span><span class="badge-name">Attendee 25</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-26" data-id="attendee-26"><span class="badge-dot"></span><span class="badge-name">Attendee 26</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-27" data-id="attendee-27"><span class="badge-dot"></span><span class="badge-name">Attendee 27</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-28" data-id="attendee-28"><span class="badge-dot"></span><span class="badge-name">Attendee 28</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-29" data-id="attendee-29"><span class="badge-dot"></span><span class="badge-name">Attendee 29</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-30" data-id="attendee-30"><span class="badge-dot"></span><span class="badge-name">Attendee 30</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-31" data-id="attendee-31"><span class="badge-dot"></span><span class="badge-name">Attendee 31</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-32" data-id="attendee-32"><span class="badge-dot"></span><span class="badge-name">Attendee 32</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-33" data-id="attendee-33"><span class="badge-dot"></span><span class="badge-name">Attendee 33</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-34" data-id="attendee-34"><span class="badge-dot"></span><span class="badge-name">Attendee 34</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-35" data-id="attendee-35"><span class="badge-dot"></span><span class="badge-name">Attendee 35</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-36" data-id="attendee-36"><span class="badge-dot"></span><span class="badge-name">Attendee 36</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-37" data-id="attendee-37"><span class="badge-dot"></span><span class="badge-name">Attendee 37</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-38" data-id="attendee-38"><span class="badge-dot"></span><span class="badge-name">Attendee 38</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-39" data-id="attendee-39"><span class="badge-dot"></span><span class="badge-name">Attendee 39</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-40" data-id="attendee-40"><span class="badge-dot"></span><span class="badge-name">Attendee 40</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-41" data-id="attendee-41"><span class="badge-dot"></span><span class="badge-name">Attendee 41</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-42" data-id="attendee-42"><span class="badge-dot"></span><span class="badge-name">Attendee 42</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-43" data-id="attendee-43"><span class="badge-dot"></span><span class="badge-name">Attendee 43</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-44" data-id="attendee-44"><span class="badge-dot"></span><span class="badge-name">Attendee 44</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-45" data-id="attendee-45"><span class="badge-dot"></span><span class="badge-name">Attendee 45</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-46" data-id="attendee-46"><span class="badge-dot"></span><span class="badge-name">Attendee 46</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-47" data-id="attendee-47"><span class="badge-dot"></span><span class="badge-name">Attendee 47</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-48" data-id="attendee-48"><span class="badge-dot"></span><span class="badge-name">Attendee 48</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-49" data-id="attendee-49"><span class="badge-dot"></span><span class="badge-name">Attendee 49</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-50" data-id="attendee-50"><span class="badge-dot"></span><span class="badge-name">Attendee 50</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-51" data-id="attendee-51"><span class="badge-dot"></span><span class="badge-name">Attendee 51</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-52" data-id="attendee-52"><span class="badge-dot"></span><span class="badge-name">Attendee 52</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-53" data-id="attendee-53"><span class="badge-dot"></span><span class="badge-name">Attendee 53</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-54" data-id="attendee-54"><span class="badge-dot"></span><span class="badge-name">Attendee 54</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-55" data-id="attendee-55"><span class="badge-dot"></span><span class="badge-name">Attendee 55</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-56" data-id="attendee-56"><span class="badge-dot"></span><span class="badge-name">Attendee 56</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-57" data-id="attendee-57"><span class="badge-dot"></span><span class="badge-name">Attendee 57</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-58" data-id="attendee-58"><span class="badge-dot"></span><span class="badge-name">Attendee 58</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-59" data-id="attendee-59"><span class="badge-dot"></span><span class="badge-name">Attendee 59</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-60" data-id="attendee-60"><span class="badge-dot"></span><span class="badge-name">Attendee 60</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-61" data-id="attendee-61"><span class="badge-dot"></span><span class="badge-name">Attendee 61</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-62" data-id="attendee-62"><span class="badge-dot"></span><span class="badge-name">Attendee 62</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-63" data-id="attendee-63"><span class="badge-dot"></span><span class="badge-name">Attendee 63</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-64" data-id="attendee-64"><span class="badge-dot"></span><span class="badge-name">Attendee 64</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-65" data-id="attendee-65"><span class="badge-dot"></span><span class="badge-name">Attendee 65</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-66" data-id="attendee-66"><span class="badge-dot"></span><span class="badge-name">Attendee 66</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-67" data-id="attendee-67"><span class="badge-dot"></span><span class="badge-name">Attendee 67</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-68" data-id="attendee-68"><span class="badge-dot"></span><span class="badge-name">Attendee 68</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-69" data-id="attendee-69"><span class="badge-dot"></span><span class="badge-name">Attendee 69</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-70" data-id="attendee-70"><span class="badge-dot"></span><span class="badge-name">Attendee 70</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-71" data-id="attendee-71"><span class="badge-dot"></span><span class="badge-name">Attendee 71</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-72" data-id="attendee-72"><span class="badge-dot"></span><span class="badge-name">Attendee 72</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-73" data-id="attendee-73"><span class="badge-dot"></span><span class="badge-name">Attendee 73</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-74" data-id="attendee-74"><span class="badge-dot"></span><span class="badge-name">Attendee 74</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-75" data-id="attendee-75"><span class="badge-dot"></span><span class="badge-name">Attendee 75</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-76" data-id="attendee-76"><span class="badge-dot"></span><span class="badge-name">Attendee 76</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-77" data-id="attendee-77"><span class="badge-dot"></span><span class="badge-name">Attendee 77</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-78" data-id="attendee-78"><span class="badge-dot"></span><span class="badge-name">Attendee 78</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-79" data-id="attendee-79"><span class="badge-dot"></span><span class="badge-name">Attendee 79</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-80" data-id="attendee-80"><span class="badge-dot"></span><span class="badge-name">Attendee 80</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-81" data-id="attendee-81"><span class="badge-dot"></span><span class="badge-name">Attendee 81</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-82" data-id="attendee-82"><span class="badge-dot"></span><span class="badge-name">Attendee 82</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-83" data-id="attendee-83"><span class="badge-dot"></span><span class="badge-name">Attendee 83</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-84" data-id="attendee-84"><span class="badge-dot"></span><span class="badge-name">Attendee 84</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-85" data-id="attendee-85"><span class="badge-dot"></span><span class="badge-name">Attendee 85</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-86" data-id="attendee-86"><span class="badge-dot"></span><span class="badge-name">Attendee 86</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-87" data-id="attendee-87"><span class="badge-dot"></span><span class="badge-name">Attendee 87</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-88" data-id="attendee-88"><span class="badge-dot"></span><span class="badge-name">Attendee 88</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-89" data-id="attendee-89"><span class="badge-dot"></span><span class="badge-name">Attendee 89</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-90" data-id="attendee-90"><span class="badge-dot"></span><span class="badge-name">Attendee 90</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-91" data-id="attendee-91"><span class="badge-dot"></span><span class="badge-name">Attendee 91</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-92" data-id="attendee-92"><span class="badge-dot"></span><span class="badge-name">Attendee 92</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-93" data-id="attendee-93"><span class="badge-dot"></span><span class="badge-name">Attendee 93</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-94" data-id="attendee-94"><span class="badge-dot"></span><span class="badge-name">Attendee 94</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-95" data-id="attendee-95"><span class="badge-dot"></span><span class="badge-name">Attendee 95</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-96" data-id="attendee-96"><span class="badge-dot"></span><span class="badge-name">Attendee 96</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-97" data-id="attendee-97"><span class="badge-dot"></span><span class="badge-name">Attendee 97</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-98" data-id="attendee-98"><span class="badge-dot"></span><span class="badge-name">Attendee 98</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-99" data-id="attendee-99"><span class="badge-dot"></span><span class="badge-name">Attendee 99</span><span class="badge-state-label">SUSPENDED</span></div>
-            <div class="fleet-badge suspended" id="badge-attendee-100" data-id="attendee-100"><span class="badge-dot"></span><span class="badge-name">Attendee 100</span><span class="badge-state-label">SUSPENDED</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-01" data-id="attendee-01"><span class="badge-dot"></span><span class="badge-name">Attendee 01</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-02" data-id="attendee-02"><span class="badge-dot"></span><span class="badge-name">Attendee 02</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-03" data-id="attendee-03"><span class="badge-dot"></span><span class="badge-name">Attendee 03</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-04" data-id="attendee-04"><span class="badge-dot"></span><span class="badge-name">Attendee 04</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-05" data-id="attendee-05"><span class="badge-dot"></span><span class="badge-name">Attendee 05</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-06" data-id="attendee-06"><span class="badge-dot"></span><span class="badge-name">Attendee 06</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-07" data-id="attendee-07"><span class="badge-dot"></span><span class="badge-name">Attendee 07</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-08" data-id="attendee-08"><span class="badge-dot"></span><span class="badge-name">Attendee 08</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-09" data-id="attendee-09"><span class="badge-dot"></span><span class="badge-name">Attendee 09</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-10" data-id="attendee-10"><span class="badge-dot"></span><span class="badge-name">Attendee 10</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-11" data-id="attendee-11"><span class="badge-dot"></span><span class="badge-name">Attendee 11</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-12" data-id="attendee-12"><span class="badge-dot"></span><span class="badge-name">Attendee 12</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-13" data-id="attendee-13"><span class="badge-dot"></span><span class="badge-name">Attendee 13</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-14" data-id="attendee-14"><span class="badge-dot"></span><span class="badge-name">Attendee 14</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-15" data-id="attendee-15"><span class="badge-dot"></span><span class="badge-name">Attendee 15</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-16" data-id="attendee-16"><span class="badge-dot"></span><span class="badge-name">Attendee 16</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-17" data-id="attendee-17"><span class="badge-dot"></span><span class="badge-name">Attendee 17</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-18" data-id="attendee-18"><span class="badge-dot"></span><span class="badge-name">Attendee 18</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-19" data-id="attendee-19"><span class="badge-dot"></span><span class="badge-name">Attendee 19</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-20" data-id="attendee-20"><span class="badge-dot"></span><span class="badge-name">Attendee 20</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-21" data-id="attendee-21"><span class="badge-dot"></span><span class="badge-name">Attendee 21</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-22" data-id="attendee-22"><span class="badge-dot"></span><span class="badge-name">Attendee 22</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-23" data-id="attendee-23"><span class="badge-dot"></span><span class="badge-name">Attendee 23</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-24" data-id="attendee-24"><span class="badge-dot"></span><span class="badge-name">Attendee 24</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-25" data-id="attendee-25"><span class="badge-dot"></span><span class="badge-name">Attendee 25</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-26" data-id="attendee-26"><span class="badge-dot"></span><span class="badge-name">Attendee 26</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-27" data-id="attendee-27"><span class="badge-dot"></span><span class="badge-name">Attendee 27</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-28" data-id="attendee-28"><span class="badge-dot"></span><span class="badge-name">Attendee 28</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-29" data-id="attendee-29"><span class="badge-dot"></span><span class="badge-name">Attendee 29</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-30" data-id="attendee-30"><span class="badge-dot"></span><span class="badge-name">Attendee 30</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-31" data-id="attendee-31"><span class="badge-dot"></span><span class="badge-name">Attendee 31</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-32" data-id="attendee-32"><span class="badge-dot"></span><span class="badge-name">Attendee 32</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-33" data-id="attendee-33"><span class="badge-dot"></span><span class="badge-name">Attendee 33</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-34" data-id="attendee-34"><span class="badge-dot"></span><span class="badge-name">Attendee 34</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-35" data-id="attendee-35"><span class="badge-dot"></span><span class="badge-name">Attendee 35</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-36" data-id="attendee-36"><span class="badge-dot"></span><span class="badge-name">Attendee 36</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-37" data-id="attendee-37"><span class="badge-dot"></span><span class="badge-name">Attendee 37</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-38" data-id="attendee-38"><span class="badge-dot"></span><span class="badge-name">Attendee 38</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-39" data-id="attendee-39"><span class="badge-dot"></span><span class="badge-name">Attendee 39</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-40" data-id="attendee-40"><span class="badge-dot"></span><span class="badge-name">Attendee 40</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-41" data-id="attendee-41"><span class="badge-dot"></span><span class="badge-name">Attendee 41</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-42" data-id="attendee-42"><span class="badge-dot"></span><span class="badge-name">Attendee 42</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-43" data-id="attendee-43"><span class="badge-dot"></span><span class="badge-name">Attendee 43</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-44" data-id="attendee-44"><span class="badge-dot"></span><span class="badge-name">Attendee 44</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-45" data-id="attendee-45"><span class="badge-dot"></span><span class="badge-name">Attendee 45</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-46" data-id="attendee-46"><span class="badge-dot"></span><span class="badge-name">Attendee 46</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-47" data-id="attendee-47"><span class="badge-dot"></span><span class="badge-name">Attendee 47</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-48" data-id="attendee-48"><span class="badge-dot"></span><span class="badge-name">Attendee 48</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-49" data-id="attendee-49"><span class="badge-dot"></span><span class="badge-name">Attendee 49</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-50" data-id="attendee-50"><span class="badge-dot"></span><span class="badge-name">Attendee 50</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-51" data-id="attendee-51"><span class="badge-dot"></span><span class="badge-name">Attendee 51</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-52" data-id="attendee-52"><span class="badge-dot"></span><span class="badge-name">Attendee 52</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-53" data-id="attendee-53"><span class="badge-dot"></span><span class="badge-name">Attendee 53</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-54" data-id="attendee-54"><span class="badge-dot"></span><span class="badge-name">Attendee 54</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-55" data-id="attendee-55"><span class="badge-dot"></span><span class="badge-name">Attendee 55</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-56" data-id="attendee-56"><span class="badge-dot"></span><span class="badge-name">Attendee 56</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-57" data-id="attendee-57"><span class="badge-dot"></span><span class="badge-name">Attendee 57</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-58" data-id="attendee-58"><span class="badge-dot"></span><span class="badge-name">Attendee 58</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-59" data-id="attendee-59"><span class="badge-dot"></span><span class="badge-name">Attendee 59</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-60" data-id="attendee-60"><span class="badge-dot"></span><span class="badge-name">Attendee 60</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-61" data-id="attendee-61"><span class="badge-dot"></span><span class="badge-name">Attendee 61</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-62" data-id="attendee-62"><span class="badge-dot"></span><span class="badge-name">Attendee 62</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-63" data-id="attendee-63"><span class="badge-dot"></span><span class="badge-name">Attendee 63</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-64" data-id="attendee-64"><span class="badge-dot"></span><span class="badge-name">Attendee 64</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-65" data-id="attendee-65"><span class="badge-dot"></span><span class="badge-name">Attendee 65</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-66" data-id="attendee-66"><span class="badge-dot"></span><span class="badge-name">Attendee 66</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-67" data-id="attendee-67"><span class="badge-dot"></span><span class="badge-name">Attendee 67</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-68" data-id="attendee-68"><span class="badge-dot"></span><span class="badge-name">Attendee 68</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-69" data-id="attendee-69"><span class="badge-dot"></span><span class="badge-name">Attendee 69</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-70" data-id="attendee-70"><span class="badge-dot"></span><span class="badge-name">Attendee 70</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-71" data-id="attendee-71"><span class="badge-dot"></span><span class="badge-name">Attendee 71</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-72" data-id="attendee-72"><span class="badge-dot"></span><span class="badge-name">Attendee 72</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-73" data-id="attendee-73"><span class="badge-dot"></span><span class="badge-name">Attendee 73</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-74" data-id="attendee-74"><span class="badge-dot"></span><span class="badge-name">Attendee 74</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-75" data-id="attendee-75"><span class="badge-dot"></span><span class="badge-name">Attendee 75</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-76" data-id="attendee-76"><span class="badge-dot"></span><span class="badge-name">Attendee 76</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-77" data-id="attendee-77"><span class="badge-dot"></span><span class="badge-name">Attendee 77</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-78" data-id="attendee-78"><span class="badge-dot"></span><span class="badge-name">Attendee 78</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-79" data-id="attendee-79"><span class="badge-dot"></span><span class="badge-name">Attendee 79</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-80" data-id="attendee-80"><span class="badge-dot"></span><span class="badge-name">Attendee 80</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-81" data-id="attendee-81"><span class="badge-dot"></span><span class="badge-name">Attendee 81</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-82" data-id="attendee-82"><span class="badge-dot"></span><span class="badge-name">Attendee 82</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-83" data-id="attendee-83"><span class="badge-dot"></span><span class="badge-name">Attendee 83</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-84" data-id="attendee-84"><span class="badge-dot"></span><span class="badge-name">Attendee 84</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-85" data-id="attendee-85"><span class="badge-dot"></span><span class="badge-name">Attendee 85</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-86" data-id="attendee-86"><span class="badge-dot"></span><span class="badge-name">Attendee 86</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-87" data-id="attendee-87"><span class="badge-dot"></span><span class="badge-name">Attendee 87</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-88" data-id="attendee-88"><span class="badge-dot"></span><span class="badge-name">Attendee 88</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-89" data-id="attendee-89"><span class="badge-dot"></span><span class="badge-name">Attendee 89</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-90" data-id="attendee-90"><span class="badge-dot"></span><span class="badge-name">Attendee 90</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-91" data-id="attendee-91"><span class="badge-dot"></span><span class="badge-name">Attendee 91</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-92" data-id="attendee-92"><span class="badge-dot"></span><span class="badge-name">Attendee 92</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-93" data-id="attendee-93"><span class="badge-dot"></span><span class="badge-name">Attendee 93</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-94" data-id="attendee-94"><span class="badge-dot"></span><span class="badge-name">Attendee 94</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-95" data-id="attendee-95"><span class="badge-dot"></span><span class="badge-name">Attendee 95</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-96" data-id="attendee-96"><span class="badge-dot"></span><span class="badge-name">Attendee 96</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-97" data-id="attendee-97"><span class="badge-dot"></span><span class="badge-name">Attendee 97</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-98" data-id="attendee-98"><span class="badge-dot"></span><span class="badge-name">Attendee 98</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-99" data-id="attendee-99"><span class="badge-dot"></span><span class="badge-name">Attendee 99</span><span class="badge-state-label">Unknown</span></div>
+            <div class="fleet-badge unknown" id="badge-attendee-100" data-id="attendee-100"><span class="badge-dot"></span><span class="badge-name">Attendee 100</span><span class="badge-state-label">Unknown</span></div>
           </div>
         </div>
 
@@ -313,11 +274,11 @@ limitations under the License.
         <div id="stage-stream-view" class="stage-view-container" style="display:none">
           <!-- Stream Toolbar -->
           <div class="stage-stream-toolbar">
-            <div class="filter-group" role="toolbar" aria-label="Filter stream actions by state">
+            <div class="filter-group" role="toolbar" aria-label="Filter stream actions by activity">
               <button type="button" class="btn-filter active" data-filter="all" aria-pressed="true">All</button>
-              <button type="button" class="btn-filter" data-filter="awaiting_approval" aria-pressed="false">Awaiting Approval</button>
-              <button type="button" class="btn-filter" data-filter="running" aria-pressed="false">Running</button>
-              <button type="button" class="btn-filter" data-filter="completed" aria-pressed="false">Completed</button>
+              <button type="button" class="btn-filter" data-filter="thinking" aria-pressed="false">Thinking</button>
+              <button type="button" class="btn-filter" data-filter="awaiting" aria-pressed="false">Awaiting approval</button>
+              <button type="button" class="btn-filter" data-filter="executed" aria-pressed="false">Executed</button>
             </div>
 
             <div class="toolbar-tools">
@@ -372,7 +333,8 @@ limitations under the License.
     <div class="drawer-header">
       <div class="drawer-header-left">
         <h2 id="spotlight-title" class="drawer-title">Attendee --</h2>
-        <span id="spotlight-state" class="drawer-state-badge suspended">SUSPENDED</span>
+        <span id="spotlight-state" class="drawer-state-badge unknown">Unknown</span>
+        <span id="spotlight-activity" class="activity-chip" hidden></span>
       </div>
       <button id="spotlight-close" class="drawer-close-btn" aria-label="Close spotlight drawer">✕</button>
     </div>
@@ -380,19 +342,19 @@ limitations under the License.
     <div class="drawer-body">
       <!-- Overview Metrics -->
       <div class="drawer-section drawer-overview-card">
-        <h3 class="drawer-section-title">RUNTIME FOOTPRINT &amp; SCHEDULING</h3>
+        <h3 class="drawer-section-title">RUNTIME &amp; SCHEDULING</h3>
         <div class="drawer-metrics-grid">
           <div class="drawer-metric">
             <span class="drawer-metric-label">WORKER POD</span>
-            <span id="spotlight-worker" class="drawer-metric-value">None (Suspended)</span>
+            <span id="spotlight-worker" class="drawer-metric-value">None</span>
           </div>
           <div class="drawer-metric">
-            <span class="drawer-metric-label">RESOURCE FOOTPRINT</span>
-            <span id="spotlight-footprint" class="drawer-metric-value highlight-green">0 vCPU / 0 MB in GCS</span>
+            <span class="drawer-metric-label">MODEL USAGE</span>
+            <span id="spotlight-footprint" class="drawer-metric-value">0 calls · 0/0 tokens · 0 ms last call</span>
           </div>
           <div class="drawer-metric full-width">
-            <span class="drawer-metric-label">GCS SNAPSHOT LOCATION</span>
-            <span id="spotlight-snapshot" class="drawer-metric-value snapshot-path">gs://conf-demo-bucket/...</span>
+            <span class="drawer-metric-label">SNAPSHOT</span>
+            <span id="spotlight-snapshot" class="drawer-metric-value snapshot-path">No snapshot</span>
           </div>
         </div>
       </div>
@@ -432,6 +394,7 @@ limitations under the License.
     </div>
   </aside>
 
+  <script src="/static/actorview.js"></script>
   <script src="/static/stage.js"></script>
 </body>
 </html>

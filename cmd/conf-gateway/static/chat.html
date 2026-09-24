@@ -37,13 +37,14 @@ limitations under the License.
           <span id="attendee-badge" class="badge attendee-badge">Attendee #--</span>
         </div>
       </div>
-      <!-- Substrate Lifecycle Status Pill -->
+      <!-- Substrate Actor State Pill -->
       <div class="status-bar">
-        <div id="status-pill" class="status-pill suspended" title="Substrate Micro-VM Lifecycle State">
+        <div id="status-pill" class="status-pill unknown" title="Actor state, as reported by ateapi">
           <span class="status-dot" aria-hidden="true"></span>
-          <span id="status-text" class="status-text">⚡ Suspended in GCS</span>
-          <span id="status-sub" class="status-sub">0 vCPU / 0 MB RAM</span>
+          <span id="status-text" class="status-text">Unknown</span>
+          <span id="status-sub" class="status-sub"></span>
         </div>
+        <span id="activity-chip" class="activity-chip" hidden></span>
       </div>
     </header>
 
@@ -136,6 +137,7 @@ limitations under the License.
     </div>
   </template>
 
+  <script src="/static/actorview.js"></script>
   <script src="/static/chat.js"></script>
 </body>
 </html>

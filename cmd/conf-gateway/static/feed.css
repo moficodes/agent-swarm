@@ -521,30 +521,19 @@ html, body {
   transition: background 0.3s ease;
 }
 
-.action-card[data-state="AWAITING_APPROVAL"]::before {
-  background: var(--neon-amber);
-  box-shadow: 0 0 8px var(--neon-amber);
-}
-
-.action-card[data-state="RUNNING"]::before,
-.action-card[data-state="RUNNING_GVISOR"]::before {
-  background: var(--neon-cyan);
-  box-shadow: 0 0 8px var(--neon-cyan);
-}
-
-.action-card[data-state="THINKING_VERTEX_AI"]::before {
+.action-card[data-activity="AWAITING_APPROVAL"]::before {
   background: var(--neon-purple);
   box-shadow: 0 0 8px var(--neon-purple);
 }
 
-.action-card[data-state="PARKED"]::before,
-.action-card[data-state="PARKED_ENVOY"]::before {
-  background: var(--neon-pink);
-  box-shadow: 0 0 8px var(--neon-pink);
+.action-card[data-activity="THINKING"]::before {
+  background: var(--neon-cyan);
+  box-shadow: 0 0 8px var(--neon-cyan);
 }
 
-.action-card[data-state="SUSPENDED"]::before {
-  background: var(--neon-green);
+.action-card[data-activity="EXECUTING"]::before {
+  background: var(--neon-amber);
+  box-shadow: 0 0 8px var(--neon-amber);
 }
 
 /* Card Header */
@@ -616,31 +605,19 @@ html, body {
   color: #fde68a;
 }
 
-.status-pill.running {
-  background: rgba(0, 255, 204, 0.15);
-  border-color: rgba(0, 255, 204, 0.4);
-  color: #a7f3d0;
-}
-
 .status-pill.thinking {
   background: rgba(168, 85, 247, 0.15);
   border-color: rgba(168, 85, 247, 0.4);
   color: #e9d5ff;
 }
 
-.status-pill.parked {
-  background: rgba(236, 72, 153, 0.15);
-  border-color: rgba(236, 72, 153, 0.4);
-  color: #fbcfe8;
+.status-pill.executing {
+  background: rgba(0, 255, 204, 0.15);
+  border-color: rgba(0, 255, 204, 0.4);
+  color: #a7f3d0;
 }
 
-.status-pill.suspended {
-  background: rgba(16, 185, 129, 0.15);
-  border-color: rgba(16, 185, 129, 0.4);
-  color: #6ee7b7;
-}
-
-/* GCS Footprint Pill */
+/* Worker Pod Pill: the pod that ran this entry. */
 .footprint-pill {
   display: inline-flex;
   align-items: center;
@@ -651,17 +628,31 @@ html, body {
   border-radius: 4px;
   background: rgba(30, 41, 59, 0.7);
   border: 1px solid var(--border-subtle);
+  color: var(--neon-cyan);
+}
+
+/* Source Tag: marks a reply that did not come from Gemini. */
+.source-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+}
+
+.source-tag.mock {
+  background: rgba(100, 116, 139, 0.2);
+  border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
 }
 
-.footprint-pill.idle {
-  color: var(--neon-green);
-  border-color: rgba(16, 185, 129, 0.3);
-}
-
-.footprint-pill.active {
-  color: var(--neon-cyan);
-  border-color: rgba(0, 255, 204, 0.3);
+.source-tag.mock-fallback {
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fde68a;
 }
 
 /* Risk Level Pill */

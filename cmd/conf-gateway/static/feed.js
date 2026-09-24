@@ -121,48 +121,23 @@
   // -------------------------------------------------------------------------
   // Card Rendering & Lifecycle
   // -------------------------------------------------------------------------
-  function getStateBadgeHTML(state) {
-    const s = (state || '').toUpperCase();
-    switch (s) {
-      case 'AWAITING_APPROVAL':
-        return '<span class="status-pill awaiting">⏸️ Awaiting Approval</span>';
-      case 'RUNNING':
-      case 'RUNNING_GVISOR':
-        return '<span class="status-pill running">🚀 Running Sandbox</span>';
-      case 'THINKING_VERTEX_AI':
-        return '<span class="status-pill thinking">🧠 Reasoning (Vertex AI)</span>';
-      case 'PARKED':
-      case 'PARKED_ENVOY':
-        return '<span class="status-pill parked">⏳ Parked in Envoy</span>';
-      case 'SUSPENDED':
-      default:
-        return '<span class="status-pill suspended">⚡ Suspended in GCS</span>';
+  // getActivityHTML renders what the gateway actually observed for this
+  // entry: the actor's activity, the reply source when it wasn't Gemini,
+  // and the worker pod that ran it.
+  function getActivityHTML(entry) {
+    const a = window.ActorView.activity({ activity: entry.activity });
+    const src = window.ActorView.source(entry.source);
+    let html = a ? `<span class="status-pill ${a.cls}">${escapeHtml(a.label)}</span>` : '';
+    if (src) html += `<span class="source-tag ${src.cls}">${escapeHtml(src.label)}</span>`;
+    if (entry.worker_pod) {
+      html += `<span class="footprint-pill" title="Worker pod">${escapeHtml(entry.worker_pod)}</span>`;
     }
-  }
-
-  function getFootprintHTML(state, workerPod) {
-    const s = (state || '').toUpperCase();
-    switch (s) {
-      case 'AWAITING_APPROVAL':
-        return '<span class="footprint-pill idle" title="Process snapshotted to GCS">0 MB RAM in GCS</span>';
-      case 'RUNNING':
-      case 'RUNNING_GVISOR':
-        return `<span class="footprint-pill active" title="Active worker pod">${escapeHtml(workerPod || 'conf-workers-0')} (gVisor)</span>`;
-      case 'THINKING_VERTEX_AI':
-        return '<span class="footprint-pill active" title="Model reasoning">Gemini 2.5 Flash</span>';
-      case 'PARKED':
-      case 'PARKED_ENVOY':
-        return '<span class="footprint-pill active" title="Queued in Envoy buffer">Envoy L7 Buffer</span>';
-      case 'SUSPENDED':
-      default:
-        return '<span class="footprint-pill idle" title="Process snapshotted to GCS">0 vCPU / 0 MB in GCS</span>';
-    }
+    return html;
   }
 
   function renderCardInner(entry) {
     const attendeeId = entry.attendee_id || 'unknown';
     const attendeeNum = attendeeId.replace('attendee-', '');
-    const state = (entry.state || 'SUSPENDED').toUpperCase();
 
     // Risk Pill
     let riskHTML = '';
@@ -242,8 +217,7 @@
           <span class="card-timestamp">${formatTimestamp(entry.timestamp)}</span>
         </div>
         <div class="card-badges">
-          ${getFootprintHTML(state, entry.worker_pod)}
-          ${getStateBadgeHTML(state)}
+          ${getActivityHTML(entry)}
           ${riskHTML}
         </div>
       </div>
@@ -284,7 +258,7 @@
 
     if (card) {
       // In-place update
-      card.dataset.state = entry.state || '';
+      card.dataset.activity = entry.activity || '';
       card.dataset.attendee = entry.attendee_id || '';
       card.innerHTML = renderCardInner(entry);
     } else {
@@ -293,7 +267,7 @@
       card.className = 'action-card';
       card.id = cardId;
       card.dataset.id = entry.id;
-      card.dataset.state = entry.state || '';
+      card.dataset.activity = entry.activity || '';
       card.dataset.attendee = entry.attendee_id || '';
       card.innerHTML = renderCardInner(entry);
 
@@ -318,24 +292,18 @@
   // Filtering and Real-Time Search
   // -------------------------------------------------------------------------
   function updateCardVisibility(card) {
-    const state = (card.dataset.state || '').toUpperCase();
+    const activity = (card.dataset.activity || '').toUpperCase();
     const hasExecution = !!card.querySelector('.card-terminal-section');
 
     let stateMatch = false;
     if (currentFilter === 'all') {
       stateMatch = true;
-    } else if (currentFilter === 'awaiting_approval') {
-      stateMatch = (state === 'AWAITING_APPROVAL');
-    } else if (currentFilter === 'running') {
-      stateMatch = (
-        state === 'RUNNING' ||
-        state === 'RUNNING_GVISOR' ||
-        state === 'THINKING_VERTEX_AI' ||
-        state === 'PARKED' ||
-        state === 'PARKED_ENVOY'
-      );
-    } else if (currentFilter === 'completed') {
-      stateMatch = (state === 'SUSPENDED' || hasExecution);
+    } else if (currentFilter === 'thinking') {
+      stateMatch = (activity === 'THINKING');
+    } else if (currentFilter === 'awaiting') {
+      stateMatch = (activity === 'AWAITING_APPROVAL');
+    } else if (currentFilter === 'executed') {
+      stateMatch = hasExecution;
     }
 
     let searchMatch = true;
@@ -430,7 +398,7 @@
         <div class="banner-icon" aria-hidden="true">⟲</div>
         <div class="banner-body">
           <h2 class="banner-title">Cluster Reset Complete</h2>
-          <p class="banner-desc">All actors suspended to GCS (0 vCPU, 0 RAM). Worker pods and buffer slots freed. Clean slate restored.</p>
+          <p class="banner-desc">All actors reset. Worker pods and buffer slots freed. Clean slate restored.</p>
         </div>
       </div>
     `;

@@ -22,6 +22,7 @@ limitations under the License.
   <meta name="description" content="Agent Substrate - Dedicated Full-Screen Live Stream Page of Multi-Agent Execution and Reasoning Feed">
   <title>Substrate Live Stream // Fleeting Agent Action Feed</title>
   <link rel="stylesheet" href="/static/feed.css">
+  <script src="/static/actorview.js" defer></script>
   <script src="/static/feed.js" defer></script>
 </head>
 <body>
@@ -61,9 +62,9 @@ limitations under the License.
     <nav class="feed-toolbar" aria-label="Action Stream Controls">
       <div class="filter-group" role="toolbar" aria-label="Filter actions by state">
         <button type="button" class="btn-filter active" data-filter="all" aria-pressed="true">All</button>
-        <button type="button" class="btn-filter" data-filter="awaiting_approval" aria-pressed="false">Awaiting Approval</button>
-        <button type="button" class="btn-filter" data-filter="running" aria-pressed="false">Running</button>
-        <button type="button" class="btn-filter" data-filter="completed" aria-pressed="false">Completed</button>
+        <button type="button" class="btn-filter" data-filter="thinking" aria-pressed="false">Thinking</button>
+        <button type="button" class="btn-filter" data-filter="awaiting" aria-pressed="false">Awaiting approval</button>
+        <button type="button" class="btn-filter" data-filter="executed" aria-pressed="false">Executed</button>
       </div>
 
       <div class="toolbar-tools">
@@ -92,8 +93,7 @@ limitations under the License.
         <p class="empty-desc">Connecting to real-time event pipeline... Waiting for attendee interactions, AI reasoning, and gVisor container sandbox executions.</p>
         <div class="empty-specs">
           <span class="spec-pill">Isolated gVisor Sandbox</span>
-          <span class="spec-pill">0 vCPU / 0 RAM in GCS Idle</span>
-          <span class="spec-pill">Envoy L7 Traffic Buffer</span>
+          <span class="spec-pill">Live actor state from ateapi</span>
         </div>
       </div>
     </main>

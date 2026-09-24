@@ -187,18 +187,6 @@ html, body {
   box-shadow: 0 0 6px rgba(139, 153, 181, 0.6);
 }
 
-.status-pill.parked {
-  background: rgba(255, 183, 0, 0.15);
-  border-color: rgba(255, 183, 0, 0.5);
-  color: var(--neon-amber);
-  box-shadow: var(--shadow-glow-amber);
-}
-.status-pill.parked .status-dot {
-  background-color: var(--neon-amber);
-  box-shadow: 0 0 8px var(--neon-amber);
-  animation: pulse-dot 1.2s infinite ease-in-out;
-}
-
 .status-pill.running {
   background: rgba(0, 255, 136, 0.15);
   border-color: rgba(0, 255, 136, 0.5);
@@ -211,33 +199,130 @@ html, body {
   animation: pulse-dot 0.8s infinite ease-in-out;
 }
 
-.status-pill.awaiting {
+.status-pill.never-started,
+.status-pill.unknown {
+  background: rgba(87, 101, 126, 0.1);
+  border-color: rgba(87, 101, 126, 0.3);
+  color: var(--text-muted);
+}
+.status-pill.never-started .status-dot,
+.status-pill.unknown .status-dot {
+  background-color: var(--text-subtle);
+}
+
+.status-pill.unavailable {
+  background: rgba(87, 101, 126, 0.1);
+  border-color: rgba(87, 101, 126, 0.5);
+  border-style: dashed;
+  color: var(--text-muted);
+}
+.status-pill.unavailable .status-dot {
+  background-color: var(--text-subtle);
+}
+
+.status-pill.resuming,
+.status-pill.suspending {
+  background: rgba(0, 240, 255, 0.12);
+  border-color: rgba(0, 240, 255, 0.4);
+  color: var(--neon-cyan);
+}
+.status-pill.resuming .status-dot,
+.status-pill.suspending .status-dot {
+  background-color: var(--neon-cyan);
+  box-shadow: 0 0 8px var(--neon-cyan);
+  animation: pulse-dot 1s infinite ease-in-out;
+}
+
+.status-pill.paused {
+  background: rgba(255, 183, 0, 0.15);
+  border-color: rgba(255, 183, 0, 0.5);
+  color: var(--neon-amber);
+  box-shadow: var(--shadow-glow-amber);
+}
+.status-pill.paused .status-dot {
+  background-color: var(--neon-amber);
+}
+
+.status-pill.crashed {
+  background: rgba(255, 51, 102, 0.15);
+  border-color: rgba(255, 51, 102, 0.5);
+  color: var(--neon-rose);
+}
+.status-pill.crashed .status-dot {
+  background-color: var(--neon-rose);
+  box-shadow: 0 0 8px var(--neon-rose);
+}
+
+.status-pill.transition {
   background: rgba(168, 85, 247, 0.18);
   border-color: rgba(168, 85, 247, 0.5);
   color: #d8b4fe;
   box-shadow: var(--shadow-glow-purple);
 }
-.status-pill.awaiting .status-dot {
+.status-pill.transition .status-dot {
   background-color: var(--neon-purple);
   box-shadow: 0 0 8px var(--neon-purple);
   animation: pulse-dot 1.5s infinite ease-in-out;
 }
 
-.status-pill.thinking {
-  background: rgba(0, 240, 255, 0.15);
-  border-color: rgba(0, 240, 255, 0.5);
-  color: var(--neon-cyan);
-  box-shadow: var(--shadow-glow-cyan);
-}
-.status-pill.thinking .status-dot {
-  background-color: var(--neon-cyan);
-  box-shadow: 0 0 8px var(--neon-cyan);
-  animation: pulse-dot 0.8s infinite ease-in-out;
-}
-
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+/* Activity Chip: what the actor is doing right now, separate from its
+   substrate state. */
+.activity-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-top: 6px;
+}
+
+.activity-chip.thinking {
+  background: rgba(0, 240, 255, 0.15);
+  border: 1px solid rgba(0, 240, 255, 0.5);
+  color: var(--neon-cyan);
+}
+
+.activity-chip.awaiting {
+  background: rgba(168, 85, 247, 0.18);
+  border: 1px solid rgba(168, 85, 247, 0.5);
+  color: #d8b4fe;
+}
+
+.activity-chip.executing {
+  background: rgba(255, 183, 0, 0.15);
+  border: 1px solid rgba(255, 183, 0, 0.5);
+  color: var(--neon-amber);
+}
+
+/* Source Tag: marks a reply that did not come from Gemini. */
+.source-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.source-tag.mock {
+  background: rgba(87, 101, 126, 0.18);
+  border: 1px solid rgba(87, 101, 126, 0.4);
+  color: var(--text-muted);
+}
+
+.source-tag.mock-fallback {
+  background: rgba(255, 183, 0, 0.15);
+  border: 1px solid rgba(255, 183, 0, 0.5);
+  color: var(--neon-amber);
 }
 
 /* Prompt Chips */

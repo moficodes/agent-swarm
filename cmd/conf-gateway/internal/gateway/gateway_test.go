@@ -1333,8 +1333,7 @@ func TestStageRoute(t *testing.T) {
 
 	expectedElements := []string{
 		`id="parking-meter"`,
-		`id="worker-pod-0"`,
-		`id="worker-pod-1"`,
+		`id="worker-list"`,
 		`id="fleet-grid"`,
 		`id="event-ticker"`,
 		`id="qr-code"`,

@@ -33,58 +33,27 @@
     statusPill: document.getElementById('status-pill'),
     statusText: document.getElementById('status-text'),
     statusSub: document.getElementById('status-sub'),
+    activityChip: document.getElementById('activity-chip'),
     approvalTemplate: document.getElementById('approval-card-template'),
   };
 
-  // Lifecycle Pill States
-  const LIFECYCLE_STATES = {
-    SUSPENDED: {
-      className: 'suspended',
-      text: '⚡ Suspended in GCS',
-      sub: '0 vCPU / 0 MB RAM',
-    },
-    PARKED: {
-      className: 'parked parked-envoy',
-      text: '⏳ Parked in Envoy',
-      sub: 'L7 Request Buffer',
-    },
-    PARKED_ENVOY: {
-      className: 'parked parked-envoy',
-      text: '⏳ Parked in Envoy',
-      sub: 'L7 Request Buffer',
-    },
-    RUNNING: {
-      className: 'running running-gvisor',
-      text: '🚀 Running in Sandbox',
-      sub: 'gVisor runsc sandbox',
-    },
-    RUNNING_GVISOR: {
-      className: 'running running-gvisor',
-      text: '🚀 Running in Sandbox',
-      sub: 'gVisor runsc sandbox',
-    },
-    THINKING_VERTEX_AI: {
-      className: 'thinking thinking-vertex-ai',
-      text: '🧠 Reasoning on Vertex AI',
-      sub: 'Generating analysis plan...',
-    },
-    AWAITING_APPROVAL: {
-      className: 'awaiting awaiting-approval',
-      text: '⏸️ Awaiting Approval',
-      sub: 'Process frozen to GCS',
-    },
-    AWAITING: {
-      className: 'awaiting awaiting-approval',
-      text: '⏸️ Awaiting Approval',
-      sub: 'Process frozen to GCS',
-    },
-  };
-
-  function setStatusPill(pillState) {
-    if (!el.statusPill || !pillState) return;
-    el.statusPill.className = 'status-pill ' + (pillState.className || 'suspended');
-    if (el.statusText) el.statusText.textContent = pillState.text || '';
-    if (el.statusSub) el.statusSub.textContent = pillState.sub || '';
+  // renderActorView applies an ActorView pushed over SSE to the status pill
+  // and activity chip. Views for another attendee (e.g. a stale event from a
+  // previous session) are ignored.
+  function renderActorView(view) {
+    if (!view || (state.attendeeId && view.actor_id !== state.attendeeId)) return;
+    const s = window.ActorView.state(view);
+    if (el.statusPill) el.statusPill.className = 'status-pill ' + s.cls;
+    if (el.statusText) el.statusText.textContent = s.label;
+    if (el.statusSub) el.statusSub.textContent = s.sub;
+    const a = window.ActorView.activity(view);
+    if (el.activityChip) {
+      el.activityChip.hidden = !a;
+      if (a) {
+        el.activityChip.className = 'activity-chip ' + a.cls;
+        el.activityChip.textContent = a.label;
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -102,12 +71,11 @@
       '&token=' + encodeURIComponent(state.token));
     state.eventSource = es;
 
-    es.addEventListener('state_change', function(e) {
+    es.addEventListener('actor_view', function(e) {
       try {
-        const data = JSON.parse(e.data);
-        handleServerStateChange(data);
+        renderActorView(JSON.parse(e.data));
       } catch (err) {
-        console.warn('Failed to parse state_change event:', err);
+        console.warn('Failed to parse actor_view event:', err);
       }
     });
 
@@ -120,40 +88,12 @@
     };
   }
 
-  function handleServerStateChange(event) {
-    if (!event) return;
-    if (event.attendee_id && state.attendeeId && event.attendee_id !== state.attendeeId) {
-      return;
-    }
-
-    // Detect cluster reset broadcast
-    if (event.subtext && event.subtext.toLowerCase().includes('cluster reset')) {
-      handleResetEvent();
-      return;
-    }
-
-    const stateKey = (event.state || 'SUSPENDED').toUpperCase();
-    const config = LIFECYCLE_STATES[stateKey] || LIFECYCLE_STATES.SUSPENDED;
-    const text = event.label || config.text;
-    const sub = event.subtext || config.sub;
-
-    if (el.statusPill) {
-      el.statusPill.className = 'status-pill ' + config.className;
-    }
-    if (el.statusText) {
-      el.statusText.textContent = text;
-    }
-    if (el.statusSub) {
-      el.statusSub.textContent = sub;
-    }
-  }
-
   function handleResetEvent() {
     state.inFlight = false;
     setInputState(false);
     removeTypingIndicator();
 
-    setStatusPill(LIFECYCLE_STATES.SUSPENDED);
+    // The next actor_view event restores the badge.
 
     if (el.chatFeed) {
       const intro = el.chatFeed.querySelector('.intro-message');
@@ -248,7 +188,6 @@
         state.token = storedToken;
       }
       if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
-      setStatusPill(LIFECYCLE_STATES.SUSPENDED);
       if (!forceReset && state.token) {
         connectEventSource();
         return;
@@ -257,7 +196,6 @@
       state.attendeeId = storedId;
       state.token = storedToken;
       if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
-      setStatusPill(LIFECYCLE_STATES.SUSPENDED);
       connectEventSource();
       return;
     }
@@ -275,7 +213,6 @@
       localStorage.setItem('conf_attendee_token', state.token);
 
       if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
-      setStatusPill(LIFECYCLE_STATES.SUSPENDED);
       connectEventSource();
     } catch (err) {
       console.error('Failed to init session:', err);
@@ -284,7 +221,7 @@
   }
 
   // Feed Rendering
-  function appendMessage(sender, content, timestamp) {
+  function appendMessage(sender, content, timestamp, source) {
     const msgDiv = document.createElement('div');
     msgDiv.className = 'chat-message ' + (sender === 'user' ? 'user-message' : 'assistant-message');
 
@@ -301,6 +238,16 @@
 
     metaDiv.appendChild(senderSpan);
     metaDiv.appendChild(timeSpan);
+
+    if (sender === 'assistant') {
+      const src = window.ActorView.source(source);
+      if (src) {
+        const sourceSpan = document.createElement('span');
+        sourceSpan.className = 'source-tag ' + src.cls;
+        sourceSpan.textContent = src.label;
+        metaDiv.appendChild(sourceSpan);
+      }
+    }
 
     const bubbleDiv = document.createElement('div');
     bubbleDiv.className = 'message-bubble';
@@ -439,19 +386,17 @@
         localStorage.removeItem('conf_attendee_token');
         await initSession();
         appendSystemMessage('⚠️ Session was refreshed. Please re-submit your prompt.');
-        setStatusPill(LIFECYCLE_STATES.SUSPENDED);
         return;
       }
 
       if (!resp.ok) {
         const errorText = await resp.text();
         appendSystemMessage('❌ Error from agent gateway: ' + (errorText || resp.statusText));
-        setStatusPill(LIFECYCLE_STATES.SUSPENDED);
         return;
       }
 
       const chatMsg = await resp.json();
-      const msgDiv = appendMessage('assistant', chatMsg.content, chatMsg.timestamp);
+      const msgDiv = appendMessage('assistant', chatMsg.content, chatMsg.timestamp, chatMsg.source);
 
       if (chatMsg.approval) {
         appendApprovalCard(chatMsg.approval, msgDiv);
@@ -460,7 +405,6 @@
       console.error('Chat error:', err);
       removeTypingIndicator();
       appendSystemMessage('❌ Network communication error: ' + err.message);
-      setStatusPill(LIFECYCLE_STATES.SUSPENDED);
     } finally {
       state.inFlight = false;
       setInputState(false);
@@ -504,7 +448,6 @@
         appendSystemMessage('⚠️ Session was refreshed. Please re-submit your decision.');
         if (btnReject) btnReject.disabled = false;
         if (btnApprove) btnApprove.disabled = false;
-        setStatusPill(LIFECYCLE_STATES.SUSPENDED);
         return;
       }
 
@@ -513,7 +456,6 @@
         appendSystemMessage('❌ Failed to submit approval: ' + (errorText || resp.statusText));
         if (btnReject) btnReject.disabled = false;
         if (btnApprove) btnApprove.disabled = false;
-        setStatusPill(LIFECYCLE_STATES.SUSPENDED);
         return;
       }
 
@@ -528,14 +470,13 @@
       }
 
       const resultMsg = await resp.json();
-      appendMessage('assistant', resultMsg.content, resultMsg.timestamp);
+      appendMessage('assistant', resultMsg.content, resultMsg.timestamp, resultMsg.source);
     } catch (err) {
       console.error('Approval submission error:', err);
       removeTypingIndicator();
       appendSystemMessage('❌ Error submitting decision: ' + err.message);
       if (btnReject) btnReject.disabled = false;
       if (btnApprove) btnApprove.disabled = false;
-      setStatusPill(LIFECYCLE_STATES.SUSPENDED);
     } finally {
       state.inFlight = false;
       setInputState(false);

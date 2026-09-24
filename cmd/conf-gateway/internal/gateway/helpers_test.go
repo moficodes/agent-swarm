@@ -81,6 +81,13 @@ func postJSON(gw *gateway.Gateway, attendee, path string, body any) *httptest.Re
 	return rec
 }
 
+// getPath issues a GET request for path and returns the recorded response.
+func getPath(gw *gateway.Gateway, path string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	gw.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
 // getTelemetry fetches the stage telemetry as the presenter.
 func getTelemetry(t *testing.T, gw *gateway.Gateway) types.StageTelemetry {
 	t.Helper()

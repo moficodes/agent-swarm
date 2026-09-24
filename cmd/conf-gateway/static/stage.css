@@ -172,6 +172,21 @@ html, body {
   text-shadow: 0 0 10px rgba(245, 158, 11, 0.4);
 }
 
+/* Mock LLM Banner: shown when the gateway has no real Vertex AI backend. */
+.mock-banner {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.85rem;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  color: var(--neon-amber);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 /* Main Grid Layout */
 .stage-main {
   display: grid;
@@ -490,6 +505,13 @@ html, body {
   min-width: 0;
 }
 
+.workers-empty {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 0.75rem;
+}
+
 .worker-card {
   border: 1px solid var(--border-subtle);
   transition: border-color 0.3s ease, box-shadow 0.3s ease;
@@ -543,12 +565,6 @@ html, body {
   border-radius: 4px;
   background: rgba(100, 116, 139, 0.2);
   color: var(--text-muted);
-}
-
-.worker-status-badge.active {
-  background: rgba(16, 185, 129, 0.2);
-  color: var(--neon-green);
-  border: 1px solid rgba(16, 185, 129, 0.4);
 }
 
 .worker-body {
@@ -624,10 +640,18 @@ html, body {
   display: inline-block;
 }
 
+.legend-dot.never-started,
+.legend-dot.unknown,
 .legend-dot.suspended { background: var(--slate-gray); }
+.legend-dot.unavailable { background: var(--text-muted); border: 1px dashed var(--text-muted); }
+.legend-dot.resuming,
+.legend-dot.suspending,
 .legend-dot.thinking { background: var(--neon-cyan); box-shadow: 0 0 6px var(--neon-cyan); }
+.legend-dot.transition,
 .legend-dot.awaiting { background: var(--neon-purple); box-shadow: 0 0 6px var(--neon-purple); }
-.legend-dot.parked { background: var(--neon-amber); box-shadow: 0 0 6px var(--neon-amber); }
+.legend-dot.paused,
+.legend-dot.executing { background: var(--neon-amber); box-shadow: 0 0 6px var(--neon-amber); }
+.legend-dot.crashed { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
 .legend-dot.running { background: var(--neon-green); box-shadow: 0 0 6px var(--neon-green); }
 
 /* 100 Badge Matrix */
@@ -700,41 +724,52 @@ html, body {
   text-transform: uppercase;
 }
 
-/* Badge States */
-/* 1. Suspended (Slate gray / sleeping in GCS) */
+/* Badge States: the ten ActorView badge classes (see actorview.js). */
+.fleet-badge.never-started,
+.fleet-badge.unknown,
 .fleet-badge.suspended {
   border-color: #1e293b;
   background: #090e18;
 }
+.fleet-badge.never-started .badge-dot,
+.fleet-badge.unknown .badge-dot,
 .fleet-badge.suspended .badge-dot {
   background: var(--slate-gray);
 }
-.fleet-badge.suspended .badge-name {
+.fleet-badge.never-started .badge-state-label,
+.fleet-badge.unknown .badge-state-label,
+.fleet-badge.suspended .badge-state-label {
   color: var(--text-muted);
 }
-.fleet-badge.suspended .badge-state-label {
-  color: #475569;
+
+.fleet-badge.unavailable {
+  border-color: #334155;
+  border-style: dashed;
+  background: #090e18;
+}
+.fleet-badge.unavailable .badge-dot {
+  background: var(--text-muted);
+}
+.fleet-badge.unavailable .badge-state-label {
+  color: var(--text-muted);
 }
 
-/* 2. Parked (Bright amber / held in Envoy) */
-.fleet-badge.parked {
-  border-color: var(--neon-amber);
-  background: rgba(245, 158, 11, 0.12);
-  box-shadow: 0 0 14px rgba(245, 158, 11, 0.35);
-  transform: translateY(-2px);
+.fleet-badge.resuming,
+.fleet-badge.suspending {
+  border-color: var(--neon-cyan);
+  background: rgba(0, 255, 204, 0.1);
+  box-shadow: 0 0 10px rgba(0, 255, 204, 0.25);
 }
-.fleet-badge.parked .badge-dot {
-  background: var(--neon-amber);
-  box-shadow: 0 0 8px var(--neon-amber);
+.fleet-badge.resuming .badge-dot,
+.fleet-badge.suspending .badge-dot {
+  background: var(--neon-cyan);
+  box-shadow: 0 0 8px var(--neon-cyan);
 }
-.fleet-badge.parked .badge-name {
-  color: #fbbf24;
-}
-.fleet-badge.parked .badge-state-label {
-  color: var(--neon-amber);
+.fleet-badge.resuming .badge-state-label,
+.fleet-badge.suspending .badge-state-label {
+  color: var(--neon-cyan);
 }
 
-/* 3. Running (Neon emerald / active in gVisor) */
 .fleet-badge.running {
   border-color: var(--neon-green);
   background: rgba(16, 185, 129, 0.16);
@@ -745,47 +780,47 @@ html, body {
   background: var(--neon-green);
   box-shadow: 0 0 10px var(--neon-green);
 }
-.fleet-badge.running .badge-name {
-  color: #34d399;
-}
 .fleet-badge.running .badge-state-label {
   color: var(--neon-green);
 }
 
-/* 4. Awaiting Approval (Purple / waiting for human tap) */
-.fleet-badge.awaiting {
+.fleet-badge.paused {
+  border-color: var(--neon-amber);
+  background: rgba(245, 158, 11, 0.12);
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.35);
+}
+.fleet-badge.paused .badge-dot {
+  background: var(--neon-amber);
+  box-shadow: 0 0 8px var(--neon-amber);
+}
+.fleet-badge.paused .badge-state-label {
+  color: var(--neon-amber);
+}
+
+.fleet-badge.crashed {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.14);
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.35);
+}
+.fleet-badge.crashed .badge-dot {
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+}
+.fleet-badge.crashed .badge-state-label {
+  color: #fca5a5;
+}
+
+.fleet-badge.transition {
   border-color: var(--neon-purple);
   background: rgba(168, 85, 247, 0.14);
   box-shadow: 0 0 14px rgba(168, 85, 247, 0.35);
-  transform: translateY(-2px);
 }
-.fleet-badge.awaiting .badge-dot {
+.fleet-badge.transition .badge-dot {
   background: var(--neon-purple);
   box-shadow: 0 0 8px var(--neon-purple);
 }
-.fleet-badge.awaiting .badge-name {
-  color: #c084fc;
-}
-.fleet-badge.awaiting .badge-state-label {
+.fleet-badge.transition .badge-state-label {
   color: var(--neon-purple);
-}
-
-/* 5. Thinking (Neon cyan / active Vertex AI generation) */
-.fleet-badge.thinking {
-  border-color: var(--neon-cyan);
-  background: rgba(0, 255, 204, 0.14);
-  box-shadow: 0 0 14px rgba(0, 255, 204, 0.35);
-  transform: translateY(-2px);
-}
-.fleet-badge.thinking .badge-dot {
-  background: var(--neon-cyan);
-  box-shadow: 0 0 8px var(--neon-cyan);
-}
-.fleet-badge.thinking .badge-name {
-  color: #38bdf8;
-}
-.fleet-badge.thinking .badge-state-label {
-  color: var(--neon-cyan);
 }
 
 /* Footer: Live Activity Ticker */
@@ -1060,31 +1095,98 @@ html, body {
   text-transform: uppercase;
 }
 
-.drawer-state-badge.suspended {
+/* Badge States: the ten ActorView badge classes (see actorview.js), shared
+   between the spotlight drawer badge and the worker card badge. */
+.drawer-state-badge.never-started,
+.worker-status-badge.never-started,
+.drawer-state-badge.unknown,
+.worker-status-badge.unknown,
+.drawer-state-badge.suspended,
+.worker-status-badge.suspended {
   background: rgba(100, 116, 139, 0.2);
   color: var(--text-muted);
   border: 1px solid rgba(100, 116, 139, 0.3);
 }
 
-.drawer-state-badge.parked {
-  background: rgba(245, 158, 11, 0.2);
-  color: var(--neon-amber);
-  border: 1px solid rgba(245, 158, 11, 0.5);
-  box-shadow: 0 0 10px rgba(245, 158, 11, 0.3);
+.drawer-state-badge.unavailable,
+.worker-status-badge.unavailable {
+  background: rgba(100, 116, 139, 0.1);
+  color: var(--text-muted);
+  border: 1px dashed rgba(100, 116, 139, 0.5);
 }
 
-.drawer-state-badge.running {
+.drawer-state-badge.resuming,
+.worker-status-badge.resuming,
+.drawer-state-badge.suspending,
+.worker-status-badge.suspending {
+  background: rgba(0, 255, 204, 0.15);
+  color: var(--neon-cyan);
+  border: 1px solid rgba(0, 255, 204, 0.4);
+}
+
+.drawer-state-badge.running,
+.worker-status-badge.running {
   background: rgba(16, 185, 129, 0.2);
   color: var(--neon-green);
   border: 1px solid rgba(16, 185, 129, 0.5);
   box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
 }
 
-.drawer-state-badge.awaiting {
+.drawer-state-badge.paused,
+.worker-status-badge.paused {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--neon-amber);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.3);
+}
+
+.drawer-state-badge.crashed,
+.worker-status-badge.crashed {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
+}
+
+.drawer-state-badge.transition,
+.worker-status-badge.transition,
+.drawer-state-badge.awaiting,
+.worker-status-badge.awaiting {
   background: rgba(168, 85, 247, 0.2);
   color: var(--neon-purple);
   border: 1px solid rgba(168, 85, 247, 0.5);
   box-shadow: 0 0 10px rgba(168, 85, 247, 0.3);
+}
+
+/* Activity Chip: what the actor is doing right now, separate from its
+   substrate state. */
+.activity-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: 9999px;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.activity-chip.thinking {
+  background: rgba(0, 255, 204, 0.15);
+  border: 1px solid rgba(0, 255, 204, 0.4);
+  color: var(--neon-cyan);
+}
+
+.activity-chip.awaiting {
+  background: rgba(168, 85, 247, 0.18);
+  border: 1px solid rgba(168, 85, 247, 0.5);
+  color: var(--neon-purple);
+}
+
+.activity-chip.executing {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  color: var(--neon-amber);
 }
 
 .drawer-close-btn {
@@ -1624,30 +1726,19 @@ html, body {
   transition: background 0.3s ease;
 }
 
-.stage-action-stream .action-card[data-state="AWAITING_APPROVAL"]::before {
-  background: var(--neon-amber);
-  box-shadow: 0 0 8px var(--neon-amber);
-}
-
-.stage-action-stream .action-card[data-state="RUNNING"]::before,
-.stage-action-stream .action-card[data-state="RUNNING_GVISOR"]::before {
-  background: var(--neon-cyan);
-  box-shadow: 0 0 8px var(--neon-cyan);
-}
-
-.stage-action-stream .action-card[data-state="THINKING_VERTEX_AI"]::before {
+.stage-action-stream .action-card[data-activity="AWAITING_APPROVAL"]::before {
   background: var(--neon-purple);
   box-shadow: 0 0 8px var(--neon-purple);
 }
 
-.stage-action-stream .action-card[data-state="PARKED"]::before,
-.stage-action-stream .action-card[data-state="PARKED_ENVOY"]::before {
-  background: var(--neon-pink);
-  box-shadow: 0 0 8px var(--neon-pink);
+.stage-action-stream .action-card[data-activity="THINKING"]::before {
+  background: var(--neon-cyan);
+  box-shadow: 0 0 8px var(--neon-cyan);
 }
 
-.stage-action-stream .action-card[data-state="SUSPENDED"]::before {
-  background: var(--neon-green);
+.stage-action-stream .action-card[data-activity="EXECUTING"]::before {
+  background: var(--neon-amber);
+  box-shadow: 0 0 8px var(--neon-amber);
 }
 
 /* Card Header */
@@ -1719,30 +1810,19 @@ html, body {
   color: #fde68a;
 }
 
-.status-pill.running {
-  background: rgba(0, 255, 204, 0.15);
-  border-color: rgba(0, 255, 204, 0.4);
-  color: #a7f3d0;
-}
-
 .status-pill.thinking {
   background: rgba(168, 85, 247, 0.15);
   border-color: rgba(168, 85, 247, 0.4);
   color: #e9d5ff;
 }
 
-.status-pill.parked {
-  background: rgba(236, 72, 153, 0.15);
-  border-color: rgba(236, 72, 153, 0.4);
-  color: #fbcfe8;
+.status-pill.executing {
+  background: rgba(0, 255, 204, 0.15);
+  border-color: rgba(0, 255, 204, 0.4);
+  color: #a7f3d0;
 }
 
-.status-pill.suspended {
-  background: rgba(16, 185, 129, 0.15);
-  border-color: rgba(16, 185, 129, 0.4);
-  color: #6ee7b7;
-}
-
+/* Worker Pod Pill: the pod that ran this entry. */
 .footprint-pill {
   display: inline-flex;
   align-items: center;
@@ -1753,17 +1833,31 @@ html, body {
   border-radius: 4px;
   background: rgba(30, 41, 59, 0.7);
   border: 1px solid var(--border-subtle);
+  color: var(--neon-cyan);
+}
+
+/* Source Tag: marks a reply that did not come from Gemini. */
+.source-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+}
+
+.source-tag.mock {
+  background: rgba(100, 116, 139, 0.2);
+  border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
 }
 
-.footprint-pill.idle {
-  color: var(--neon-green);
-  border-color: rgba(16, 185, 129, 0.3);
-}
-
-.footprint-pill.active {
-  color: var(--neon-cyan);
-  border-color: rgba(0, 255, 204, 0.3);
+.source-tag.mock-fallback {
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fde68a;
 }
 
 .risk-pill {
