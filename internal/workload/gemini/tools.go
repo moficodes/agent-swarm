@@ -20,6 +20,9 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
+// sandboxLimits is what a script may rely on in the sandbox.
+const sandboxLimits = "It may use only the standard library (numpy, pandas and other third-party packages are not installed), has no network access, and is stopped after 5 seconds."
+
 // ToolDeclarations returns the tools offered to the model.
 func ToolDeclarations() []*genai.Tool {
 	return []*genai.Tool{
@@ -37,11 +40,13 @@ func ToolDeclarations() []*genai.Tool {
 							},
 							"code": {
 								Type:        genai.TypeString,
-								Description: "The exact script or code snippet to execute. Python scripts may use only the standard library; numpy, pandas and other third-party packages are not installed.",
+								Description: "The exact Python script to execute. " + sandboxLimits,
 							},
 							"language": {
 								Type:        genai.TypeString,
-								Description: "Programming language (e.g. python, bash, sh).",
+								Format:      "enum",
+								Enum:        []string{"python"},
+								Description: "Always python: only Python scripts can run in the sandbox.",
 							},
 							"risk_level": {
 								Type:        genai.TypeString,
@@ -59,11 +64,13 @@ func ToolDeclarations() []*genai.Tool {
 						Properties: map[string]*genai.Schema{
 							"language": {
 								Type:        genai.TypeString,
-								Description: "Target programming language (python, bash, sh).",
+								Format:      "enum",
+								Enum:        []string{"python"},
+								Description: "Always python: only Python scripts can run in the sandbox.",
 							},
 							"code": {
 								Type:        genai.TypeString,
-								Description: "Source code to run inside sandbox. Python scripts may use only the standard library; numpy, pandas and other third-party packages are not installed.",
+								Description: "Python source code to run inside the sandbox. " + sandboxLimits,
 							},
 							"summary": {
 								Type:        genai.TypeString,

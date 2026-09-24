@@ -113,6 +113,51 @@ func TestGenerate_ResearchToolLoopsBackToModel(t *testing.T) {
 	}
 }
 
+func TestGenerate_SendsTheSandboxLimitsAsSystemInstruction(t *testing.T) {
+	fake := geminitest.New(t, geminitest.TextResponse("hello"))
+	if _, err := newClient(fake).Generate(context.Background(), nil, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	body := string(fake.Requests()[0].Body)
+	for _, want := range []string{`"systemInstruction"`, "only the standard library", "no network access", "5 seconds"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("request lacks %q: %s", want, body)
+		}
+	}
+}
+
+func TestToolDeclarations_LanguageIsPythonOnly(t *testing.T) {
+	for _, tool := range gemini.ToolDeclarations() {
+		for _, fn := range tool.FunctionDeclarations {
+			lang, ok := fn.Parameters.Properties["language"]
+			if !ok {
+				continue
+			}
+			if len(lang.Enum) != 1 || lang.Enum[0] != "python" || lang.Format != "enum" {
+				t.Errorf("%s language = %+v, want an enum of python only", fn.Name, lang)
+			}
+		}
+	}
+}
+
+// The model may ignore the enum; the check sends the script back.
+func TestGenerate_ShellScriptGoesBackToTheModel(t *testing.T) {
+	fake := geminitest.New(t,
+		geminitest.ApprovalResponse("greet", "echo hi", "bash"),
+		geminitest.ApprovalResponse("greet", "print('hi')", "python"),
+	)
+	msg, err := newClient(fake).Generate(context.Background(), nil, "say hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Approval == nil || msg.Approval.Language != "python" {
+		t.Fatalf("Approval = %+v, want the Python script", msg.Approval)
+	}
+	if body := string(fake.Requests()[1].Body); !strings.Contains(body, "only Python scripts can run in this sandbox") {
+		t.Errorf("retry request should say only Python runs; body = %s", body)
+	}
+}
+
 func TestGenerate_UpstreamErrorIsReturned(t *testing.T) {
 	fake := geminitest.NewStatus(t, 500)
 	c := newClient(fake)
@@ -222,7 +267,7 @@ func TestGenerate_BrokenScriptGoesBackToTheModelForAFix(t *testing.T) {
 	}
 }
 
-func TestGenerate_BrokenScriptIsRetriedOnlyOnce(t *testing.T) {
+func TestGenerate_ScriptThatFailsTheCheckTwiceIsNotShown(t *testing.T) {
 	fake := geminitest.New(t, geminitest.ApprovalResponse("sum", "print('a\nb')", "python"))
 	c := newClient(fake, gemini.WithScriptChecker(fakeChecker("print('a\nb')")))
 
@@ -230,15 +275,18 @@ func TestGenerate_BrokenScriptIsRetriedOnlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg.Approval == nil || msg.Approval.Code != "print('a\nb')" {
-		t.Fatalf("Approval = %+v, want the still-broken script", msg.Approval)
+	if msg.Approval != nil {
+		t.Fatalf("Approval = %+v, want none for a script that cannot run", msg.Approval)
+	}
+	if !strings.Contains(msg.Content, "couldn't write a script that runs in this sandbox") {
+		t.Errorf("Content = %q", msg.Content)
 	}
 	if n := len(fake.Requests()); n != 2 {
 		t.Errorf("got %d requests, want 2", n)
 	}
 }
 
-func TestGenerate_NoRetryOnTheLastTurn(t *testing.T) {
+func TestGenerate_BrokenScriptOnTheLastTurnIsNotShown(t *testing.T) {
 	research := geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "cpu"})
 	fake := geminitest.New(t, research, research, geminitest.ApprovalResponse("sum", "print('a\nb')", "python"))
 	c := newClient(fake, gemini.WithScriptChecker(fakeChecker("print('a\nb')")))
@@ -247,8 +295,8 @@ func TestGenerate_NoRetryOnTheLastTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg.Approval == nil {
-		t.Fatal("Approval = nil, want the script from the last turn")
+	if msg.Approval != nil {
+		t.Fatalf("Approval = %+v, want none: there is no turn left to fix it", msg.Approval)
 	}
 	if n := len(fake.Requests()); n != 3 {
 		t.Errorf("got %d requests, want 3", n)

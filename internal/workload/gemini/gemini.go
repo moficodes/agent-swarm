@@ -120,11 +120,37 @@ func cannedResearchData(string) map[string]any {
 
 const maxTurns = 3
 
+// systemInstruction tells the model what the sandbox its scripts run in can
+// do, so that it proposes scripts that run there.
+const systemInstruction = `You help conference attendees analyze data by writing short Python scripts that run in a sandbox once the attendee approves them.
+
+The sandbox runs Python 3.12 with only the standard library. numpy, pandas, matplotlib, requests and every other third-party package are not installed, and nothing can be installed. The sandbox has no network access. A script is stopped after 5 seconds.
+
+Write scripts that print their results. Use statistics, csv, json, collections, math and itertools for analysis, and draw charts as ASCII text.`
+
+// noScriptReply answers a request whose scripts failed the check twice, so
+// the attendee is never asked to approve code that cannot run.
+const noScriptReply = "I couldn't write a script that runs in this sandbox. Try rephrasing the request."
+
 // Generate runs up to three model turns and returns the assistant message.
-// It returns an error rather than falling back to a mock reply. A proposed
-// script that does not parse goes back to the model once for a fix, so the
-// attendee is not asked to approve code that cannot run.
+// It returns an error rather than falling back to a mock reply.
 func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prompt string) (*types.ChatMessage, error) {
+	msg, err := c.run(ctx, BuildContents(history, prompt))
+	if err != nil {
+		return nil, err
+	}
+	if msg.Approval != nil && msg.Content == "" {
+		msg.Content = fmt.Sprintf("I analyzed your request. To proceed, I need your approval to execute this %s script in the sandbox:", msg.Approval.Language)
+	}
+	return msg, nil
+}
+
+// run plays up to maxTurns model turns over contents. A proposed script that
+// fails the check goes back to the model once, so the attendee is not asked
+// to approve code that cannot run; one that fails again, or on the last
+// turn, is dropped for noScriptReply. An approval message's Content is the
+// model's text, which may be empty.
+func (c *Client) run(ctx context.Context, contents []*genai.Content) (*types.ChatMessage, error) {
 	if !c.cfg.Enabled() {
 		return nil, ErrDisabled
 	}
@@ -139,8 +165,10 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 		return nil, fmt.Errorf("gemini: init client: %w", err)
 	}
 
-	contents := BuildContents(history, prompt)
-	genCfg := &genai.GenerateContentConfig{Tools: ToolDeclarations()}
+	genCfg := &genai.GenerateContentConfig{
+		SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: systemInstruction}}},
+		Tools:             ToolDeclarations(),
+	}
 	retried := false
 	for turn := range maxTurns {
 		resp, err := sdk.Models.GenerateContent(ctx, c.cfg.Model, contents, genCfg)
@@ -170,8 +198,11 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 			}
 		}
 
-		if approval != nil && !retried && turn < maxTurns-1 {
+		if approval != nil {
 			if msg := c.checkScript(ctx, approval.Language, approval.Code); msg != "" {
+				if retried || turn == maxTurns-1 {
+					return assistantMessage(noScriptReply, nil), nil
+				}
 				retried = true
 				contents = append(contents, cand, &genai.Content{Role: "user", Parts: []*genai.Part{{
 					FunctionResponse: &genai.FunctionResponse{Name: approvalCall.Name, Response: map[string]any{
@@ -180,13 +211,7 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 				}}})
 				continue
 			}
-		}
-		if approval != nil {
-			content := text.String()
-			if content == "" {
-				content = fmt.Sprintf("I analyzed your request. To proceed, I need your approval to execute this %s script in the sandbox:", approval.Language)
-			}
-			return assistantMessage(content, approval), nil
+			return assistantMessage(text.String(), approval), nil
 		}
 		if len(research) > 0 {
 			contents = append(contents, cand)
