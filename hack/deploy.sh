@@ -149,7 +149,7 @@ demo-conference_check_router() {
   fi
   if [[ "${DEMO_CONF_PATCH_ROUTER}" != true ]]; then
     echo "error: atenet-router needs these changes for LLM turns that outlast its defaults:" >&2
-    sed 's/^/  /' <<<"${missing}" >&2
+    while IFS= read -r line; do echo "  ${line}"; done <<<"${missing}" >&2
     echo "Apply them to the atenet-router Deployment, or rerun with --patch-router." >&2
     exit 1
   fi

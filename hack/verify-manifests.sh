@@ -52,6 +52,7 @@ check_objects() {
 status=0
 for f in "${GATEWAY_MANIFEST}" "${INGRESS_MANIFEST}" "${ACTOR_TEMPLATE}"; do
   out="$(render "${f}" "demo.example.com")"
+  # shellcheck disable=SC2016 # matches a literal, unrendered ${
   if grep -n '\${' <<<"${out}"; then
     echo "error: ${f} has unsubstituted placeholders" >&2
     status=1
@@ -62,6 +63,7 @@ done
 # install script passes when DEMO_DOMAIN is unset and the Ingress is not
 # applied.
 out_empty_domain="$(render "${INGRESS_MANIFEST}" "")"
+# shellcheck disable=SC2016 # matches a literal, unrendered ${
 if grep -n '\${' <<<"${out_empty_domain}"; then
   echo "error: ${INGRESS_MANIFEST} has unsubstituted placeholders (empty domain)" >&2
   status=1

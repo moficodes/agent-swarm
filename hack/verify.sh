@@ -53,7 +53,6 @@ CLR_RED="\033[1;31m"
 CLR_YELLOW="\033[1;33m"
 CLR_BLUE="\033[1;34m"
 CLR_CYAN="\033[1;36m"
-CLR_MAGENTA="\033[1;35m"
 
 log_info() {
   printf "${CLR_BLUE}==>${CLR_RESET} ${CLR_BOLD}%s${CLR_RESET}\n" "$*"
@@ -217,15 +216,15 @@ decode_jwt_payload() {
 }
 
 print_banner() {
-  printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
-  printf "${CLR_BOLD}  Agent Substrate: Conference Demo Automated Verification${CLR_RESET}\n"
-  printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
+  printf '%b\n' "${CLR_CYAN}========================================================================${CLR_RESET}"
+  printf '%b\n' "${CLR_BOLD}  Agent Substrate: Conference Demo Automated Verification${CLR_RESET}"
+  printf '%b\n' "${CLR_CYAN}========================================================================${CLR_RESET}"
   printf "  Gateway URL : %s\n" "${GATEWAY_URL}"
   printf "  Router URL  : %s\n" "${ROUTER_URL}"
   printf "  Status URL  : %s\n" "${STATUS_URL}"
   printf "  Concurrency : %s\n" "${CONCURRENCY}"
   printf "  Mock Mode   : %s\n" "${MOCK_MODE}"
-  printf "${CLR_CYAN}========================================================================${CLR_RESET}\n\n"
+  printf '%b\n\n' "${CLR_CYAN}========================================================================${CLR_RESET}"
 }
 
 # Verify prerequisites
@@ -388,7 +387,7 @@ if [[ -z "${JWT_EXP}" || "${JWT_EXP}" == "null" || "${JWT_EXP}" -le "${NOW_TS}" 
   log_fail "Step 2: Ephemeral Session Minting"
   exit 1
 fi
-log_ok "Verified JWT Token: sub=${JWT_SUB}, exp=${JWT_EXP} (valid for $((${JWT_EXP} - ${NOW_TS}))s)"
+log_ok "Verified JWT Token: sub=${JWT_SUB}, exp=${JWT_EXP} (valid for $((JWT_EXP - NOW_TS))s)"
 log_pass "Step 2: Ephemeral Session Minting Verified"
 
 # =========================================================================
@@ -948,7 +947,7 @@ if [[ "${MOCK_MODE}" == true ]]; then
 fi
 log_pass "Step 13: Model Key Is Not Client-Settable Verified"
 
-printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
-printf "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 13 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}\n"
-printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
+printf '%b\n' "${CLR_CYAN}========================================================================${CLR_RESET}"
+printf '%b\n' "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 13 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}"
+printf '%b\n' "${CLR_CYAN}========================================================================${CLR_RESET}"
 exit 0
