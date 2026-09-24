@@ -53,6 +53,10 @@ const (
 	DecisionReject DecisionType = "REJECT"
 )
 
+// ModelKeyHeader carries an actor's model proxy key from the gateway to the
+// actor on every proxied request.
+const ModelKeyHeader = "X-Conf-Model-Key"
+
 // ActorLifecycleState represents the lifecycle phase of an interactive agent actor.
 type ActorLifecycleState string
 
