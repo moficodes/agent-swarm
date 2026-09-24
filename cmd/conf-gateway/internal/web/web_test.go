@@ -69,6 +69,10 @@ func TestPage_PresenterGate(t *testing.T) {
 	}
 	if rec := serve(stage, httptest.NewRequest(http.MethodGet, "/stage", nil)); rec.Code != http.StatusUnauthorized {
 		t.Errorf("stage without key: %d", rec.Code)
+	} else if body := rec.Body.String(); !strings.Contains(body, "PRESENTER_TOKEN") || !strings.Contains(body, "conf-gateway Secret") {
+		// The URL is logged only when the gateway generated its own key, so
+		// the page must say where a configured key lives.
+		t.Errorf("key-required page does not say where the key comes from: %q", body)
 	}
 	if rec := serve(stage, httptest.NewRequest(http.MethodGet, "/stage?key=wrong", nil)); rec.Code != http.StatusUnauthorized {
 		t.Errorf("stage with wrong key: %d", rec.Code)

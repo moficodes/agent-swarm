@@ -38,7 +38,8 @@ const presenterKeyRequiredPage = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Presenter key required</title></head>
 <body style="font-family:sans-serif;padding:2rem">
 <h1>Presenter key required</h1>
-<p>Open this page with <code>?key=&lt;presenter key&gt;</code>. The gateway logs the full URL at startup.</p>
+<p>Open this page with <code>?key=&lt;presenter key&gt;</code>.</p>
+<p>The key is the gateway's <code>PRESENTER_TOKEN</code>; the install script stores it in the conf-gateway Secret. A gateway started without one generates a key and logs the full URL at startup.</p>
 </body></html>
 `
 
