@@ -847,3 +847,46 @@ func TestApprove_FailedRunReportsStructuredError(t *testing.T) {
 		t.Errorf("Execution = %+v, want exit -1 with the error", msg.Execution)
 	}
 }
+
+func postClear(h http.Handler, method, key string) int {
+	req := httptest.NewRequest(method, types.ClearHistoryPath, nil)
+	if key != "" {
+		req.Header.Set(types.ModelKeyHeader, key)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+func TestClearHistory_DropsHistoryAndPendingApproval(t *testing.T) {
+	s, _ := approvalServer(t, "echo stored", "sh")
+
+	if code := postClear(s.Handler(), http.MethodGet, "k.mac"); code != http.StatusMethodNotAllowed {
+		t.Errorf("GET status = %d, want 405", code)
+	}
+	if code := postClear(s.Handler(), http.MethodPost, "k.mac"); code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", code)
+	}
+	if h := s.History(); len(h) != 0 {
+		t.Errorf("History = %+v, want empty", h)
+	}
+	if p := s.PendingApproval(); p != nil {
+		t.Errorf("PendingApproval = %+v, want nil", p)
+	}
+}
+
+func TestClearHistory_RequiresTheGatewayKey(t *testing.T) {
+	s, _ := approvalServer(t, "echo stored", "sh") // the gateway sent k.mac
+
+	for _, key := range []string{"", "forged.mac"} {
+		if code := postClear(s.Handler(), http.MethodPost, key); code != http.StatusForbidden {
+			t.Errorf("key %q: status = %d, want 403", key, code)
+		}
+	}
+	if len(s.History()) == 0 || s.PendingApproval() == nil {
+		t.Error("a rejected clear dropped state")
+	}
+	if s.ModelKey() != "k.mac" {
+		t.Errorf("ModelKey = %q, a rejected clear must not replace it", s.ModelKey())
+	}
+}

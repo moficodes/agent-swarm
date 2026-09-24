@@ -57,6 +57,10 @@ const (
 // actor on every proxied request.
 const ModelKeyHeader = "X-Conf-Model-Key"
 
+// ClearHistoryPath is the actor endpoint the gateway POSTs to, through the
+// router, to drop the actor's conversation history and pending approval.
+const ClearHistoryPath = "/api/history/clear"
+
 // ReplySource says which engine produced an assistant reply.
 type ReplySource string
 

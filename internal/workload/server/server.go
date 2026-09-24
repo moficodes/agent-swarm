@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -126,9 +127,14 @@ func (s *WorkloadServer) ModelKey() string {
 }
 
 // Handler returns the HTTP handler for the server. Every request that
-// carries a model key refreshes the one the Gemini client uses.
+// carries a model key refreshes the one the Gemini client uses, except a
+// history clear, which must present the key already held.
 func (s *WorkloadServer) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == types.ClearHistoryPath {
+			s.handleClearHistory(w, r)
+			return
+		}
 		if k := r.Header.Get(types.ModelKeyHeader); k != "" {
 			s.mu.Lock()
 			s.modelKey = k
@@ -164,6 +170,27 @@ func (s *WorkloadServer) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/chat", s.handleChat)
 	s.mux.HandleFunc("/api/approve", s.handleApprove)
+}
+
+// handleClearHistory drops the conversation history and any pending
+// approval, so the actor's next user starts with a fresh model context. Only
+// the gateway knows the actor's model key, so the request must carry the key
+// the actor already holds; an actor that holds none has no history yet.
+func (s *WorkloadServer) handleClearHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	k := r.Header.Get(types.ModelKeyHeader)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if k == "" || (s.modelKey != "" && subtle.ConstantTimeCompare([]byte(k), []byte(s.modelKey)) != 1) {
+		http.Error(w, "gateway key required", http.StatusForbidden)
+		return
+	}
+	s.history = nil
+	s.pendingApproval = nil
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *WorkloadServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
