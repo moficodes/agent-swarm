@@ -611,7 +611,7 @@ func TestGateway_ConcurrencySafety(t *testing.T) {
 				_ = cResp.Body.Close()
 
 				// 3. Approve proxy
-				reqApp, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"app-1","decision":"approve"}`))
+				reqApp, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"app-1","decision":"APPROVE"}`))
 				reqApp.Header.Set("Content-Type", "application/json")
 				reqApp.Header.Set("Authorization", "Bearer "+sess.Token)
 				aResp, err := client.Do(reqApp)
@@ -1910,7 +1910,7 @@ func TestActorInspectorEndpoint(t *testing.T) {
 	t.Run("ExecutionHistoryAndLastResult", func(t *testing.T) {
 		token := gw.MintToken("attendee-01")
 
-		chatReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
+		chatReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"need-approval"}`))
 		chatReq.Header.Set("Content-Type", "application/json")
 		chatReq.Header.Set("Authorization", "Bearer "+token)
 		cResp, err := http.DefaultClient.Do(chatReq)

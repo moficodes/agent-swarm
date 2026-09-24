@@ -236,14 +236,17 @@ type Gateway struct {
 	mu               sync.RWMutex
 	activeActors     map[string]types.ActorLifecycleState
 	pendingApprovals map[string]*types.ApprovalRequest
-	chatHistories    map[string][]types.ChatMessage
-	lastResults      map[string]*types.ExecutionResult
-	currentActionID  map[string]string
-	recentEvents     []string
-	actionFeed       []types.ActionLogEntry
-	parkedCount      int
-	simController    SimulationController
-	workerSlots      chan struct{}
+	// approvalsInFlight holds the approval ID each attendee is currently
+	// forwarding, so a second copy of the same decision cannot run concurrently.
+	approvalsInFlight map[string]string
+	chatHistories     map[string][]types.ChatMessage
+	lastResults       map[string]*types.ExecutionResult
+	currentActionID   map[string]string
+	recentEvents      []string
+	actionFeed        []types.ActionLogEntry
+	parkedCount       int
+	simController     SimulationController
+	workerSlots       chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -253,24 +256,25 @@ type Gateway struct {
 // NewGateway creates and initializes a new Gateway.
 func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 	gw := &Gateway{
-		routerURL:        routerURL,
-		statusURL:        statusURL,
-		atespace:         "ate-demo-conf",
-		jwtSecret:        "conf-demo-secret-key",
-		suspender:        &commandSuspender{},
-		statusInterval:   500 * time.Millisecond,
-		httpClient:       &http.Client{Timeout: 5 * time.Second},
-		broker:           NewEventBroker(),
-		mux:              http.NewServeMux(),
-		activeActors:     make(map[string]types.ActorLifecycleState),
-		pendingApprovals: make(map[string]*types.ApprovalRequest),
-		chatHistories:    make(map[string][]types.ChatMessage),
-		lastResults:      make(map[string]*types.ExecutionResult),
-		currentActionID:  make(map[string]string),
-		recentEvents:     make([]string, 0),
-		actionFeed:       make([]types.ActionLogEntry, 0),
-		maxActors:        50,
-		workerSlots:      make(chan struct{}, 2),
+		routerURL:         routerURL,
+		statusURL:         statusURL,
+		atespace:          "ate-demo-conf",
+		jwtSecret:         "conf-demo-secret-key",
+		suspender:         &commandSuspender{},
+		statusInterval:    500 * time.Millisecond,
+		httpClient:        &http.Client{Timeout: 5 * time.Second},
+		broker:            NewEventBroker(),
+		mux:               http.NewServeMux(),
+		activeActors:      make(map[string]types.ActorLifecycleState),
+		pendingApprovals:  make(map[string]*types.ApprovalRequest),
+		approvalsInFlight: make(map[string]string),
+		chatHistories:     make(map[string][]types.ChatMessage),
+		lastResults:       make(map[string]*types.ExecutionResult),
+		currentActionID:   make(map[string]string),
+		recentEvents:      make([]string, 0),
+		actionFeed:        make([]types.ActionLogEntry, 0),
+		maxActors:         50,
+		workerSlots:       make(chan struct{}, 2),
 	}
 
 	for _, opt := range opts {
@@ -945,29 +949,13 @@ func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
+	req, release, ok := g.claimApproval(w, r, attendeeID)
+	if !ok {
 		return
 	}
-
-	var req types.ApprovalResponse
-	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		http.Error(w, "invalid json payload", http.StatusBadRequest)
-		return
-	}
-	if err := req.Validate(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+	defer release()
 
 	g.mu.Lock()
-	app, hasApp := g.pendingApprovals[attendeeID]
-	if hasApp && app.ApprovalID == req.ApprovalID {
-		req.Code = app.Code
-		req.Language = app.Language
-		delete(g.pendingApprovals, attendeeID)
-	}
 	actionID := g.currentActionID[attendeeID]
 	if actionID == "" {
 		actionID = fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano())
@@ -1035,16 +1023,58 @@ func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 		defer func() { <-g.workerSlots }()
 	}
 
-	// Forward the approval with code to the actor via reverse proxy!
-	updatedBody, _ := json.Marshal(req)
-	r.Body = io.NopCloser(bytes.NewReader(updatedBody))
-	r.ContentLength = int64(len(updatedBody))
-	r.Header.Set("Content-Length", strconv.Itoa(len(updatedBody)))
-
 	ctx := context.WithValue(r.Context(), attendeeContextKey{}, attendeeID)
 	outReq := r.WithContext(ctx)
 
 	g.proxy.ServeHTTP(w, outReq)
+}
+
+// claimApproval binds an approval decision to the approval this attendee was
+// last shown. On success it rewrites r.Body to carry the proposed code, never
+// code supplied by the client, and marks the approval in flight until release
+// is called. The pending approval itself is cleared by modifyResponse once the
+// actor answers 200. On failure it writes the error response.
+func (g *Gateway) claimApproval(w http.ResponseWriter, r *http.Request, attendeeID string) (types.ApprovalResponse, func(), bool) {
+	var req types.ApprovalResponse
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json payload", http.StatusBadRequest)
+		return req, nil, false
+	}
+	if err := req.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return req, nil, false
+	}
+
+	g.mu.Lock()
+	pending, ok := g.pendingApprovals[attendeeID]
+	if !ok || pending == nil || pending.ApprovalID != req.ApprovalID {
+		g.mu.Unlock()
+		http.Error(w, "no matching pending approval", http.StatusConflict)
+		return req, nil, false
+	}
+	if g.approvalsInFlight[attendeeID] == req.ApprovalID {
+		g.mu.Unlock()
+		http.Error(w, "approval already in progress", http.StatusConflict)
+		return req, nil, false
+	}
+	g.approvalsInFlight[attendeeID] = req.ApprovalID
+	req.Code = pending.Code
+	req.Language = pending.Language
+	g.mu.Unlock()
+
+	release := func() {
+		g.mu.Lock()
+		if g.approvalsInFlight[attendeeID] == req.ApprovalID {
+			delete(g.approvalsInFlight, attendeeID)
+		}
+		g.mu.Unlock()
+	}
+
+	body, _ := json.Marshal(req)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return req, release, true
 }
 
 func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
@@ -1085,31 +1115,29 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
-	} else if r.URL.Path == "/api/approve" && r.Body != nil {
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err == nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			var apprReq types.ApprovalResponse
-			if err := json.Unmarshal(bodyBytes, &apprReq); err == nil {
-				g.mu.RLock()
-				actionID := g.currentActionID[attendeeID]
-				g.mu.RUnlock()
-				if actionID == "" {
-					actionID = fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano())
-				}
-				g.RecordActionEntry(types.ActionLogEntry{
-					ID:         actionID,
-					AttendeeID: attendeeID,
-					Timestamp:  time.Now().Unix(),
-					ApprovalID: apprReq.ApprovalID,
-					Decision:   apprReq.Decision,
-					Code:       apprReq.Code,
-					Language:   apprReq.Language,
-					State:      types.StateRunningGVisor,
-					WorkerPod:  "conf-workers-0",
-				})
-			}
+	} else if r.URL.Path == "/api/approve" {
+		apprReq, release, ok := g.claimApproval(w, r, attendeeID)
+		if !ok {
+			return
 		}
+		defer release()
+		g.mu.RLock()
+		actionID := g.currentActionID[attendeeID]
+		g.mu.RUnlock()
+		if actionID == "" {
+			actionID = fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano())
+		}
+		g.RecordActionEntry(types.ActionLogEntry{
+			ID:         actionID,
+			AttendeeID: attendeeID,
+			Timestamp:  time.Now().Unix(),
+			ApprovalID: apprReq.ApprovalID,
+			Decision:   apprReq.Decision,
+			Code:       apprReq.Code,
+			Language:   apprReq.Language,
+			State:      types.StateRunningGVisor,
+			WorkerPod:  "conf-workers-0",
+		})
 	}
 
 	g.mu.Lock()
