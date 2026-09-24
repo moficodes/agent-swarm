@@ -307,3 +307,18 @@ func TestState_TelemetryWorkersComeFromRealPods(t *testing.T) {
 		t.Errorf("Actors = %+v", tel.Actors)
 	}
 }
+
+func TestState_NonChatReplyLeavesActivityIdle(t *testing.T) {
+	actor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("plain text"))
+	}))
+	t.Cleanup(actor.Close)
+	gw := newTestGateway(t, actor.URL, "")
+
+	if rec := postJSON(gw, "attendee-09", "/api/chat", types.ChatRequest{Message: "hi"}); rec.Code != http.StatusOK {
+		t.Fatalf("chat status = %d", rec.Code)
+	}
+	if v, _ := gw.ActorView("attendee-09"); v.Activity != types.ActivityIdle {
+		t.Errorf("Activity = %q, want idle", v.Activity)
+	}
+}

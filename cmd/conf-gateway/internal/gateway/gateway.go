@@ -225,6 +225,9 @@ type Gateway struct {
 	// suspendTimers holds each attendee's pending auto-suspend when
 	// suspendAfter is positive. Each pending timer holds one wg count.
 	suspendTimers map[string]*time.Timer
+	// turnsInFlight counts each attendee's proxied turns that have not
+	// finished. An actor is only scheduled for suspend when it reaches zero.
+	turnsInFlight map[string]int
 	// closed is set by Close; no background work starts after it.
 	closed bool
 
@@ -252,6 +255,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		recentEvents:      make([]string, 0),
 		actionFeed:        make([]types.ActionLogEntry, 0),
 		suspendTimers:     make(map[string]*time.Timer),
+		turnsInFlight:     make(map[string]int),
 		maxActors:         50,
 	}
 
@@ -415,15 +419,37 @@ func (g *Gateway) currentView(attendee string) types.ActorView {
 	return types.ActorView{ActorID: attendee, State: types.StateUnknown}
 }
 
-// suspendAfterTurn suspends the attendee's actor once its turn completes:
-// right away when suspendAfter is zero, or after suspendAfter of idleness.
-func (g *Gateway) suspendAfterTurn(attendee string) {
-	if g.control == nil {
-		return
-	}
+// beginTurn marks a turn in flight and cancels any pending suspend, so an
+// actor is never suspended while it is serving a turn.
+func (g *Gateway) beginTurn(attendee string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.closed {
+	g.turnsInFlight[attendee]++
+	if t, ok := g.suspendTimers[attendee]; ok {
+		if t.Stop() {
+			g.wg.Done()
+		}
+		delete(g.suspendTimers, attendee)
+	}
+}
+
+// endTurn marks a turn finished and, once no turn is in flight, schedules
+// the actor's suspend.
+func (g *Gateway) endTurn(attendee string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.turnsInFlight[attendee]--
+	if g.turnsInFlight[attendee] > 0 {
+		return
+	}
+	delete(g.turnsInFlight, attendee)
+	g.suspendAfterTurnLocked(attendee)
+}
+
+// suspendAfterTurnLocked suspends the attendee's actor right away when
+// suspendAfter is zero, or after suspendAfter of idleness. g.mu must be held.
+func (g *Gateway) suspendAfterTurnLocked(attendee string) {
+	if g.control == nil || g.closed {
 		return
 	}
 	g.wg.Add(1)
@@ -437,16 +463,26 @@ func (g *Gateway) suspendAfterTurn(attendee string) {
 	if t, ok := g.suspendTimers[attendee]; ok && t.Stop() {
 		g.wg.Done()
 	}
-	g.suspendTimers[attendee] = time.AfterFunc(g.suspendAfter, func() {
+	var t *time.Timer
+	t = time.AfterFunc(g.suspendAfter, func() {
 		defer g.wg.Done()
+		g.mu.Lock()
+		if g.suspendTimers[attendee] == t {
+			delete(g.suspendTimers, attendee)
+		}
+		g.mu.Unlock()
 		g.suspendActor(attendee)
 	})
+	g.suspendTimers[attendee] = t
 }
 
 func (g *Gateway) suspendActor(attendee string) {
 	ctx, cancel := context.WithTimeout(g.ctx, 30*time.Second)
 	defer cancel()
 	if err := g.control.Suspend(ctx, attendee); err != nil {
+		if g.ctx.Err() != nil {
+			return // the gateway is closing
+		}
 		log.Printf("[gateway] auto-suspend %s: %v", attendee, err)
 		g.mu.Lock()
 		g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendee, err))
@@ -1015,6 +1051,8 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/api/approve" {
 		g.setActivity(attendeeID, types.ActivityThinking)
 	}
+	g.beginTurn(attendeeID)
+	defer g.endTurn(attendeeID)
 
 	g.mu.Lock()
 	g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
@@ -1187,6 +1225,8 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		} else {
 			g.setActivity(attendeeID, types.ActivityIdle)
 		}
+	} else {
+		g.setActivity(attendeeID, types.ActivityIdle)
 	}
 	workerPod := g.currentView(attendeeID).WorkerPod
 
@@ -1231,7 +1271,6 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 			Activity:      types.ActivityAwaitingApproval,
 			Source:        chatMsg.Source,
 		})
-		g.suspendAfterTurn(attendeeID)
 	} else if resp.StatusCode == http.StatusOK {
 		g.mu.Lock()
 		delete(g.pendingApprovals, attendeeID)
@@ -1267,7 +1306,6 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 				Source:        chatMsg.Source,
 			})
 		}
-		g.suspendAfterTurn(attendeeID)
 	}
 
 	return nil

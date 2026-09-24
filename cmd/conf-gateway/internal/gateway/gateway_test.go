@@ -1892,6 +1892,163 @@ func TestActorInspectorEndpoint(t *testing.T) {
 	})
 }
 
+func TestResetEndpoint(t *testing.T) {
+	upstreamMux := http.NewServeMux()
+	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:        "msg-chat-1",
+			Sender:    types.SenderAssistant,
+			Content:   "WAITING_FOR_APPROVAL: review",
+			Timestamp: time.Now().Unix(),
+			Approval: &types.ApprovalRequest{
+				ApprovalID: "app-reset-1",
+				Summary:    "Scale cluster",
+				Code:       "print('scaling')",
+				Language:   "python",
+				RiskLevel:  types.RiskHigh,
+			},
+		})
+	})
+	upstreamSrv := httptest.NewServer(upstreamMux)
+	defer upstreamSrv.Close()
+
+	gw := newTestGateway(t, upstreamSrv.URL, "", gateway.WithAtespace("ate-demo-conf"))
+	defer gw.Close()
+
+	ts := httptest.NewServer(asPresenter(gw))
+	defer ts.Close()
+
+	getDetails := func(t *testing.T, actor string) types.ActorDetails {
+		t.Helper()
+		resp, err := http.Get(ts.URL + "/api/actor/" + actor)
+		if err != nil {
+			t.Fatalf("failed to get actor details: %v", err)
+		}
+		defer resp.Body.Close()
+		var details types.ActorDetails
+		if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+			t.Fatalf("failed to decode actor details: %v", err)
+		}
+		return details
+	}
+
+	t.Run("ClearsGatewayState", func(t *testing.T) {
+		if rec := postJSON(gw, "attendee-02", "/api/chat", types.ChatRequest{Message: "need-approval"}); rec.Code != http.StatusOK {
+			t.Fatalf("chat status = %d", rec.Code)
+		}
+		gw.SetLastResult("attendee-02", &types.ExecutionResult{Stdout: "report", DurationMs: 42})
+
+		before := getDetails(t, "attendee-02")
+		if len(before.ChatHistory) == 0 || before.PendingApproval == nil || before.LastResult == nil {
+			t.Fatalf("setup did not populate state: %+v", before)
+		}
+
+		resp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
+		if err != nil {
+			t.Fatalf("failed to call /api/reset: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+
+		after := getDetails(t, "attendee-02")
+		if len(after.ChatHistory) != 0 {
+			t.Errorf("expected chat history cleared, got %d items", len(after.ChatHistory))
+		}
+		if after.PendingApproval != nil {
+			t.Errorf("expected pending approval cleared, got %+v", after.PendingApproval)
+		}
+		if after.LastResult != nil {
+			t.Errorf("expected last result cleared, got %+v", after.LastResult)
+		}
+		if after.Activity != types.ActivityIdle {
+			t.Errorf("expected activity idle after reset, got %q", after.Activity)
+		}
+	})
+
+	t.Run("MethodValidation", func(t *testing.T) {
+		methods := []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch}
+		for _, m := range methods {
+			req, err := http.NewRequest(m, ts.URL+"/api/reset", nil)
+			if err != nil {
+				t.Fatalf("failed to create %s request: %v", m, err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("failed %s /api/reset: %v", m, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("expected 405 Method Not Allowed for %s /api/reset, got %d", m, resp.StatusCode)
+			}
+		}
+	})
+
+	t.Run("HaltsSimulationRunner", func(t *testing.T) {
+		runner := &mockSimulationController{}
+		gw.SetSimulationController(runner)
+
+		resp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
+		if err != nil {
+			t.Fatalf("failed to call /api/reset: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+		if !runner.stopped.Load() {
+			t.Errorf("expected active simulation runner to be halted upon reset")
+		}
+	})
+
+	t.Run("ConcurrencySafety", func(t *testing.T) {
+		const numWorkers = 8
+		const numIterations = 15
+
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+
+		for i := 0; i < numWorkers; i++ {
+			go func(workerID int) {
+				defer wg.Done()
+				client := &http.Client{Timeout: 5 * time.Second}
+
+				for j := 0; j < numIterations; j++ {
+					switch (workerID + j) % 4 {
+					case 0:
+						resp, err := client.Post(ts.URL+"/api/reset", "application/json", nil)
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					case 1:
+						resp, err := client.Get(ts.URL + "/api/stage/telemetry")
+						if err == nil {
+							var telem types.StageTelemetry
+							_ = json.NewDecoder(resp.Body).Decode(&telem)
+							_ = resp.Body.Close()
+						}
+					case 2:
+						resp, err := client.Get(ts.URL + "/api/actor/attendee-01")
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					case 3:
+						resp, err := client.Get(ts.URL + "/api/session")
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					}
+				}
+			}(i)
+		}
+
+		wg.Wait()
+	})
+}
+
 func TestSimulationEndpoint(t *testing.T) {
 	var chatCalls atomic.Int64
 	var approveCalls atomic.Int64
