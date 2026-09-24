@@ -22,6 +22,12 @@ containers:
 - name: conf-workload
   image: ko://github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload
   command: ["/ko-app/conf-workload"]
+resources:
+  limits:
+  - name: cpu
+    quantity: "1"
+  - name: memory
+    quantity: 512Mi
 snapshotsConfig:
   onPause: SNAPSHOT_CONTENT_SCOPE_FULL
   onCommit: SNAPSHOT_CONTENT_SCOPE_FULL

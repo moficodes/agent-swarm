@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -371,5 +373,174 @@ func TestMockEngine_GenerateTurn(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, "[SANDBOX]") {
 		t.Fatalf("expected mock code output to contain '[SANDBOX]', got: %q", res.Stdout)
+	}
+}
+
+func TestSandboxExecutor_TimeoutKillsProcessGroup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	executor := engine.NewSandboxExecutor(t.TempDir())
+	pidFile := filepath.Join(t.TempDir(), "pid")
+
+	start := time.Now()
+	// The backgrounded sleep inherits stdout, so Run would block on it unless the group is killed.
+	res, err := executor.Execute(ctx, "bash", fmt.Sprintf("sleep 30 & echo $! > %s; sleep 30", pidFile))
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Fatalf("execution took %v, want <= ~timeout+1s", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "execution context error") {
+		t.Fatalf("expected execution context error, got %v", err)
+	}
+	if res == nil || res.ExitCode != -1 {
+		t.Fatalf("expected ExitCode -1 on timeout, got %+v", res)
+	}
+
+	data, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("failed to read pid file: %v", readErr)
+	}
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(data)))
+	if convErr != nil {
+		t.Fatalf("invalid pid %q: %v", data, convErr)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("backgrounded grandchild %d still alive after timeout", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestSandboxExecutor_OutputCapped(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	executor := engine.NewSandboxExecutor(t.TempDir())
+	res, err := executor.Execute(ctx, "bash", "yes | head -c 1000000; yes | head -c 1000000 >&2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", res.ExitCode)
+	}
+	for name, out := range map[string]string{"stdout": res.Stdout, "stderr": res.Stderr} {
+		if !strings.HasSuffix(out, engine.OutputTruncatedMarker) {
+			t.Errorf("expected %s to end with truncation marker, got suffix %q", name, out[max(0, len(out)-40):])
+		}
+		if want := engine.MaxOutputBytes + len(engine.OutputTruncatedMarker); len(out) != want {
+			t.Errorf("expected %s length %d, got %d", name, want, len(out))
+		}
+	}
+
+	small, err := executor.Execute(ctx, "sh", "echo small")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(small.Stdout, engine.OutputTruncatedMarker) {
+		t.Fatalf("unexpected truncation marker in small output %q", small.Stdout)
+	}
+}
+
+func TestSandboxExecutor_WorkspaceClearedBetweenRuns(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	executor := engine.NewSandboxExecutor(t.TempDir())
+	if _, err := executor.Execute(ctx, "sh", "echo secret > leftover.txt; mkdir -p sub && touch sub/nested"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	res, err := executor.Execute(ctx, "sh", "ls -A")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out := strings.TrimSpace(res.Stdout); out != "" {
+		t.Fatalf("expected empty workspace on second run, got %q", out)
+	}
+}
+
+func TestNewSandboxExecutor_WorkspaceCreateError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// A regular file in the path makes MkdirAll fail.
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor := engine.NewSandboxExecutor(filepath.Join(blocker, "workspace"))
+	res, err := executor.Execute(ctx, "sh", "echo hello")
+	if err == nil || !strings.Contains(err.Error(), "workspace") {
+		t.Fatalf("expected workspace setup error, got err=%v res=%+v", err, res)
+	}
+}
+
+func TestSandboxExecutor_SerializesExecutions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	executor := engine.NewSandboxExecutor(t.TempDir())
+	// mkdir is atomic: it fails if another run currently holds the lock dir.
+	lock := filepath.Join(t.TempDir(), "lock")
+	script := fmt.Sprintf("mkdir %[1]s || { echo overlap; exit 1; }; sleep 0.2; rmdir %[1]s", lock)
+
+	const numRuns = 3
+	var wg sync.WaitGroup
+	errCh := make(chan error, numRuns)
+	for i := 0; i < numRuns; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := executor.Execute(ctx, "sh", script)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if res.ExitCode != 0 {
+				errCh <- fmt.Errorf("executions overlapped: stdout=%q stderr=%q", res.Stdout, res.Stderr)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+}
+
+func TestSandboxExecutor_RunsAsNobodyWhenRoot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	executor := engine.NewSandboxExecutor(t.TempDir())
+	res, err := executor.Execute(ctx, "sh", "id -u; touch owned && echo wrote")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lines := strings.Fields(res.Stdout)
+	if len(lines) != 2 || lines[1] != "wrote" {
+		t.Fatalf("expected uid and successful workspace write, got stdout=%q stderr=%q", res.Stdout, res.Stderr)
+	}
+	if os.Geteuid() != 0 {
+		if want := strconv.Itoa(os.Geteuid()); lines[0] != want {
+			t.Fatalf("expected child to run as current uid %s, got %s", want, lines[0])
+		}
+		t.Skip("dropping to uid 65534 requires running the test as root")
+	}
+	if lines[0] != "65534" {
+		t.Fatalf("expected child uid 65534, got %s", lines[0])
+	}
+
+	// Python scripts are written by the server and must be readable by the child.
+	pyRes, err := executor.Execute(ctx, "python", "import os\nprint(os.getuid())")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := strings.TrimSpace(pyRes.Stdout); got != "65534" {
+		t.Fatalf("expected python child uid 65534, got %q (stderr: %s)", got, pyRes.Stderr)
 	}
 }

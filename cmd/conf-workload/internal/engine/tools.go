@@ -15,19 +15,37 @@
 package engine
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
+// waitDelay bounds how long Execute waits for output pipes after the child is killed.
+const waitDelay = 500 * time.Millisecond
+
+// sandboxUID and sandboxGID are the ids ("nobody") scripts run as when the server is root.
+const (
+	sandboxUID = 65534
+	sandboxGID = 65534
+)
+
 // SandboxExecutor manages isolated execution of code scripts inside a workspace directory.
 type SandboxExecutor struct {
 	WorkspaceDir string
+
+	// mu ensures only one script runs at a time, since runs share the workspace.
+	mu sync.Mutex
+	// initErr records a workspace setup failure, reported by Execute.
+	initErr error
 }
 
 // NewSandboxExecutor creates a new SandboxExecutor with the specified workspace directory.
@@ -35,13 +53,47 @@ func NewSandboxExecutor(workspaceDir string) *SandboxExecutor {
 	if workspaceDir == "" {
 		workspaceDir = "/tmp/workspace"
 	}
-	_ = os.MkdirAll(workspaceDir, 0o755)
-	return &SandboxExecutor{WorkspaceDir: workspaceDir}
+	s := &SandboxExecutor{WorkspaceDir: workspaceDir}
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		s.initErr = fmt.Errorf("failed to create workspace: %w", err)
+	} else if os.Geteuid() == 0 {
+		if err := os.Chown(workspaceDir, sandboxUID, sandboxGID); err != nil {
+			s.initErr = fmt.Errorf("failed to chown workspace: %w", err)
+		}
+	}
+	return s
+}
+
+// clearWorkspace removes everything left in the workspace by earlier runs.
+func (s *SandboxExecutor) clearWorkspace() error {
+	entries, err := os.ReadDir(s.WorkspaceDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read workspace: %w", err)
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(s.WorkspaceDir, e.Name())); err != nil {
+			return fmt.Errorf("failed to clear workspace: %w", err)
+		}
+	}
+	return nil
 }
 
 // Execute runs the provided script in the specified language within the workspace.
 func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script string) (*types.ExecutionResult, error) {
+	if s.initErr != nil {
+		return nil, s.initErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.clearWorkspace(); err != nil {
+		return nil, err
+	}
+
 	start := time.Now()
+	runAsNobody := os.Geteuid() == 0
 	var cmd *exec.Cmd
 
 	switch lang {
@@ -58,6 +110,11 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 		}
 		if err := tmpFile.Close(); err != nil {
 			return nil, fmt.Errorf("failed to close script file: %w", err)
+		}
+		if runAsNobody {
+			if err := os.Chown(tmpFile.Name(), sandboxUID, sandboxGID); err != nil {
+				return nil, fmt.Errorf("failed to chown script file: %w", err)
+			}
 		}
 
 		pythonBin := "python3"
@@ -79,10 +136,21 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
+	var stdoutBuf, stderrBuf limitWriter
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	cmd.Dir = s.WorkspaceDir
+	// Run the child in its own process group so a timeout kills every descendant.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if runAsNobody {
+		// Never run model-generated code as root.
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: sandboxUID, Gid: sandboxGID}
+	}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// Bound how long Run waits on pipes held open by escaped descendants.
+	cmd.WaitDelay = waitDelay
 
 	err := cmd.Run()
 	duration := time.Since(start).Milliseconds()
