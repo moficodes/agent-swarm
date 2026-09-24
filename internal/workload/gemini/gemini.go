@@ -77,10 +77,10 @@ func WithResearchDataHandler(h ResearchDataHandler) Option {
 	return func(c *Client) { c.research = h }
 }
 
-// WithSyntaxChecker replaces the check a proposed script gets before it
+// WithScriptChecker replaces the check a proposed script gets before it
 // goes to the attendee for approval.
-func WithSyntaxChecker(sc SyntaxChecker) Option {
-	return func(c *Client) { c.checkSyntax = sc }
+func WithScriptChecker(sc ScriptChecker) Option {
+	return func(c *Client) { c.checkScript = sc }
 }
 
 // Client runs one Gemini turn, including tool calls.
@@ -88,7 +88,7 @@ type Client struct {
 	cfg         Config
 	transport   http.RoundTripper
 	research    ResearchDataHandler
-	checkSyntax SyntaxChecker
+	checkScript ScriptChecker
 }
 
 // New returns a client whose model calls go through the relay, so Generate
@@ -101,7 +101,7 @@ func New(cfg Config, opts ...Option) *Client {
 		cfg:         cfg,
 		transport:   relay.Transport{},
 		research:    cannedResearchData,
-		checkSyntax: PythonSyntaxError,
+		checkScript: ScriptProblem,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -171,11 +171,11 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 		}
 
 		if approval != nil && !retried && turn < maxTurns-1 {
-			if msg := c.checkSyntax(ctx, approval.Language, approval.Code); msg != "" {
+			if msg := c.checkScript(ctx, approval.Language, approval.Code); msg != "" {
 				retried = true
 				contents = append(contents, cand, &genai.Content{Role: "user", Parts: []*genai.Part{{
 					FunctionResponse: &genai.FunctionResponse{Name: approvalCall.Name, Response: map[string]any{
-						"error": "The script does not compile: " + msg + ". Fix it and call " + approvalCall.Name + " again.",
+						"error": "The script cannot run in the sandbox: " + msg + ". Fix it and call " + approvalCall.Name + " again.",
 					}},
 				}}})
 				continue

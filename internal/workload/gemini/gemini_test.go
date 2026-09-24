@@ -72,7 +72,7 @@ func TestGenerate_DisabledConfig(t *testing.T) {
 }
 
 func TestGenerate_ApprovalCallBecomesPendingApproval(t *testing.T) {
-	fake := geminitest.New(t, geminitest.ApprovalResponse("count files", "ls | wc -l", "sh"))
+	fake := geminitest.New(t, geminitest.ApprovalResponse("count files", "import os\nprint(len(os.listdir('.')))", "python"))
 	c := newClient(fake)
 
 	msg, err := c.Generate(context.Background(), nil, "how many files?")
@@ -82,7 +82,7 @@ func TestGenerate_ApprovalCallBecomesPendingApproval(t *testing.T) {
 	if msg.Approval == nil {
 		t.Fatal("Approval = nil, want an approval request")
 	}
-	if msg.Approval.Code != "ls | wc -l" || msg.Approval.Language != "sh" || msg.Approval.RiskLevel != types.RiskHigh {
+	if msg.Approval.Code != "import os\nprint(len(os.listdir('.')))" || msg.Approval.Language != "python" || msg.Approval.RiskLevel != types.RiskHigh {
 		t.Errorf("Approval = %+v", msg.Approval)
 	}
 	if !strings.HasPrefix(msg.Approval.ApprovalID, "app-") {
@@ -188,7 +188,7 @@ func TestToolDeclarations_CodeIsLimitedToTheStandardLibrary(t *testing.T) {
 }
 
 // fakeChecker reports a syntax error for the scripts in broken.
-func fakeChecker(broken ...string) gemini.SyntaxChecker {
+func fakeChecker(broken ...string) gemini.ScriptChecker {
 	return func(_ context.Context, _, code string) string {
 		for _, b := range broken {
 			if code == b {
@@ -204,7 +204,7 @@ func TestGenerate_BrokenScriptGoesBackToTheModelForAFix(t *testing.T) {
 		geminitest.ApprovalResponse("sum", "print('a\nb')", "python"),
 		geminitest.ApprovalResponse("sum", "print('a\\nb')", "python"),
 	)
-	c := newClient(fake, gemini.WithSyntaxChecker(fakeChecker("print('a\nb')")))
+	c := newClient(fake, gemini.WithScriptChecker(fakeChecker("print('a\nb')")))
 
 	msg, err := c.Generate(context.Background(), nil, "sum it")
 	if err != nil {
@@ -224,7 +224,7 @@ func TestGenerate_BrokenScriptGoesBackToTheModelForAFix(t *testing.T) {
 
 func TestGenerate_BrokenScriptIsRetriedOnlyOnce(t *testing.T) {
 	fake := geminitest.New(t, geminitest.ApprovalResponse("sum", "print('a\nb')", "python"))
-	c := newClient(fake, gemini.WithSyntaxChecker(fakeChecker("print('a\nb')")))
+	c := newClient(fake, gemini.WithScriptChecker(fakeChecker("print('a\nb')")))
 
 	msg, err := c.Generate(context.Background(), nil, "sum it")
 	if err != nil {
@@ -241,7 +241,7 @@ func TestGenerate_BrokenScriptIsRetriedOnlyOnce(t *testing.T) {
 func TestGenerate_NoRetryOnTheLastTurn(t *testing.T) {
 	research := geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "cpu"})
 	fake := geminitest.New(t, research, research, geminitest.ApprovalResponse("sum", "print('a\nb')", "python"))
-	c := newClient(fake, gemini.WithSyntaxChecker(fakeChecker("print('a\nb')")))
+	c := newClient(fake, gemini.WithScriptChecker(fakeChecker("print('a\nb')")))
 
 	msg, err := c.Generate(context.Background(), nil, "sum it")
 	if err != nil {
@@ -255,23 +255,44 @@ func TestGenerate_NoRetryOnTheLastTurn(t *testing.T) {
 	}
 }
 
-func TestPythonSyntaxError(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 is not installed")
+// requireStdlibNames skips when python3 is missing or older than 3.10, which
+// added sys.stdlib_module_names; the check then reports nothing.
+func requireStdlibNames(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("python3", "-c", "import sys; sys.stdlib_module_names").Run(); err != nil {
+		t.Skip("needs python3 3.10 or later")
 	}
+}
+
+func TestScriptProblem(t *testing.T) {
+	requireStdlibNames(t)
 	ctx := context.Background()
-	if got := gemini.PythonSyntaxError(ctx, "python", "print(1)\n"); got != "" {
-		t.Errorf("valid script: %q, want none", got)
-	}
-	// Checking only compiles; running this would exit nonzero.
-	if got := gemini.PythonSyntaxError(ctx, "python", "raise SystemExit(3)\n"); got != "" {
-		t.Errorf("script was run, not just compiled: %q", got)
-	}
-	got := gemini.PythonSyntaxError(ctx, "python", "x = 1\nprint('a\nb')\n")
-	if !strings.Contains(got, "SyntaxError") || !strings.Contains(got, "line 2") {
-		t.Errorf("broken script: %q, want a SyntaxError on line 2", got)
-	}
-	if got := gemini.PythonSyntaxError(ctx, "sh", "if then fi ((("); got != "" {
-		t.Errorf("shell script: %q, want no check", got)
+	for _, tc := range []struct {
+		name, lang, code, want string
+	}{
+		{"clean stdlib script", "python", "import statistics, json\nfrom collections import Counter\nprint(statistics.mean([1, 2]))\n", ""},
+		{"checked, not run", "python", "raise SystemExit(3)\n", ""},
+		{"py alias", "py", "print(1)\n", ""},
+		{"syntax error", "python", "x = 1\nprint('a\nb')\n", "line 2"},
+		{"compile-only error", "python", "return 5\n", "'return' outside function"},
+		{"third-party import", "python", "import pandas as pd\n", "module pandas is not installed"},
+		{"third-party from-import", "python", "from numpy import array\n", "module numpy is not installed"},
+		{"dotted third-party import", "python", "import matplotlib.pyplot as plt\n", "module matplotlib is not installed"},
+		{"import inside a function", "python", "def f():\n    import requests\n", "module requests is not installed"},
+		{"relative import", "python", "from . import helpers\n", "relative import"},
+		{"network module", "python", "import urllib.request\n", "no network access"},
+		{"network from-import", "python", "from socket import socket\n", "no network access"},
+		{"shell script", "sh", "echo hi", "only Python scripts can run in this sandbox"},
+		{"bash script", "bash", "echo hi", "only Python scripts can run in this sandbox"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := gemini.ScriptProblem(ctx, tc.lang, tc.code)
+			if tc.want == "" && got != "" {
+				t.Errorf("ScriptProblem = %q, want none", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("ScriptProblem = %q, want it to contain %q", got, tc.want)
+			}
+		})
 	}
 }
