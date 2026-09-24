@@ -59,9 +59,28 @@ func NewSandboxExecutor(workspaceDir string) *SandboxExecutor {
 	} else if os.Geteuid() == 0 {
 		if err := os.Chown(workspaceDir, sandboxUID, sandboxGID); err != nil {
 			s.initErr = fmt.Errorf("failed to chown workspace: %w", err)
+		} else if err := MakeTraversable("/"); err != nil {
+			s.initErr = err
 		}
 	}
 	return s
+}
+
+// MakeTraversable opens an owner-only dir to everyone for reading and search.
+// Substrate composes an actor's rootfs with "/" at 0700, which leaves nobody
+// unable to resolve any path, so the executor opens it before running scripts.
+func MakeTraversable(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("failed to stat %s: %w", dir, err)
+	}
+	if fi.Mode().Perm()&0o001 != 0 {
+		return nil
+	}
+	if err := os.Chmod(dir, fi.Mode().Perm()|0o055); err != nil {
+		return fmt.Errorf("failed to open %s to the sandbox user: %w", dir, err)
+	}
+	return nil
 }
 
 // sandboxEnv is the whole environment model-generated code sees, so no

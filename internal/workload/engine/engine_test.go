@@ -603,3 +603,40 @@ func TestSandboxExecutor_RunsAsNobodyWhenRoot(t *testing.T) {
 		t.Fatalf("expected python child uid 65534, got %q (stderr: %s)", got, pyRes.Stderr)
 	}
 }
+
+func TestMakeTraversable_OpensOwnerOnlyDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.MakeTraversable(dir); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o755 {
+		t.Errorf("mode = %o, want 755", got)
+	}
+}
+
+func TestMakeTraversable_LeavesTraversableDirAlone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(dir, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.MakeTraversable(dir); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o711 {
+		t.Errorf("mode = %o, want 711 unchanged", got)
+	}
+}
