@@ -22,6 +22,17 @@ containers:
 - name: conf-workload
   image: ko://github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload
   command: ["/ko-app/conf-workload"]
+  env:
+  - name: MODEL_PROXY_URL
+    value: "http://conf-gateway-internal.ate-demo-conf.svc:8091"
+  - name: VERTEX_PROJECT
+    value: "${VERTEX_PROJECT}"
+  - name: VERTEX_LOCATION
+    value: "${VERTEX_LOCATION}"
+  - name: GEMINI_MODEL
+    value: "gemini-2.5-flash"
+  - name: DEMO_MOCK_LLM
+    value: "${DEMO_MOCK_LLM}"
 resources:
   limits:
   - name: cpu

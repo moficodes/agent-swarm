@@ -1,0 +1,192 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# conf-gateway serves the attendee, feed and stage pages, proxies chat to
+# each attendee's actor through atenet, reads actor state from ateapi with
+# kubectl-ate, and forwards actor model calls to Vertex AI.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: conf-gateway
+  namespace: ate-demo-conf
+  annotations:
+    iam.gke.io/gcp-service-account: ${GATEWAY_GSA}
+---
+# kubectl-ate mints an ate-client token to call ateapi.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: conf-gateway-ate-client
+  namespace: ate-system
+rules:
+- apiGroups: [""]
+  resources: ["serviceaccounts/token"]
+  resourceNames:
+  - ate-client
+  verbs: ["create"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: conf-gateway-ate-client
+  namespace: ate-system
+subjects:
+- kind: ServiceAccount
+  name: conf-gateway
+  namespace: ate-demo-conf
+roleRef:
+  kind: Role
+  name: conf-gateway-ate-client
+  apiGroup: rbac.authorization.k8s.io
+---
+# kubectl-ate reads the ateapi CA from a ClusterTrustBundle.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: conf-gateway-trust-bundles
+rules:
+- apiGroups: ["certificates.k8s.io"]
+  resources: ["clustertrustbundles"]
+  verbs: ["list", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: conf-gateway-trust-bundles
+subjects:
+- kind: ServiceAccount
+  name: conf-gateway
+  namespace: ate-demo-conf
+roleRef:
+  kind: ClusterRole
+  name: conf-gateway-trust-bundles
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conf-gateway
+  namespace: ate-demo-conf
+  labels:
+    app: conf-gateway
+spec:
+  # One replica: sessions, feed history and pending approvals live in memory.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: conf-gateway
+  template:
+    metadata:
+      labels:
+        app: conf-gateway
+    spec:
+      serviceAccountName: conf-gateway
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: conf-gateway
+        image: ${GATEWAY_IMAGE}
+        ports:
+        - name: http
+          containerPort: 8090
+        - name: model-proxy
+          containerPort: 8091
+        env:
+        - name: PORT
+          value: "8090"
+        - name: MODEL_PROXY_ADDR
+          value: ":8091"
+        - name: ROUTER_URL
+          value: "http://atenet-router.ate-system.svc:80"
+        - name: ROUTER_STATUS_DISCOVERY
+          value: "endpointslices"
+        - name: ATEAPI_ENDPOINT
+          value: "api.ate-system.svc:443"
+        - name: KUBECTL_ATE
+          value: "/usr/local/bin/kubectl-ate"
+        - name: VERTEX_PROJECT
+          value: "${VERTEX_PROJECT}"
+        - name: VERTEX_LOCATION
+          value: "${VERTEX_LOCATION}"
+        - name: MODEL_ALLOWLIST
+          value: "gemini-2.5-flash"
+        - name: DEMO_MOCK_LLM
+          value: "${DEMO_MOCK_LLM}"
+        - name: HMAC_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: conf-gateway
+              key: HMAC_SECRET
+        - name: PRESENTER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: conf-gateway
+              key: PRESENTER_TOKEN
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+# Presenter and attendee entry point. Plain HTTP unless DEMO_DOMAIN adds
+# the Ingress below; see the README before exposing it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: conf-gateway
+  namespace: ate-demo-conf
+spec:
+  type: LoadBalancer
+  selector:
+    app: conf-gateway
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+# Model proxy for actors only; never exposed outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: conf-gateway-internal
+  namespace: ate-demo-conf
+spec:
+  type: ClusterIP
+  selector:
+    app: conf-gateway
+  ports:
+  - name: model-proxy
+    port: 8091
+    targetPort: model-proxy

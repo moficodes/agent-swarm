@@ -1,0 +1,46 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Fronts the conf-gateway Service with a GKE-managed TLS certificate for
+# DEMO_DOMAIN. Applied only when DEMO_DOMAIN is set; the gateway.yaml.tmpl
+# Service works over plain HTTP without it.
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: conf-gateway
+  namespace: ate-demo-conf
+spec:
+  domains:
+  - ${DEMO_DOMAIN}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: conf-gateway
+  namespace: ate-demo-conf
+  annotations:
+    networking.gke.io/managed-certificates: conf-gateway
+    kubernetes.io/ingress.class: "gce"
+spec:
+  rules:
+  - host: ${DEMO_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: conf-gateway
+            port:
+              number: 80
