@@ -61,6 +61,33 @@ const ModelKeyHeader = "X-Conf-Model-Key"
 // router, to drop the actor's conversation history and pending approval.
 const ClearHistoryPath = "/api/history/clear"
 
+// ModelResultPath is the actor endpoint the gateway POSTs a ModelResult to,
+// through the router.
+const ModelResultPath = "/api/model-result"
+
+// ModelCall is a Vertex AI generateContent request an actor hands to the
+// gateway, which makes the call because actors have no egress. Path is the
+// Vertex path, starting at the API version.
+type ModelCall struct {
+	CallID string `json:"call_id"`
+	Path   string `json:"path"`
+	Body   []byte `json:"body"`
+}
+
+// ModelCallStep is an actor's answer, in place of a ChatMessage, when its
+// turn needs the gateway to make a model call.
+type ModelCallStep struct {
+	ModelCall *ModelCall `json:"model_call"`
+}
+
+// ModelResult is the gateway's answer to a ModelCall: Vertex AI's status and
+// body, or the gateway's own refusal.
+type ModelResult struct {
+	CallID string `json:"call_id"`
+	Status int    `json:"status"`
+	Body   []byte `json:"body"`
+}
+
 // ReplySource says which engine produced an assistant reply.
 type ReplySource string
 
