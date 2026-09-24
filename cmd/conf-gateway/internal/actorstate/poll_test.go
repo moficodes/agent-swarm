@@ -17,6 +17,7 @@ package actorstate_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,12 +65,14 @@ func TestPoll_UpdatesBoardAndReportsErrors(t *testing.T) {
 		t.Errorf("after good poll: %+v", v)
 	}
 
-	ctrl.results <- listResult{err: errors.New("ateapi unreachable")}
+	ctrl.results <- listResult{err: errors.New("kubectl-ate --endpoint api.internal:443 get actors: exit status 1: dial failed")}
 	if err := <-observed; err == nil {
 		t.Fatal("observe got nil error")
 	}
 	if v, _ := board.View("a"); v.State != types.StateUnavailable {
 		t.Errorf("after failed poll: %+v", v)
+	} else if strings.Contains(v.StateDetail, "api.internal") || strings.Contains(v.StateDetail, "exit status") {
+		t.Errorf("StateDetail %q exposes the command error to attendees", v.StateDetail)
 	}
 
 	cancel()

@@ -156,9 +156,9 @@ func WithStaticFS(staticFS fs.FS) Option {
 	}
 }
 
-// WithRouterStatus polls a every statusInterval and reports its Snapshot
-// through telemetry. Without this option, telemetry always reports
-// parking_available: false.
+// WithRouterStatus polls the aggregator a every statusInterval and reports
+// its Snapshot through telemetry. Without this option, telemetry always
+// reports parking_available: false.
 func WithRouterStatus(a *routerstatus.Aggregator) Option {
 	return func(g *Gateway) {
 		if a != nil {

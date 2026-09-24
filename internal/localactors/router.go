@@ -106,7 +106,9 @@ func (r *Router) actor(name string) http.Handler {
 // Parked returns how many requests are waiting for a slot.
 func (r *Router) Parked() int { return int(r.parked.Load()) }
 
-// Forget drops an actor so its next request starts a fresh instance.
+// Forget drops an actor so its next request starts a fresh instance. It does
+// not wait for requests already dispatched to the old instance, which keep
+// running against it; call it only while the actor has none in flight.
 func (r *Router) Forget(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -16,14 +16,20 @@ package actorstate
 
 import (
 	"context"
+	"log"
 	"time"
 )
+
+// unavailableReason is what attendees see when a poll fails. The error
+// itself, which names internal endpoints and carries stderr, is only logged.
+const unavailableReason = "ateapi unreachable"
 
 // Poll lists actors every interval until ctx ends, applying each result to
 // b. observe, if set, receives each poll's latency and error.
 func Poll(ctx context.Context, c ActorControl, interval time.Duration, b *Board, observe func(time.Duration, error)) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	var lastErr string
 	for {
 		start := time.Now()
 		pollCtx, cancel := context.WithTimeout(ctx, max(interval*5, 5*time.Second))
@@ -33,8 +39,13 @@ func Poll(ctx context.Context, c ActorControl, interval time.Duration, b *Board,
 			return
 		}
 		if err != nil {
-			b.SetUnavailable(err.Error())
+			if err.Error() != lastErr {
+				log.Printf("[gateway] listing actors: %v", err)
+				lastErr = err.Error()
+			}
+			b.SetUnavailable(unavailableReason)
 		} else {
+			lastErr = ""
 			b.SetStatuses(statuses)
 		}
 		if observe != nil {

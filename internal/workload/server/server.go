@@ -127,8 +127,9 @@ func (s *WorkloadServer) ModelKey() string {
 }
 
 // Handler returns the HTTP handler for the server. Every request that
-// carries a model key refreshes the one the Gemini client uses, except a
-// history clear, which must present the key already held.
+// carries a model key refreshes the one the Gemini client uses; one without
+// a key keeps the prior key. The key is never read from a request body. A
+// history clear must present the key already held and never replaces it.
 func (s *WorkloadServer) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == types.ClearHistoryPath {
