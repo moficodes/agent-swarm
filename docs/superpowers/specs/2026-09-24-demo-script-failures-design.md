@@ -131,7 +131,7 @@ pending approval was not itself a fix, `handleApprove`:
    run *types.ExecutionResult) (*types.ChatMessage, error)`.
 
 `Fix` sends the history (as `BuildContents` builds it) plus a prompt that
-carries the failed code and its stderr, truncated to 2 KiB, and asks for one
+carries the failed code and the last 2 KiB of its stderr (a traceback ends with the exception), and asks for one
 sentence on what went wrong and a corrected script through
 `execute_sandbox_code`. The corrected script goes through the same check and
 retry budget as `Generate`. A reply without an approval, or a failed check

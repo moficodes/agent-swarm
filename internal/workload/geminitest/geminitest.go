@@ -173,3 +173,14 @@ func ApprovalResponse(summary, code, language string) string {
 		"summary": summary, "code": code, "language": language, "risk_level": "HIGH",
 	})
 }
+
+// ExplainedApprovalResponse is a reply in which the model explains itself in
+// text and asks to run code through execute_sandbox_code.
+func ExplainedApprovalResponse(text, summary, code, language string) string {
+	return response(
+		map[string]any{"text": text},
+		map[string]any{"functionCall": map[string]any{"name": "execute_sandbox_code", "args": map[string]any{
+			"summary": summary, "code": code, "language": language,
+		}}},
+	)
+}

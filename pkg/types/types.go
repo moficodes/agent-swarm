@@ -194,6 +194,8 @@ type ExecutionResult struct {
 	Stderr     string `json:"stderr"`
 	ExitCode   int    `json:"exit_code"`
 	DurationMs int64  `json:"duration_ms"`
+	// Corrected marks a failed run the agent has already proposed a fix for.
+	Corrected bool `json:"corrected,omitempty"`
 }
 
 // StageTelemetry is the stage view of the router, workers and actors.

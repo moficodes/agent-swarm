@@ -344,3 +344,87 @@ func TestScriptProblem(t *testing.T) {
 		})
 	}
 }
+
+var pandasFailure = &types.ExecutionResult{
+	ExitCode: 1,
+	Stderr:   "Traceback (most recent call last):\n  File \"script.py\", line 1, in <module>\nModuleNotFoundError: No module named 'pandas'\n",
+}
+
+var pandasScript = &types.ApprovalRequest{ApprovalID: "app-1", Code: "import pandas as pd\nprint(pd.Series([1, 2]).mean())", Language: "python"}
+
+func TestFix_SendsTheFailedScriptAndReturnsTheCorrection(t *testing.T) {
+	fake := geminitest.New(t, geminitest.ExplainedApprovalResponse(
+		"pandas isn't installed here, so this version uses statistics.",
+		"mean", "import statistics\nprint(statistics.mean([1, 2]))", "python"))
+	c := newClient(fake, gemini.WithScriptChecker(fakeChecker()))
+
+	msg, err := c.Fix(context.Background(), nil, pandasScript, pandasFailure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "pandas isn't installed here, so this version uses statistics." {
+		t.Errorf("Content = %q, want the model's explanation", msg.Content)
+	}
+	if msg.Approval == nil || msg.Approval.Code != "import statistics\nprint(statistics.mean([1, 2]))" {
+		t.Fatalf("Approval = %+v, want the corrected script", msg.Approval)
+	}
+	body := string(fake.Requests()[0].Body)
+	for _, want := range []string{"import pandas as pd", "No module named 'pandas'", "exit code 1"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("fix request lacks %q: %s", want, body)
+		}
+	}
+}
+
+func TestFix_DefaultsTheExplanation(t *testing.T) {
+	fake := geminitest.New(t, geminitest.ApprovalResponse("mean", "print(1.5)", "python"))
+	msg, err := newClient(fake, gemini.WithScriptChecker(fakeChecker())).Fix(context.Background(), nil, pandasScript, pandasFailure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg.Content, "corrected") {
+		t.Errorf("Content = %q, want a default explanation", msg.Content)
+	}
+}
+
+func TestFix_KeepsTheTailOfLongErrorOutput(t *testing.T) {
+	fake := geminitest.New(t, geminitest.ApprovalResponse("mean", "print(1.5)", "python"))
+	run := &types.ExecutionResult{ExitCode: 1, Stderr: strings.Repeat("x", 5000) + "\nValueError: the real error"}
+	if _, err := newClient(fake, gemini.WithScriptChecker(fakeChecker())).Fix(context.Background(), nil, pandasScript, run); err != nil {
+		t.Fatal(err)
+	}
+	body := string(fake.Requests()[0].Body)
+	if !strings.Contains(body, "ValueError: the real error") {
+		t.Error("fix request lost the end of the error output")
+	}
+	if strings.Contains(body, strings.Repeat("x", 2100)) {
+		t.Error("fix request carries more than 2 KiB of error output")
+	}
+}
+
+func TestFix_TimeoutTellsTheModelAboutTheLimit(t *testing.T) {
+	fake := geminitest.New(t, geminitest.ApprovalResponse("mean", "print(1.5)", "python"))
+	run := &types.ExecutionResult{ExitCode: -1, Stderr: "execution context error: context deadline exceeded"}
+	if _, err := newClient(fake, gemini.WithScriptChecker(fakeChecker())).Fix(context.Background(), nil, pandasScript, run); err != nil {
+		t.Fatal(err)
+	}
+	if body := string(fake.Requests()[0].Body); !strings.Contains(body, "5 second limit") {
+		t.Errorf("fix request for a timeout should mention the limit: %s", body)
+	}
+}
+
+func TestFix_ReplyWithoutAScriptIsAnError(t *testing.T) {
+	fake := geminitest.New(t, geminitest.TextResponse("Sorry, I can't."))
+	_, err := newClient(fake).Fix(context.Background(), nil, pandasScript, pandasFailure)
+	if !errors.Is(err, gemini.ErrNoFix) {
+		t.Fatalf("err = %v, want ErrNoFix", err)
+	}
+}
+
+func TestFix_CorrectionThatFailsTheCheckTwiceIsAnError(t *testing.T) {
+	fake := geminitest.New(t, geminitest.ApprovalResponse("mean", "print('a\nb')", "python"))
+	c := newClient(fake, gemini.WithScriptChecker(fakeChecker("print('a\nb')")))
+	if _, err := c.Fix(context.Background(), nil, pandasScript, pandasFailure); !errors.Is(err, gemini.ErrNoFix) {
+		t.Fatalf("err = %v, want ErrNoFix", err)
+	}
+}
