@@ -270,3 +270,27 @@ func TestKey_DiffersFromJWTSigningInput(t *testing.T) {
 		t.Errorf("Key MAC %q equals HMAC over the undomained JWT signing input; domain separation is broken", got)
 	}
 }
+
+func TestNew_ValidatesLocationAndUpstream(t *testing.T) {
+	ts := oauth2.StaticTokenSource(&oauth2.Token{})
+	for _, tc := range []struct {
+		location, upstream string
+		ok                 bool
+	}{
+		{"us-central1", "", true},
+		{"europe-west4", "https://europe-west4-aiplatform.googleapis.com", true},
+		{"loc", "http://127.0.0.1:8080", true},
+		{"x.evil.com/#", "", false},
+		{"US-CENTRAL1", "", false},
+		{"us-central1", "http://aiplatform.example.com", false},
+		{"us-central1", "https://", false},
+		{"us-central1", "https://host/path", false},
+		{"us-central1", "https://user@host", false},
+		{"us-central1", "https://host?q=1", false},
+	} {
+		_, err := modelproxy.New(modelproxy.Config{Secret: testSecret, Project: "p", Location: tc.location, Upstream: tc.upstream, TokenSource: ts})
+		if (err == nil) != tc.ok {
+			t.Errorf("New(location %q, upstream %q) error = %v, want ok=%v", tc.location, tc.upstream, err, tc.ok)
+		}
+	}
+}

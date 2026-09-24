@@ -19,8 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -38,6 +41,10 @@ const (
 	defaultMaxInFlight = 2
 	maxResponseBody    = 8 << 20
 )
+
+// locationPattern matches a GCP region such as us-central1. The location
+// becomes part of the host that receives the gateway's access token.
+var locationPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 var generatePath = regexp.MustCompile(`^/model/(v1[a-z0-9]*)/projects/([^/]+)/locations/([^/]+)/publishers/google/models/([^/:]+):generateContent$`)
 
@@ -80,6 +87,14 @@ func New(cfg Config) (*Proxy, error) {
 		if cfg.TokenSource == nil {
 			return nil, errors.New("modelproxy: token source is required with a project")
 		}
+		if !locationPattern.MatchString(cfg.Location) {
+			return nil, fmt.Errorf("modelproxy: location %q is not a GCP region", cfg.Location)
+		}
+		if cfg.Upstream != "" {
+			if err := validUpstream(cfg.Upstream); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if cfg.Upstream == "" {
 		cfg.Upstream = "https://" + cfg.Location + "-aiplatform.googleapis.com"
@@ -99,6 +114,28 @@ func New(cfg Config) (*Proxy, error) {
 		inFlight: map[string]int{},
 		usage:    map[string]types.ModelUsage{},
 	}, nil
+}
+
+// validUpstream requires a bare https origin, or http on a loopback host for
+// local fakes, so the access token cannot be sent anywhere else.
+func validUpstream(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("modelproxy: upstream %q: %w", raw, err)
+	}
+	loopback := false
+	if ip := net.ParseIP(u.Hostname()); ip != nil {
+		loopback = ip.IsLoopback()
+	} else {
+		loopback = u.Hostname() == "localhost"
+	}
+	switch {
+	case u.Host == "" || u.User != nil || strings.TrimSuffix(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "":
+		return fmt.Errorf("modelproxy: upstream %q must be a scheme and host only", raw)
+	case u.Scheme != "https" && !(u.Scheme == "http" && loopback):
+		return fmt.Errorf("modelproxy: upstream %q must use https", raw)
+	}
+	return nil
 }
 
 // Enabled reports whether the proxy forwards requests.
