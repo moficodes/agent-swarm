@@ -512,6 +512,65 @@ func TestSandboxExecutor_SerializesExecutions(t *testing.T) {
 	}
 }
 
+func TestExecute_ChildSeesOnlyMinimalEnvironment(t *testing.T) {
+	t.Setenv("HMAC_SECRET", "must-not-leak")
+	t.Setenv("MODEL_PROXY_URL", "http://proxy")
+	t.Setenv("GEMINI_API_KEY", "leaked-gemini-key")
+	t.Setenv("GOOGLE_API_KEY", "leaked-google-key")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ws := t.TempDir()
+	executor := engine.NewSandboxExecutor(ws)
+
+	res, err := executor.Execute(ctx, "sh", "env")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]string{}
+	for _, line := range strings.Split(strings.TrimRight(res.Stdout, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("malformed env line %q", line)
+		}
+		env[k] = v
+	}
+
+	want := map[string]string{
+		"PATH": "/usr/local/bin:/usr/bin:/bin",
+		"HOME": ws,
+		"LANG": "C.UTF-8",
+	}
+	for k, v := range want {
+		if got, ok := env[k]; !ok || got != v {
+			t.Errorf("child env %s = %q, want %q", k, got, v)
+		}
+	}
+
+	if v, ok := env["HMAC_SECRET"]; ok {
+		t.Errorf("child env leaked HMAC_SECRET=%q", v)
+	}
+	if v, ok := env["MODEL_PROXY_URL"]; ok {
+		t.Errorf("child env leaked MODEL_PROXY_URL=%q", v)
+	}
+	// /bin/sh injects PWD, SHLVL, _ and (on some platforms) OLDPWD itself;
+	// they are not part of what the executor controls, so they're ignored.
+	shellInjected := map[string]bool{"PWD": true, "SHLVL": true, "_": true, "OLDPWD": true}
+	for k, v := range env {
+		if _, ok := want[k]; shellInjected[k] || ok {
+			continue
+		}
+		if strings.HasPrefix(k, "GEMINI") || strings.HasPrefix(k, "GOOGLE") {
+			t.Errorf("child env leaked %s=%q", k, v)
+		}
+	}
+}
+
 func TestSandboxExecutor_RunsAsNobodyWhenRoot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

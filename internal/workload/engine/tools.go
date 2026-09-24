@@ -64,6 +64,16 @@ func NewSandboxExecutor(workspaceDir string) *SandboxExecutor {
 	return s
 }
 
+// sandboxEnv is the whole environment model-generated code sees, so no
+// configuration of the actor process leaks into it.
+func sandboxEnv(workspace string) []string {
+	return []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"HOME=" + workspace,
+		"LANG=C.UTF-8",
+	}
+}
+
 // clearWorkspace removes everything left in the workspace by earlier runs.
 func (s *SandboxExecutor) clearWorkspace() error {
 	entries, err := os.ReadDir(s.WorkspaceDir)
@@ -140,6 +150,7 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	cmd.Dir = s.WorkspaceDir
+	cmd.Env = sandboxEnv(s.WorkspaceDir)
 	// Run the child in its own process group so a timeout kills every descendant.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if runAsNobody {
