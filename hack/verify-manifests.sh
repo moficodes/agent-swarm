@@ -46,7 +46,7 @@ render() {
 # every document has an apiVersion, a kind and a metadata.name — all without
 # contacting a cluster.
 check_objects() {
-  go run ./hack/checkmanifests <<<"$1"
+  go run ./demos/conference/hack/checkmanifests <<<"$1"
 }
 
 status=0
