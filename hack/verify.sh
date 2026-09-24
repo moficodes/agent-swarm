@@ -41,6 +41,7 @@ GATEWAY_URL_EXPLICIT=false
 ROUTER_URL="${ROUTER_URL:-http://localhost:8000}"
 STATUS_URL="${STATUS_URL:-http://localhost:4040}"
 CONCURRENCY="${CONCURRENCY:-10}"
+PRESENTER_TOKEN="${PRESENTER_TOKEN:-}"
 MOCK_MODE=false
 
 # Terminal color codes
@@ -89,6 +90,7 @@ Options:
   --router-url <url>       URL of the atenet router (default: http://localhost:8000)
   --status-url <url>       URL of the atenet router statusz endpoint (default: http://localhost:4040)
   --concurrency <N>        Number of concurrent requests for audience burst test (default: 10)
+  --presenter-token <key>  Gateway presenter key (default: \$PRESENTER_TOKEN; generated in --mock-mode)
   --mock-mode              Run verification using offline mock engine / local environment
 
 Examples:
@@ -136,6 +138,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --concurrency=*)
       CONCURRENCY="${1#*=}"
+      shift
+      ;;
+    --presenter-token)
+      PRESENTER_TOKEN="$2"
+      shift 2
+      ;;
+    --presenter-token=*)
+      PRESENTER_TOKEN="${1#*=}"
       shift
       ;;
     --mock-mode)
@@ -370,7 +380,11 @@ PYEOF
     STATUS_URL="http://127.0.0.1:${MOCK_ROUTER_PORT}"
     GATEWAY_URL="http://127.0.0.1:${MOCK_GATEWAY_PORT}"
 
+    if [[ -z "${PRESENTER_TOKEN}" ]]; then
+      PRESENTER_TOKEN="$(openssl rand -hex 16)"
+    fi
     PORT="${MOCK_GATEWAY_PORT}" \
+    PRESENTER_TOKEN="${PRESENTER_TOKEN}" \
     ROUTER_URL="${ROUTER_URL}" \
     STATUS_URL="${STATUS_URL}" \
     "${TMP_DIR}/conf-gateway" >/dev/null 2>&1 &
@@ -408,8 +422,16 @@ fi
 # Print configuration banner after URLs are finalized
 print_banner
 
+if [[ -z "${PRESENTER_TOKEN}" ]]; then
+  log_err "A presenter key is required for the stage, feed, and presenter APIs."
+  log_err "Pass --presenter-token or set PRESENTER_TOKEN to the key the gateway logged at startup."
+  exit 1
+fi
+# Sent on every request to a presenter-only page or API.
+PRESENTER_HDR=(-H "X-Presenter-Key: ${PRESENTER_TOKEN}")
+
 # Ensure clean starting state
-curl -s -X POST "${GATEWAY_URL}/api/reset" >/dev/null 2>&1 || true
+curl -s "${PRESENTER_HDR[@]}" -X POST "${GATEWAY_URL}/api/reset" >/dev/null 2>&1 || true
 
 # =========================================================================
 # Step 1: Health & Static UI Assets
@@ -426,7 +448,7 @@ REQUIRED_ASSETS=(
 )
 
 for asset_path in "${REQUIRED_ASSETS[@]}"; do
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${GATEWAY_URL}${asset_path}" || echo "000")
+  HTTP_CODE=$(curl -s "${PRESENTER_HDR[@]}" -o /dev/null -w "%{http_code}" "${GATEWAY_URL}${asset_path}" || echo "000")
   if [[ "${HTTP_CODE}" != "200" ]]; then
     log_err "Asset ${asset_path} returned HTTP ${HTTP_CODE} (expected 200)"
     log_fail "Step 1: Health & Static UI Assets"
@@ -628,7 +650,7 @@ log_pass "Step 5: Audience Burst & Request Parking Verified"
 # Step 6: Telemetry Endpoint
 # =========================================================================
 log_info "Step 6: Telemetry Endpoint"
-TELEM_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/stage/telemetry")
+TELEM_RESP=$(curl -s "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/stage/telemetry")
 
 WORKERS_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.workers | length' 2>/dev/null || echo 0)
 ACTORS_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.actors | length' 2>/dev/null || echo 0)
@@ -670,7 +692,7 @@ log_pass "Step 6: Telemetry Endpoint Verified"
 # =========================================================================
 log_info "Step 7: Audience Simulation Engine (/api/simulation)"
 SIM_START_PAYLOAD='{"action":"start","count":5}'
-SIM_START_CODE=$(curl -s -o "${TMP_DIR}/sim_start.json" -w "%{http_code}" --max-time 10 -X POST "${GATEWAY_URL}/api/simulation" \
+SIM_START_CODE=$(curl -s "${PRESENTER_HDR[@]}" -o "${TMP_DIR}/sim_start.json" -w "%{http_code}" --max-time 10 -X POST "${GATEWAY_URL}/api/simulation" \
   -H "Content-Type: application/json" \
   -d "${SIM_START_PAYLOAD}")
 
@@ -682,7 +704,7 @@ fi
 log_ok "Started audience simulation with count=5 via POST /api/simulation (HTTP 200 OK)"
 
 # Verify GET /api/simulation returns running: true
-SIM_STATUS_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/simulation")
+SIM_STATUS_RESP=$(curl -s "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/simulation")
 SIM_RUNNING=$(printf "%s" "${SIM_STATUS_RESP}" | jq -r .running 2>/dev/null || echo false)
 if [[ "${SIM_RUNNING}" != "true" ]]; then
   log_err "Expected running: true from GET /api/simulation, got '${SIM_RUNNING}'. Response: ${SIM_STATUS_RESP}"
@@ -711,7 +733,7 @@ log_ok "Segmented session allocation verified: human assigned ${HUMAN_ATTENDEE_I
 
 # Stop simulation via POST /api/simulation ({"action":"stop"})
 SIM_STOP_PAYLOAD='{"action":"stop"}'
-SIM_STOP_CODE=$(curl -s -o "${TMP_DIR}/sim_stop.json" -w "%{http_code}" --max-time 10 -X POST "${GATEWAY_URL}/api/simulation" \
+SIM_STOP_CODE=$(curl -s "${PRESENTER_HDR[@]}" -o "${TMP_DIR}/sim_stop.json" -w "%{http_code}" --max-time 10 -X POST "${GATEWAY_URL}/api/simulation" \
   -H "Content-Type: application/json" \
   -d "${SIM_STOP_PAYLOAD}")
 
@@ -723,7 +745,7 @@ fi
 log_ok "Stopped audience simulation via POST /api/simulation (HTTP 200 OK)"
 
 # Verify GET /api/simulation returns running: false
-SIM_STOPPED_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/simulation")
+SIM_STOPPED_RESP=$(curl -s "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/simulation")
 SIM_RUNNING_STOPPED=$(printf "%s" "${SIM_STOPPED_RESP}" | jq -r .running 2>/dev/null || echo true)
 if [[ "${SIM_RUNNING_STOPPED}" != "false" ]]; then
   log_err "Expected running: false from GET /api/simulation, got '${SIM_RUNNING_STOPPED}'. Response: ${SIM_STOPPED_RESP}"
@@ -754,7 +776,7 @@ log_pass "Step 7: Audience Simulation Engine Verified"
 # =========================================================================
 TARGET_ACTOR_ID="${ATTENDEE_ID:-attendee-01}"
 log_info "Step 8: Actor Spotlight Inspector API (/api/actor/{id})"
-ACTOR_HTTP_CODE=$(curl -s -o "${TMP_DIR}/actor_details.json" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")
+ACTOR_HTTP_CODE=$(curl -s "${PRESENTER_HDR[@]}" -o "${TMP_DIR}/actor_details.json" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")
 
 if [[ "${ACTOR_HTTP_CODE}" != "200" ]]; then
   log_err "GET /api/actor/${TARGET_ACTOR_ID} returned HTTP ${ACTOR_HTTP_CODE} (expected 200)"
@@ -808,7 +830,7 @@ log_pass "Step 8: Actor Spotlight Inspector API Verified"
 # Step 9: 1-Click Cluster Reset Controller
 # =========================================================================
 log_info "Step 9: 1-Click Cluster Reset Controller (/api/reset)"
-RESET_HTTP_CODE=$(curl -s -o "${TMP_DIR}/reset_resp.json" -w "%{http_code}" --max-time 15 -X POST "${GATEWAY_URL}/api/reset")
+RESET_HTTP_CODE=$(curl -s "${PRESENTER_HDR[@]}" -o "${TMP_DIR}/reset_resp.json" -w "%{http_code}" --max-time 15 -X POST "${GATEWAY_URL}/api/reset")
 
 if [[ "${RESET_HTTP_CODE}" != "200" ]]; then
   log_err "POST /api/reset returned HTTP ${RESET_HTTP_CODE} (expected 200)"
@@ -826,7 +848,7 @@ fi
 log_ok "POST /api/reset returned HTTP 200 OK with payload status: ok"
 
 # Asserts GET /api/actor/{id} reports state SUSPENDED
-ACTOR_RESET_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")
+ACTOR_RESET_RESP=$(curl -s "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")
 ACTOR_RESET_STATE=$(printf "%s" "${ACTOR_RESET_RESP}" | jq -r .state 2>/dev/null || true)
 
 if [[ "${ACTOR_RESET_STATE}" != "SUSPENDED" ]]; then
@@ -845,7 +867,7 @@ log_info "Step 10: Dedicated Live Feed Page (/feed)"
 FEED_HEADERS_FILE="${TMP_DIR}/feed_headers.txt"
 FEED_BODY_FILE="${TMP_DIR}/feed_body.html"
 
-FEED_HTTP_CODE=$(curl -s -D "${FEED_HEADERS_FILE}" -o "${FEED_BODY_FILE}" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/feed")
+FEED_HTTP_CODE=$(curl -s "${PRESENTER_HDR[@]}" -D "${FEED_HEADERS_FILE}" -o "${FEED_BODY_FILE}" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/feed")
 if [[ "${FEED_HTTP_CODE}" != "200" ]]; then
   log_err "GET /feed returned HTTP ${FEED_HTTP_CODE} (expected 200)"
   log_fail "Step 10: Dedicated Live Feed Page"
@@ -880,7 +902,7 @@ FEED_STATIC_ASSETS=(
   "/static/feed.css"
 )
 for asset_path in "${FEED_STATIC_ASSETS[@]}"; do
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "${GATEWAY_URL}${asset_path}" || echo "000")
+  HTTP_CODE=$(curl -s "${PRESENTER_HDR[@]}" -o /dev/null -w "%{http_code}" --max-time 5 "${GATEWAY_URL}${asset_path}" || echo "000")
   if [[ "${HTTP_CODE}" != "200" ]]; then
     log_err "Feed asset ${asset_path} returned HTTP ${HTTP_CODE} (expected 200)"
     log_fail "Step 10: Dedicated Live Feed Page"
@@ -897,7 +919,7 @@ log_info "Step 11: Action Feed History API (/api/feed/history)"
 HISTORY_HEADERS_FILE="${TMP_DIR}/history_headers.txt"
 HISTORY_BODY_FILE="${TMP_DIR}/history_body.json"
 
-HISTORY_HTTP_CODE=$(curl -s -D "${HISTORY_HEADERS_FILE}" -o "${HISTORY_BODY_FILE}" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/feed/history")
+HISTORY_HTTP_CODE=$(curl -s "${PRESENTER_HDR[@]}" -D "${HISTORY_HEADERS_FILE}" -o "${HISTORY_BODY_FILE}" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/feed/history")
 if [[ "${HISTORY_HTTP_CODE}" != "200" ]]; then
   log_err "GET /api/feed/history returned HTTP ${HISTORY_HTTP_CODE} (expected 200)"
   log_fail "Step 11: Action Feed History API"
@@ -931,7 +953,7 @@ STREAM_HEADERS_FILE="${TMP_DIR}/stream_headers.txt"
 STREAM_BODY_FILE="${TMP_DIR}/stream_body.txt"
 
 # Establish SSE connection in background
-curl -s -N -D "${STREAM_HEADERS_FILE}" "${GATEWAY_URL}/api/stream" > "${STREAM_BODY_FILE}" 2>/dev/null &
+curl -s "${PRESENTER_HDR[@]}" -N -D "${STREAM_HEADERS_FILE}" "${GATEWAY_URL}/api/stream" > "${STREAM_BODY_FILE}" 2>/dev/null &
 STREAM_PID=$!
 
 STREAM_HANDSHAKE=false

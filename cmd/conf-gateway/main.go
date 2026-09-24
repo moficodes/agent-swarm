@@ -38,6 +38,7 @@ type Config struct {
 	RouterURL    string
 	StatusURL    string
 	JWTSecret    string
+	PresenterKey string
 	GeminiAPIKey string
 	Atespace     string
 }
@@ -60,6 +61,7 @@ func LoadConfig() Config {
 	if jwtSecret == "" {
 		jwtSecret = "conf-demo-secret-key"
 	}
+	presenterKey := os.Getenv("PRESENTER_TOKEN")
 	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
 	atespace := os.Getenv("ATESPACE")
 	if atespace == "" {
@@ -71,6 +73,7 @@ func LoadConfig() Config {
 		RouterURL:    routerURL,
 		StatusURL:    statusURL,
 		JWTSecret:    jwtSecret,
+		PresenterKey: presenterKey,
 		GeminiAPIKey: geminiAPIKey,
 		Atespace:     atespace,
 	}
@@ -82,6 +85,7 @@ func main() {
 	opts := []gateway.Option{
 		gateway.WithAtespace(cfg.Atespace),
 		gateway.WithJWTSecret(cfg.JWTSecret),
+		gateway.WithPresenterKey(cfg.PresenterKey),
 		gateway.WithGeminiAPIKey(cfg.GeminiAPIKey),
 		gateway.WithStaticFS(staticFS),
 		gateway.WithAIClient(ai.NewGeminiClient()),
@@ -89,6 +93,11 @@ func main() {
 
 	gw := gateway.NewGateway(cfg.RouterURL, cfg.StatusURL, opts...)
 	defer gw.Close()
+	if cfg.PresenterKey == "" {
+		log.Printf("PRESENTER_TOKEN is unset; generated a presenter key. Open /stage?key=%s to unlock the stage and feed.", gw.PresenterKey())
+	} else {
+		log.Printf("Presenter key set from PRESENTER_TOKEN. Open /stage?key=<PRESENTER_TOKEN> to unlock the stage and feed.")
+	}
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

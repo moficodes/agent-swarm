@@ -119,7 +119,7 @@ func TestSessionMinting(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// 1. Verify session generation and sequential IDs
@@ -216,7 +216,7 @@ func TestStageTelemetry(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// Wait for poller to run at least one tick
@@ -364,7 +364,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// Provision session for attendee-01
@@ -480,7 +480,7 @@ func TestProxyRouting_Authentication(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// 1. Missing Authorization returns 401
@@ -571,7 +571,7 @@ func TestGateway_ConcurrencySafety(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	const numWorkers = 10
@@ -643,7 +643,7 @@ func TestProxyRouting_ExpiredToken(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// Mint token and manually construct expired token
@@ -670,7 +670,7 @@ func TestHTTPMethodValidation(t *testing.T) {
 	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// 1. POST to /api/session should return 405 Method Not Allowed
@@ -718,7 +718,7 @@ func TestHealthz(t *testing.T) {
 	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/healthz")
@@ -759,7 +759,7 @@ func TestSuspenderFailureTolerance(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	sessResp, _ := http.Get(ts.URL + "/api/session")
@@ -833,7 +833,7 @@ func TestProxyRouting_ApprovalDetection_SubstringIgnored(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	sessResp, err := http.Get(ts.URL + "/api/session")
@@ -889,7 +889,7 @@ func TestProxyRouting_RequireValidToken(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// 1. Request with only X-Attendee-ID header (no token) MUST be rejected with 401
@@ -943,7 +943,7 @@ func TestProxyRouting_ProxyErrorResetsActorState(t *testing.T) {
 	gw := newTestGateway(t, deadURL, "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	sessResp, err := http.Get(ts.URL + "/api/session")
@@ -1002,7 +1002,7 @@ func TestProxyRouting_UpstreamErrorStatusResetsActorState(t *testing.T) {
 	gw := newTestGateway(t, upstreamSrv.URL, "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	sessResp, err := http.Get(ts.URL + "/api/session")
@@ -1073,7 +1073,7 @@ func TestProxyRouting_AsyncSuspensionNonBlocking(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	sessResp, err := http.Get(ts.URL + "/api/session")
@@ -1142,7 +1142,7 @@ func TestStageTelemetry_DeterministicWorkerSorting(t *testing.T) {
 	gw := newTestGateway(t, upstreamSrv.URL, "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// Provision sessions for 3 attendees
@@ -1238,7 +1238,7 @@ func TestGateway_CloseWaitsForAsyncSuspension(t *testing.T) {
 		gateway.WithSuspender(suspender),
 	)
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	sessResp, err := http.Get(ts.URL + "/api/session")
@@ -1278,7 +1278,7 @@ func TestChatRoute(t *testing.T) {
 	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// 1. GET /chat returns 200 with HTML content and required DOM elements
@@ -1422,7 +1422,7 @@ func TestStageRoute(t *testing.T) {
 	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	expectedElements := []string{
@@ -1589,7 +1589,7 @@ func TestSSEEventStreaming(t *testing.T) {
 	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	t.Run("MissingAttendeeID", func(t *testing.T) {
@@ -1618,7 +1618,7 @@ func TestSSEEventStreaming(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-01", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-01&token="+gw.MintToken("attendee-01"), nil)
 		if err != nil {
 			t.Fatalf("failed to create request: %v", err)
 		}
@@ -1697,7 +1697,7 @@ func TestSSEEventStreaming(t *testing.T) {
 	t.Run("CleanDisconnect", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-disconnect", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-disconnect&token="+gw.MintToken("attendee-disconnect"), nil)
 		if err != nil {
 			t.Fatalf("failed to create request: %v", err)
 		}
@@ -1748,7 +1748,7 @@ func TestSSEEventStreaming(t *testing.T) {
 				clientCtx, clientCancel := context.WithTimeout(ctx, 500*time.Millisecond)
 				defer clientCancel()
 
-				req, err := http.NewRequestWithContext(clientCtx, http.MethodGet, ts.URL+"/api/events?attendee_id="+attID, nil)
+				req, err := http.NewRequestWithContext(clientCtx, http.MethodGet, ts.URL+"/api/events?attendee_id="+attID+"&token="+gw.MintToken(attID), nil)
 				if err != nil {
 					return
 				}
@@ -1829,7 +1829,7 @@ func TestActorInspectorEndpoint(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	t.Run("DefaultSuspendedActorInspection", func(t *testing.T) {
@@ -2072,7 +2072,7 @@ func TestResetEndpoint(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	t.Run("ResetSuccess", func(t *testing.T) {
@@ -2105,7 +2105,7 @@ func TestResetEndpoint(t *testing.T) {
 		sseCtx, sseCancel := context.WithCancel(context.Background())
 		defer sseCancel()
 
-		sseReq, err := http.NewRequestWithContext(sseCtx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-01", nil)
+		sseReq, err := http.NewRequestWithContext(sseCtx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-01&token="+gw.MintToken("attendee-01"), nil)
 		if err != nil {
 			t.Fatalf("failed to create SSE request: %v", err)
 		}
@@ -2401,7 +2401,7 @@ func TestSimulationEndpoint(t *testing.T) {
 	simRunner := gateway.NewSimulationRunner(gw, gateway.WithSimulationDelays(20*time.Millisecond, 40*time.Millisecond))
 	gw.SetSimulationController(simRunner)
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	t.Run("InitialStatus", func(t *testing.T) {
@@ -2820,7 +2820,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	t.Run("FeedHistoryEndpoints", func(t *testing.T) {
@@ -3345,7 +3345,7 @@ func TestChatAndApprovalFlowActionStream_WithAIClient(t *testing.T) {
 	)
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	// Connect SSE stream
@@ -3522,7 +3522,7 @@ func TestFeedRoute(t *testing.T) {
 	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
-	ts := httptest.NewServer(gw.Handler())
+	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
 	requiredIDs := []string{
@@ -3691,7 +3691,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 		sim := &mockSimulationController{}
 		gw.SetSimulationController(sim)
 
-		ts := httptest.NewServer(gw.Handler())
+		ts := httptest.NewServer(asPresenter(gw))
 		defer ts.Close()
 
 		for i := 1; i <= 5; i++ {
@@ -3713,7 +3713,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 		sim.SetStatus(true, 25)
 		gw.SetSimulationController(sim)
 
-		ts := httptest.NewServer(gw.Handler())
+		ts := httptest.NewServer(asPresenter(gw))
 		defer ts.Close()
 
 		// Successive calls allocate attendee-26 up to attendee-50
@@ -3743,7 +3743,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 		sim.SetStatus(true, 50)
 		gw.SetSimulationController(sim)
 
-		ts := httptest.NewServer(gw.Handler())
+		ts := httptest.NewServer(asPresenter(gw))
 		defer ts.Close()
 
 		// Successive calls allocate attendee-51 up to attendee-100
@@ -3772,7 +3772,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 		sim.SetStatus(true, 25)
 		gw.SetSimulationController(sim)
 
-		ts := httptest.NewServer(gw.Handler())
+		ts := httptest.NewServer(asPresenter(gw))
 		defer ts.Close()
 
 		// When simulation is running
@@ -3798,7 +3798,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 		sim := &mockSimulationController{}
 		gw.SetSimulationController(sim)
 
-		ts := httptest.NewServer(gw.Handler())
+		ts := httptest.NewServer(asPresenter(gw))
 		defer ts.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

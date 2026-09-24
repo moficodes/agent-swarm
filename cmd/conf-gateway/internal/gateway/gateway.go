@@ -18,8 +18,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +36,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +49,14 @@ import (
 )
 
 type attendeeContextKey struct{}
+
+const (
+	// PresenterCookieName is the cookie a presenter page sets once the
+	// presenter key is supplied.
+	PresenterCookieName = "conf_presenter"
+	// PresenterHeaderName carries the presenter key for scripts.
+	PresenterHeaderName = "X-Presenter-Key"
+)
 
 // Suspender defines the interface for suspending actors.
 type Suspender interface {
@@ -206,6 +218,14 @@ func WithSimulationController(sc SimulationController) Option {
 	}
 }
 
+// WithPresenterKey sets the key that unlocks the stage, feed, and presenter APIs.
+// When unset, NewGateway generates a random key; read it with PresenterKey.
+func WithPresenterKey(key string) Option {
+	return func(g *Gateway) {
+		g.presenterKey = key
+	}
+}
+
 // WithStaticFS sets the static filesystem used to serve web assets.
 func WithStaticFS(staticFS fs.FS) Option {
 	return func(g *Gateway) {
@@ -221,6 +241,7 @@ type Gateway struct {
 	statusURL      string
 	atespace       string
 	jwtSecret      string
+	presenterKey   string
 	geminiAPIKey   string
 	suspender      Suspender
 	statusInterval time.Duration
@@ -279,6 +300,10 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 
 	for _, opt := range opts {
 		opt(gw)
+	}
+
+	if gw.presenterKey == "" {
+		gw.presenterKey = randomHex(16)
 	}
 
 	if gw.simController == nil {
@@ -354,6 +379,41 @@ func (g *Gateway) Close() {
 	}
 }
 
+// PresenterKey returns the key that unlocks presenter pages and APIs.
+func (g *Gateway) PresenterKey() string {
+	return g.presenterKey
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
+	return hex.EncodeToString(b)
+}
+
+// isPresenter reports whether the request carries the presenter key, either in
+// the cookie set by a presenter page or in the PresenterHeaderName header.
+func (g *Gateway) isPresenter(r *http.Request) bool {
+	key := r.Header.Get(PresenterHeaderName)
+	if key == "" {
+		if c, err := r.Cookie(PresenterCookieName); err == nil {
+			key = c.Value
+		}
+	}
+	return key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(g.presenterKey)) == 1
+}
+
+func (g *Gateway) requirePresenter(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !g.isPresenter(r) {
+			http.Error(w, "presenter key required", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // Handler returns the HTTP handler for Gateway routes.
 func (g *Gateway) Handler() http.Handler {
 	return g.mux
@@ -366,13 +426,13 @@ func (g *Gateway) routes() {
 	})
 	g.mux.HandleFunc("/api/session", g.handleSession)
 	g.mux.HandleFunc("/api/events", g.handleEvents)
-	g.mux.HandleFunc("/api/stream", g.handleActionStream)
-	g.mux.HandleFunc("/api/feed/history", g.handleFeedHistory)
-	g.mux.HandleFunc("/api/actor/", g.handleActorDetails)
-	g.mux.HandleFunc("/api/actor", g.handleActorDetails)
-	g.mux.HandleFunc("/api/stage/telemetry", g.handleTelemetry)
-	g.mux.HandleFunc("/api/reset", g.handleReset)
-	g.mux.HandleFunc("/api/simulation", g.handleSimulation)
+	g.mux.HandleFunc("/api/stream", g.requirePresenter(g.handleActionStream))
+	g.mux.HandleFunc("/api/feed/history", g.requirePresenter(g.handleFeedHistory))
+	g.mux.HandleFunc("/api/actor/", g.requirePresenter(g.handleActorDetails))
+	g.mux.HandleFunc("/api/actor", g.requirePresenter(g.handleActorDetails))
+	g.mux.HandleFunc("/api/stage/telemetry", g.requirePresenter(g.handleTelemetry))
+	g.mux.HandleFunc("/api/reset", g.requirePresenter(g.handleReset))
+	g.mux.HandleFunc("/api/simulation", g.requirePresenter(g.handleSimulation))
 	if g.aiClient != nil {
 		g.mux.HandleFunc("/api/chat", g.handleChatRequest)
 		g.mux.HandleFunc("/api/approve", g.handleApproveRequest)
@@ -381,93 +441,76 @@ func (g *Gateway) routes() {
 		g.mux.HandleFunc("/api/approve", g.proxyToActor)
 	}
 
-	g.mux.HandleFunc("/chat", g.handleChat)
-	g.mux.HandleFunc("/chat/", g.handleChat)
-	g.mux.HandleFunc("/feed", g.handleFeed)
-	g.mux.HandleFunc("/feed/", g.handleFeed)
-	g.mux.HandleFunc("/stage", g.handleStage)
-	g.mux.HandleFunc("/stage/", g.handleStage)
-	g.mux.HandleFunc("/", g.handleStage)
+	chat := g.page("chat.html", false, "/chat", "/chat/")
+	feed := g.page("feed.html", true, "/feed", "/feed/")
+	stage := g.page("stage.html", true, "/stage", "/stage/", "/")
+	g.mux.HandleFunc("/chat", chat)
+	g.mux.HandleFunc("/chat/", chat)
+	g.mux.HandleFunc("/feed", feed)
+	g.mux.HandleFunc("/feed/", feed)
+	g.mux.HandleFunc("/stage", stage)
+	g.mux.HandleFunc("/stage/", stage)
+	g.mux.HandleFunc("/", stage)
 	if g.staticFS != nil {
 		g.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(g.staticFS))))
 	}
 }
 
-func (g *Gateway) handleStage(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/stage" && r.URL.Path != "/stage/" && r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if g.staticFS == nil {
-		http.Error(w, "Static filesystem not configured", http.StatusInternalServerError)
-		return
-	}
-	data, err := fs.ReadFile(g.staticFS, "stage.html")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read stage.html: %v", err), http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(data)
-	}
-}
+const presenterKeyRequiredPage = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Presenter key required</title></head>
+<body style="font-family:sans-serif;padding:2rem">
+<h1>Presenter key required</h1>
+<p>Open this page with <code>?key=&lt;presenter key&gt;</code>. The gateway logs the full URL at startup.</p>
+</body></html>
+`
 
-func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/chat" && r.URL.Path != "/chat/" {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if g.staticFS == nil {
-		http.Error(w, "Static filesystem not configured", http.StatusInternalServerError)
-		return
-	}
-	data, err := fs.ReadFile(g.staticFS, "chat.html")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read chat.html: %v", err), http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(data)
-	}
-}
-
-func (g *Gateway) handleFeed(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/feed" && r.URL.Path != "/feed/" {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if g.staticFS == nil {
-		http.Error(w, "Static filesystem not configured", http.StatusInternalServerError)
-		return
-	}
-	data, err := fs.ReadFile(g.staticFS, "feed.html")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read feed.html: %v", err), http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(data)
+// page serves a static HTML file on the given paths. A presenter page first
+// requires the presenter key: a correct ?key= query sets the presenter cookie
+// and redirects to the same path without the key.
+func (g *Gateway) page(file string, presenter bool, paths ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !slices.Contains(paths, r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if presenter {
+			if key := r.URL.Query().Get("key"); key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(g.presenterKey)) == 1 {
+				http.SetCookie(w, &http.Cookie{
+					Name:     PresenterCookieName,
+					Value:    g.presenterKey,
+					Path:     "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteStrictMode,
+				})
+				http.Redirect(w, r, r.URL.Path, http.StatusSeeOther)
+				return
+			}
+			if !g.isPresenter(r) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, presenterKeyRequiredPage)
+				return
+			}
+		}
+		if g.staticFS == nil {
+			http.Error(w, "Static filesystem not configured", http.StatusInternalServerError)
+			return
+		}
+		data, err := fs.ReadFile(g.staticFS, file)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to read %s: %v", file, err), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(data)
+		}
 	}
 }
 
@@ -517,15 +560,16 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	maxActors := 50
+	if g.maxActors > 0 {
+		maxActors = g.maxActors
+	}
+
 	requestedID := strings.TrimSpace(r.URL.Query().Get("attendee_id"))
 	var attendeeID string
-	if requestedID != "" && strings.HasPrefix(requestedID, "attendee-") {
+	if requestedID != "" && g.isPresenter(r) && validAttendeeID(requestedID, maxActors) {
 		attendeeID = requestedID
 	} else {
-		maxActors := 50
-		if g.maxActors > 0 {
-			maxActors = g.maxActors
-		}
 
 		startOffset := 0
 		sc := g.SimulationController()
@@ -562,6 +606,13 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		"attendee_id": attendeeID,
 		"token":       token,
 	})
+}
+
+// validAttendeeID reports whether id is a canonical "attendee-NN" name for one
+// of the maxActors pre-provisioned actors.
+func validAttendeeID(id string, maxActors int) bool {
+	n, err := strconv.Atoi(strings.TrimPrefix(id, "attendee-"))
+	return err == nil && n >= 1 && n <= maxActors && id == fmt.Sprintf("attendee-%02d", n)
 }
 
 func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
@@ -632,6 +683,15 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 	attendeeID := r.URL.Query().Get("attendee_id")
 	if attendeeID == "" {
 		http.Error(w, "attendee_id query parameter is required", http.StatusBadRequest)
+		return
+	}
+	// EventSource cannot set headers, so the token may come in the query.
+	if tok := r.URL.Query().Get("token"); tok != "" && r.Header.Get("Authorization") == "" {
+		r.Header.Set("Authorization", "Bearer "+tok)
+	}
+	sub, err := g.authenticateRequest(r)
+	if err != nil || sub != attendeeID {
+		http.Error(w, "a token for this attendee is required", http.StatusUnauthorized)
 		return
 	}
 

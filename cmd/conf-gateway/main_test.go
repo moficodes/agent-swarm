@@ -15,28 +15,17 @@
 package main
 
 import (
-	"os"
 	"testing"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "JWT_SECRET", "PRESENTER_TOKEN", "GEMINI_API_KEY", "ATESPACE"}
+
 func TestLoadConfig_Defaults(t *testing.T) {
-	envVars := []string{"PORT", "ROUTER_URL", "STATUS_URL", "JWT_SECRET", "GEMINI_API_KEY", "ATESPACE"}
-	saved := make(map[string]string)
-	for _, env := range envVars {
-		saved[env] = os.Getenv(env)
-		_ = os.Unsetenv(env)
+	for _, env := range configEnvVars {
+		t.Setenv(env, "")
 	}
-	defer func() {
-		for env, val := range saved {
-			if val != "" {
-				_ = os.Setenv(env, val)
-			} else {
-				_ = os.Unsetenv(env)
-			}
-		}
-	}()
 
 	cfg := LoadConfig()
 
@@ -52,6 +41,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.JWTSecret != "conf-demo-secret-key" {
 		t.Errorf("expected default JWTSecret 'conf-demo-secret-key', got %q", cfg.JWTSecret)
 	}
+	if cfg.PresenterKey != "" {
+		t.Errorf("expected empty default PresenterKey so the gateway generates one, got %q", cfg.PresenterKey)
+	}
 	if cfg.Atespace != "ate-demo-conf" {
 		t.Errorf("expected default Atespace 'ate-demo-conf', got %q", cfg.Atespace)
 	}
@@ -61,29 +53,13 @@ func TestLoadConfig_Defaults(t *testing.T) {
 }
 
 func TestLoadConfig_CustomEnv(t *testing.T) {
-	envVars := map[string]string{
-		"PORT":           "9099",
-		"ROUTER_URL":     "http://router.example.com",
-		"STATUS_URL":     "http://status.example.com",
-		"JWT_SECRET":     "custom-secret",
-		"GEMINI_API_KEY": "custom-key",
-		"ATESPACE":       "custom-ns",
-	}
-	saved := make(map[string]string)
-	for env, val := range envVars {
-		saved[env] = os.Getenv(env)
-		_ = os.Setenv(env, val)
-	}
-	defer func() {
-		for env := range envVars {
-			val := saved[env]
-			if val != "" {
-				_ = os.Setenv(env, val)
-			} else {
-				_ = os.Unsetenv(env)
-			}
-		}
-	}()
+	t.Setenv("PORT", "9099")
+	t.Setenv("ROUTER_URL", "http://router.example.com")
+	t.Setenv("STATUS_URL", "http://status.example.com")
+	t.Setenv("JWT_SECRET", "custom-secret")
+	t.Setenv("PRESENTER_TOKEN", "custom-presenter")
+	t.Setenv("GEMINI_API_KEY", "custom-key")
+	t.Setenv("ATESPACE", "custom-ns")
 
 	cfg := LoadConfig()
 
@@ -98,6 +74,9 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	}
 	if cfg.JWTSecret != "custom-secret" {
 		t.Errorf("expected JWTSecret 'custom-secret', got %q", cfg.JWTSecret)
+	}
+	if cfg.PresenterKey != "custom-presenter" {
+		t.Errorf("expected PresenterKey 'custom-presenter', got %q", cfg.PresenterKey)
 	}
 	if cfg.GeminiAPIKey != "custom-key" {
 		t.Errorf("expected GeminiAPIKey 'custom-key', got %q", cfg.GeminiAPIKey)

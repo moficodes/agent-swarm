@@ -91,13 +91,15 @@
   // Server-Sent Events (SSE) Real-Time State Sync
   // -------------------------------------------------------------------------
   function connectEventSource() {
-    if (!state.attendeeId) return;
+    if (!state.attendeeId || !state.token) return;
     if (state.eventSource) {
       state.eventSource.close();
       state.eventSource = null;
     }
 
-    const es = new EventSource('/api/events?attendee_id=' + state.attendeeId);
+    // EventSource cannot send an Authorization header, so the token rides in the query.
+    const es = new EventSource('/api/events?attendee_id=' + encodeURIComponent(state.attendeeId) +
+      '&token=' + encodeURIComponent(state.token));
     state.eventSource = es;
 
     es.addEventListener('state_change', function(e) {
@@ -247,8 +249,8 @@
       }
       if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
       setStatusPill(LIFECYCLE_STATES.SUSPENDED);
-      connectEventSource();
       if (!forceReset && state.token) {
+        connectEventSource();
         return;
       }
     } else if (!forceReset && storedId && storedToken) {

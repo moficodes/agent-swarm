@@ -36,8 +36,21 @@ func newTestGateway(t *testing.T, routerURL, statusURL string, opts ...gateway.O
 		t.Cleanup(srv.Close)
 		statusURL = srv.URL
 	}
-	all := append([]gateway.Option{gateway.WithSuspender(&mockSuspender{})}, opts...)
+	all := append([]gateway.Option{
+		gateway.WithSuspender(&mockSuspender{}),
+		gateway.WithPresenterKey(testPresenterKey),
+	}, opts...)
 	gw := gateway.NewGateway(routerURL, statusURL, all...)
 	t.Cleanup(gw.Close)
 	return gw
+}
+
+// asPresenter wraps the gateway handler so every request carries the
+// presenter key, for tests that exercise presenter-only features.
+func asPresenter(gw *gateway.Gateway) http.Handler {
+	h := gw.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set(gateway.PresenterHeaderName, testPresenterKey)
+		h.ServeHTTP(w, r)
+	})
 }
