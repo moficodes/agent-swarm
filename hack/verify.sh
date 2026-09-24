@@ -20,11 +20,11 @@
 #   Step 1: Health & Static UI Assets (/healthz, /stage, /chat, static JS/CSS)
 #   Step 2: Ephemeral Session Minting (GET /api/session -> JWT & attendee ID)
 #   Step 3: Turn 1 Chat & HITL Approval Generation (/api/chat -> ApprovalRequest)
-#   Step 4: Turn 2 Approval & Sandbox Execution (/api/approve -> exit code 0 & stdout)
+#   Step 4: Turn 2 Approval & Sandbox Execution (/api/approve -> exit code 0, stdout & post-turn state)
 #   Step 5: Audience Burst & Request Parking (concurrent load, 0 dropped/503s, parking check)
 #   Step 6: Telemetry Endpoint (/api/stage/telemetry -> actors, workers, parking)
 #   Step 7: Audience Simulation Engine (/api/simulation -> start/stop lifecycle & segmented allocation)
-#   Step 8: Actor Spotlight Inspector API (/api/actor/{id} -> ActorView fields & post-turn state)
+#   Step 8: Actor Spotlight Inspector API (/api/actor/{id} -> ActorView fields)
 #   Step 9: 1-Click Cluster Reset Controller (/api/reset -> parallel suspend sweep & state reset)
 #   Step 10: Dedicated Live Feed Page (/feed -> DOM elements & static assets)
 #   Step 11: Action Feed History API (/api/feed/history -> JSON array)
@@ -457,6 +457,28 @@ fi
 log_ok "Sandbox code execution completed with exit code 0"
 FIRST_LINE=$(printf "%s" "${APPROVE_CONTENT}" | head -n 1)
 log_ok "Result: ${FIRST_LINE}"
+
+if [[ "${MOCK_MODE}" != true ]]; then
+  POST_CHAT_STATE=""
+  for _ in $(seq 1 10); do
+    POST_CHAT_RESP="$(curl -fsS "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${ATTENDEE_ID}")"
+    POST_CHAT_STATE="$(jq -r .state <<<"${POST_CHAT_RESP}")"
+    case "${POST_CHAT_STATE}" in
+      RESUMING | RUNNING | SUSPENDING | SUSPENDED) break ;;
+    esac
+    sleep 1
+  done
+  case "${POST_CHAT_STATE}" in
+    RESUMING | RUNNING | SUSPENDING | SUSPENDED)
+      log_ok "Actor state after chat turn: ${POST_CHAT_STATE}"
+      ;;
+    *)
+      log_err "Actor state after chat turn was '${POST_CHAT_STATE}', expected RESUMING, RUNNING, SUSPENDING or SUSPENDED"
+      log_fail "Step 4: Turn 2 Approval & Sandbox Execution"
+      exit 1
+      ;;
+  esac
+fi
 log_pass "Step 4: Turn 2 Approval & Sandbox Execution Verified"
 
 # =========================================================================
@@ -677,43 +699,18 @@ log_pass "Step 7: Audience Simulation Engine Verified"
 TARGET_ACTOR_ID="${ATTENDEE_ID:-attendee-01}"
 log_info "Step 8: Actor Spotlight Inspector API (/api/actor/{id})"
 
-# Trigger a fresh turn: the mock engine always attaches a pending approval,
-# so the actor's activity stays populated for the checks below, and in
-# cluster mode a turn ending schedules the auto-suspend this step also checks.
-curl -s --max-time 20 -X POST "${GATEWAY_URL}/api/chat" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"Spotlight inspector probe"}' >/dev/null
-
 DETAILS="$(curl -fsS "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")"
-if ! jq -e 'has("state") and has("never_started") and has("activity") and (has("snapshot_location") | not)' <<<"${DETAILS}" >/dev/null; then
+if ! jq -e 'has("state") and has("never_started") and (has("snapshot_location") | not)' <<<"${DETAILS}" >/dev/null; then
   log_err "Actor details lack ActorView fields: ${DETAILS}"
   log_fail "Step 8: Actor Spotlight Inspector API"
   exit 1
 fi
-log_ok "Actor details carry ateapi state ($(jq -r .state <<<"${DETAILS}")), activity ($(jq -r .activity <<<"${DETAILS}"))"
-
-if [[ "${MOCK_MODE}" != true ]]; then
-  POST_CHAT_STATE="$(jq -r .state <<<"${DETAILS}")"
-  for _ in $(seq 1 10); do
-    case "${POST_CHAT_STATE}" in
-      RESUMING | RUNNING | SUSPENDING | SUSPENDED) break ;;
-    esac
-    sleep 1
-    DETAILS="$(curl -fsS "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")"
-    POST_CHAT_STATE="$(jq -r .state <<<"${DETAILS}")"
-  done
-  case "${POST_CHAT_STATE}" in
-    RESUMING | RUNNING | SUSPENDING | SUSPENDED)
-      log_ok "Actor state after chat turn: ${POST_CHAT_STATE}"
-      ;;
-    *)
-      log_err "Actor state after chat turn was '${POST_CHAT_STATE}', expected RESUMING, RUNNING, SUSPENDING or SUSPENDED"
-      log_fail "Step 8: Actor Spotlight Inspector API"
-      exit 1
-      ;;
-  esac
+if ! jq -e '(.activity // "") | IN("", "THINKING", "AWAITING_APPROVAL", "EXECUTING")' <<<"${DETAILS}" >/dev/null; then
+  log_err "Actor activity is not a recognized value: ${DETAILS}"
+  log_fail "Step 8: Actor Spotlight Inspector API"
+  exit 1
 fi
+log_ok "Actor details carry ateapi state ($(jq -r .state <<<"${DETAILS}")), activity ($(jq -r '.activity // "(idle)"' <<<"${DETAILS}"))"
 log_pass "Step 8: Actor Spotlight Inspector API Verified"
 
 # =========================================================================
