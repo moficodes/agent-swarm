@@ -576,8 +576,8 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 	t.Run("mutex not blocked during handleApprove execution", func(t *testing.T) {
 		workspace := t.TempDir()
 
-		// Mock Gemini to propose a shell sleep command
-		fake := geminitest.New(t, geminitest.ApprovalResponse("Slow background job", "sleep 0.4", "sh"))
+		// Mock Gemini to propose a slow Python command
+		fake := geminitest.New(t, geminitest.ApprovalResponse("Slow background job", "import time\ntime.sleep(0.4)", "python"))
 
 		srv := server.NewWorkloadServer(
 			server.WithGeminiConfig(geminiConfig),
@@ -863,10 +863,10 @@ func postApprove(t *testing.T, h http.Handler, resp types.ApprovalResponse) *htt
 }
 
 func TestApprove_RunsStoredCodeAndIgnoresRequestCode(t *testing.T) {
-	s, id := approvalServer(t, "echo stored", "sh")
+	s, id := approvalServer(t, "print('stored')", "python")
 
 	rec := postApprove(t, s.Handler(), types.ApprovalResponse{
-		ApprovalID: id, Decision: types.DecisionApprove, Code: "echo injected", Language: "sh",
+		ApprovalID: id, Decision: types.DecisionApprove, Code: "print('injected')", Language: "python",
 	})
 
 	if rec.Code != http.StatusOK {
@@ -892,7 +892,7 @@ func TestApprove_NoPendingApprovalIsConflictEvenWithCode(t *testing.T) {
 }
 
 func TestApprove_WrongIDIsConflictAndKeepsPending(t *testing.T) {
-	s, id := approvalServer(t, "echo stored", "sh")
+	s, id := approvalServer(t, "print('stored')", "python")
 
 	rec := postApprove(t, s.Handler(), types.ApprovalResponse{ApprovalID: id + "-other", Decision: types.DecisionApprove})
 
@@ -905,7 +905,7 @@ func TestApprove_WrongIDIsConflictAndKeepsPending(t *testing.T) {
 }
 
 func TestApprove_ReplayIsConflict(t *testing.T) {
-	s, id := approvalServer(t, "echo once", "sh")
+	s, id := approvalServer(t, "print('once')", "python")
 	ok := types.ApprovalResponse{ApprovalID: id, Decision: types.DecisionApprove}
 	if rec := postApprove(t, s.Handler(), ok); rec.Code != http.StatusOK {
 		t.Fatalf("first approve = %d", rec.Code)
@@ -916,14 +916,14 @@ func TestApprove_ReplayIsConflict(t *testing.T) {
 }
 
 func TestApprove_FailedRunReportsStructuredError(t *testing.T) {
-	s, id := approvalServer(t, "print(1)", "cobol")
+	s, id := approvalServer(t, "import sys\nsys.exit('boom')", "python")
 
 	rec := postApprove(t, s.Handler(), types.ApprovalResponse{ApprovalID: id, Decision: types.DecisionApprove})
 
 	var msg types.ChatMessage
 	_ = json.Unmarshal(rec.Body.Bytes(), &msg)
-	if msg.Execution == nil || msg.Execution.ExitCode != -1 || !strings.Contains(msg.Execution.Stderr, "unsupported language") {
-		t.Errorf("Execution = %+v, want exit -1 with the error", msg.Execution)
+	if msg.Execution == nil || msg.Execution.ExitCode == 0 || !strings.Contains(msg.Execution.Stderr, "boom") {
+		t.Errorf("Execution = %+v, want a non-zero exit with the error", msg.Execution)
 	}
 }
 
@@ -938,7 +938,7 @@ func postClear(h http.Handler, method, key string) int {
 }
 
 func TestClearHistory_DropsHistoryAndPendingApproval(t *testing.T) {
-	s, _ := approvalServer(t, "echo stored", "sh")
+	s, _ := approvalServer(t, "print('stored')", "python")
 
 	if code := postClear(s.Handler(), http.MethodGet, "k.mac"); code != http.StatusMethodNotAllowed {
 		t.Errorf("GET status = %d, want 405", code)
@@ -955,7 +955,7 @@ func TestClearHistory_DropsHistoryAndPendingApproval(t *testing.T) {
 }
 
 func TestClearHistory_RequiresTheGatewayKey(t *testing.T) {
-	s, _ := approvalServer(t, "echo stored", "sh") // the gateway sent k.mac
+	s, _ := approvalServer(t, "print('stored')", "python") // the gateway sent k.mac
 
 	for _, key := range []string{"", "forged.mac"} {
 		if code := postClear(s.Handler(), http.MethodPost, key); code != http.StatusForbidden {

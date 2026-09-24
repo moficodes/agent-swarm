@@ -185,14 +185,14 @@ func TestContract_ClientCannotOverrideModelKey(t *testing.T) {
 }
 
 func TestContract_ApprovalRunsActorsOwnCode(t *testing.T) {
-	env := newContractEnv(t, geminitest.New(t, geminitest.ApprovalResponse("say it", "echo from-model", "sh")))
+	env := newContractEnv(t, geminitest.New(t, geminitest.ApprovalResponse("say it", "print('from-model')", "python")))
 	chat := decodeMsg(t, env.post(t, "attendee-04", "/api/chat", types.ChatRequest{Message: "run"}))
 	if chat.Approval == nil {
 		t.Fatal("no approval in reply")
 	}
 
 	res := decodeMsg(t, env.post(t, "attendee-04", "/api/approve", types.ApprovalResponse{
-		ApprovalID: chat.Approval.ApprovalID, Decision: types.DecisionApprove, Code: "echo injected",
+		ApprovalID: chat.Approval.ApprovalID, Decision: types.DecisionApprove, Code: "print('injected')",
 	}))
 
 	if res.Execution == nil || res.Execution.Stdout != "from-model\n" {
@@ -201,7 +201,7 @@ func TestContract_ApprovalRunsActorsOwnCode(t *testing.T) {
 }
 
 func TestContract_GatewayRejectsUnknownApprovalBeforeActor(t *testing.T) {
-	env := newContractEnv(t, geminitest.New(t, geminitest.ApprovalResponse("x", "echo x", "sh")))
+	env := newContractEnv(t, geminitest.New(t, geminitest.ApprovalResponse("x", "print('x')", "python")))
 	chat := decodeMsg(t, env.post(t, "attendee-05", "/api/chat", types.ChatRequest{Message: "run"}))
 
 	rec := env.post(t, "attendee-05", "/api/approve", types.ApprovalResponse{ApprovalID: "app-forged", Decision: types.DecisionApprove})
@@ -251,7 +251,7 @@ func TestContract_VertexFailureIsLabeledFallback(t *testing.T) {
 }
 
 func TestContract_ExecutionIsRecordedFromStructuredField(t *testing.T) {
-	env := newContractEnv(t, geminitest.New(t, geminitest.ApprovalResponse("x", "echo structured", "sh")))
+	env := newContractEnv(t, geminitest.New(t, geminitest.ApprovalResponse("x", "print('structured')", "python")))
 	chat := decodeMsg(t, env.post(t, "attendee-09", "/api/chat", types.ChatRequest{Message: "run"}))
 	env.post(t, "attendee-09", "/api/approve", types.ApprovalResponse{ApprovalID: chat.Approval.ApprovalID, Decision: types.DecisionApprove})
 
@@ -274,7 +274,7 @@ func userTurns(ws *server.WorkloadServer) []string {
 
 func TestContract_ResetClearsActorHistory(t *testing.T) {
 	env := newContractEnv(t, geminitest.New(t,
-		geminitest.ApprovalResponse("run it", "echo old", "sh"), geminitest.TextResponse("fresh")))
+		geminitest.ApprovalResponse("run it", "print('old')", "python"), geminitest.TextResponse("fresh")))
 	env.post(t, "attendee-01", "/api/chat", types.ChatRequest{Message: "before reset"})
 	if env.actor("attendee-01").PendingApproval() == nil {
 		t.Fatal("no pending approval before reset")
