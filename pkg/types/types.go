@@ -57,6 +57,18 @@ const (
 // actor on every proxied request.
 const ModelKeyHeader = "X-Conf-Model-Key"
 
+// ReplySource says which engine produced an assistant reply.
+type ReplySource string
+
+const (
+	// SourceGemini is a reply from Gemini through the model proxy.
+	SourceGemini ReplySource = "gemini"
+	// SourceMock is a reply from the offline mock engine by configuration.
+	SourceMock ReplySource = "mock"
+	// SourceMockFallback is a mock reply used because the Gemini call failed.
+	SourceMockFallback ReplySource = "mock-fallback"
+)
+
 // ActorLifecycleState represents the lifecycle phase of an interactive agent actor.
 type ActorLifecycleState string
 
@@ -116,6 +128,7 @@ type ChatMessage struct {
 	Content   string           `json:"content"`
 	Timestamp int64            `json:"timestamp"`
 	Approval  *ApprovalRequest `json:"approval,omitempty"`
+	Source    ReplySource      `json:"source,omitempty"`
 }
 
 // ChatRequest is the payload sent to initiate a chat or task request.

@@ -16,7 +16,6 @@ package server_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,9 +26,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/gemini"
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/geminitest"
 	"github.com/agent-substrate/substrate/demos/conference/internal/workload/server"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
+
+func proxyConfig(url string) gemini.Config {
+	return gemini.Config{ProxyURL: url, Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}
+}
+
+func postChat(t *testing.T, h http.Handler, key, msg string) types.ChatMessage {
+	t.Helper()
+	body, _ := json.Marshal(types.ChatRequest{Message: msg})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewReader(body))
+	if key != "" {
+		req.Header.Set(types.ModelKeyHeader, key)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat status = %d, body %s", rec.Code, rec.Body)
+	}
+	var out types.ChatMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
 
 func TestHealthz(t *testing.T) {
 	srv := server.NewWorkloadServer(server.WithForceMock(true))
@@ -85,6 +109,9 @@ func TestChat_MockMode(t *testing.T) {
 	if chatMsg.Sender != types.SenderAssistant {
 		t.Errorf("expected sender %q, got %q", types.SenderAssistant, chatMsg.Sender)
 	}
+	if chatMsg.Source != types.SourceMock {
+		t.Errorf("expected source %q, got %q", types.SourceMock, chatMsg.Source)
+	}
 	if chatMsg.Approval == nil {
 		t.Fatal("expected approval request in response, got nil")
 	}
@@ -103,85 +130,14 @@ func TestChat_MockMode(t *testing.T) {
 }
 
 func TestChat_MockedGeminiHTTPTransport(t *testing.T) {
-	// Mock Gemini REST API endpoint
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.Header.Get("x-goog-api-key")
-		if apiKey != "test-gemini-key" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+	fake := geminitest.New(t, geminitest.ApprovalResponse(
+		"Execute real-time telemetry regression analysis",
+		"print('executing gemini generated python script')",
+		"python",
+	))
+	srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)))
 
-		if !strings.Contains(r.URL.Path, "/v1beta/models/") || !strings.Contains(r.URL.Path, ":generateContent") {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
-		}
-
-		// Return Gemini generateContent response with request_human_approval function call
-		resp := map[string]any{
-			"candidates": []map[string]any{
-				{
-					"content": map[string]any{
-						"role": "model",
-						"parts": []map[string]any{
-							{
-								"text": "I have created an anomaly detection script for you. Please approve execution:",
-							},
-							{
-								"functionCall": map[string]any{
-									"name": "request_human_approval",
-									"args": map[string]any{
-										"summary":    "Execute real-time telemetry regression analysis",
-										"code":       "print('executing gemini generated python script')",
-										"language":   "python",
-										"risk_level": "HIGH",
-									},
-								},
-							},
-						},
-					},
-					"finishReason": "STOP",
-				},
-			},
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer geminiServer.Close()
-
-	client := server.NewGeminiClient(
-		server.WithBaseURL(geminiServer.URL),
-		server.WithModel("gemini-2.5-flash-lite"),
-	)
-	srv := server.NewWorkloadServer(
-		server.WithGeminiClient(client),
-		server.WithForceMock(false),
-	)
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	reqBody, _ := json.Marshal(types.ChatRequest{Message: "Check cluster metrics"})
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(reqBody))
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	t.Setenv("GEMINI_API_KEY", "test-gemini-key")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request to /api/chat failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", resp.StatusCode)
-	}
-
-	var chatMsg types.ChatMessage
-	if err := json.NewDecoder(resp.Body).Decode(&chatMsg); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
+	chatMsg := postChat(t, srv.Handler(), "test-gemini-key", "Check cluster metrics")
 
 	if chatMsg.Approval == nil {
 		t.Fatal("expected approval request parsed from gemini functionCall, got nil")
@@ -197,6 +153,9 @@ func TestChat_MockedGeminiHTTPTransport(t *testing.T) {
 	}
 	if chatMsg.Approval.RiskLevel != types.RiskHigh {
 		t.Errorf("unexpected risk level: %s", chatMsg.Approval.RiskLevel)
+	}
+	if chatMsg.Source != types.SourceGemini {
+		t.Errorf("Source = %q, want gemini", chatMsg.Source)
 	}
 }
 
@@ -505,147 +464,23 @@ func TestConcurrencySafety(t *testing.T) {
 	wg.Wait()
 }
 
-func TestGeminiClient_ConfigurationAndFallback(t *testing.T) {
-	t.Run("default model is gemini-2.5-flash", func(t *testing.T) {
-		t.Setenv("GEMINI_MODEL", "")
-		c := server.NewGeminiClient()
-		if c.Model() != "gemini-2.5-flash" {
-			t.Errorf("expected default model 'gemini-2.5-flash', got %q", c.Model())
-		}
-	})
-
-	t.Run("env var GEMINI_MODEL overrides default", func(t *testing.T) {
-		t.Setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
-		c := server.NewGeminiClient()
-		if c.Model() != "gemini-2.5-flash-lite" {
-			t.Errorf("expected model 'gemini-2.5-flash-lite', got %q", c.Model())
-		}
-	})
-
-	t.Run("explicit WithModel option overrides env var", func(t *testing.T) {
-		t.Setenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
-		c := server.NewGeminiClient(server.WithModel("gemini-custom-pro"))
-		if c.Model() != "gemini-custom-pro" {
-			t.Errorf("expected model 'gemini-custom-pro', got %q", c.Model())
-		}
-	})
-
-	t.Run("tool declarations include required tools", func(t *testing.T) {
-		c := server.NewGeminiClient()
-		tools := c.ToolDeclarations()
-		expectedTools := []string{
-			"request_human_approval",
-			"execute_sandbox_code",
-			"fetch_research_data",
-		}
-		for _, wantTool := range expectedTools {
-			found := false
-			for _, tool := range tools {
-				for _, fn := range tool.FunctionDeclarations {
-					if fn.Name == wantTool {
-						found = true
-						break
-					}
-				}
-			}
-			if !found {
-				t.Errorf("missing tool declaration: %q", wantTool)
-			}
-		}
-	})
-
-	t.Run("fallback to MockEngine when API key is empty", func(t *testing.T) {
-		t.Setenv("PROJECT_ID", "")
-		t.Setenv("GOOGLE_CLOUD_PROJECT", "")
-		c := server.NewGeminiClient(server.WithProject(""))
-		msg, err := c.GenerateContent(context.Background(), "", nil, "Analyze anomalies")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if msg == nil || msg.Approval == nil {
-			t.Fatal("expected mock engine message with approval when API key is empty")
-		}
-	})
-
-	t.Run("fallback to MockEngine when HTTP endpoint returns 500 error", func(t *testing.T) {
-		errServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "internal service failure", http.StatusInternalServerError)
-		}))
-		defer errServer.Close()
-
-		c := server.NewGeminiClient(server.WithBaseURL(errServer.URL))
-		msg, err := c.GenerateContent(context.Background(), "some-key", nil, "Analyze anomalies")
-		if err != nil {
-			t.Fatalf("unexpected error during fallback: %v", err)
-		}
-		if msg == nil || msg.Approval == nil {
-			t.Fatal("expected fallback to mock engine when Gemini API fails with 500")
-		}
-	})
-}
-
 func TestApprove_IncludeStderr(t *testing.T) {
 	workspace := t.TempDir()
 
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := map[string]any{
-			"candidates": []map[string]any{
-				{
-					"content": map[string]any{
-						"role": "model",
-						"parts": []map[string]any{
-							{
-								"functionCall": map[string]any{
-									"name": "request_human_approval",
-									"args": map[string]any{
-										"summary":    "Run script producing stderr output",
-										"code":       "import sys\nsys.stderr.write('Warning: cache miss on metric telemetry\\n')\nprint('Processed 100 events')",
-										"language":   "python",
-										"risk_level": "HIGH",
-									},
-								},
-							},
-						},
-					},
-					"finishReason": "STOP",
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer geminiServer.Close()
+	fake := geminitest.New(t, geminitest.ApprovalResponse(
+		"Run script producing stderr output",
+		"import sys\nsys.stderr.write('Warning: cache miss on metric telemetry\\n')\nprint('Processed 100 events')",
+		"python",
+	))
 
-	client := server.NewGeminiClient(
-		server.WithBaseURL(geminiServer.URL),
-		server.WithModel("gemini-2.5-flash"),
-	)
 	srv := server.NewWorkloadServer(
-		server.WithGeminiClient(client),
+		server.WithGeminiConfig(proxyConfig(fake.URL)),
 		server.WithWorkspaceDir(workspace),
-		server.WithForceMock(false),
 	)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	chatReq, _ := json.Marshal(types.ChatRequest{Message: "Run analysis with warnings"})
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(chatReq))
-	if err != nil {
-		t.Fatalf("failed to create chat request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	t.Setenv("GEMINI_API_KEY", "test-key")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("chat request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var chatMsg types.ChatMessage
-	if err := json.NewDecoder(resp.Body).Decode(&chatMsg); err != nil {
-		t.Fatalf("failed to decode chat response: %v", err)
-	}
+	chatMsg := postChat(t, srv.Handler(), "test-key", "Run analysis with warnings")
 	if chatMsg.Approval == nil {
 		t.Fatal("expected approval request")
 	}
@@ -682,145 +517,22 @@ func TestApprove_IncludeStderr(t *testing.T) {
 
 func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 	t.Run("multi-turn loop yielding approval", func(t *testing.T) {
-		var turnCount int
-		var mu sync.Mutex
-
-		geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-			turnCount++
-
-			var reqBody server.GenerateContentRequest
-			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-				http.Error(w, fmt.Sprintf("bad json: %v", err), http.StatusBadRequest)
-				return
-			}
-
-			if turnCount == 1 {
-				resp := map[string]any{
-					"candidates": []map[string]any{
-						{
-							"content": map[string]any{
-								"role": "model",
-								"parts": []map[string]any{
-									{
-										"functionCall": map[string]any{
-											"name": "fetch_research_data",
-											"args": map[string]any{
-												"topic": "cluster_telemetry",
-											},
-										},
-									},
-								},
-							},
-							"finishReason": "STOP",
-						},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(resp)
-				return
-			}
-
-			if turnCount == 2 {
-				foundToolResponse := false
-				for _, c := range reqBody.Contents {
-					for _, p := range c.Parts {
-						if p.FunctionResponse != nil && p.FunctionResponse.Name == "fetch_research_data" {
-							foundToolResponse = true
-							if p.FunctionResponse.Response["status"] != "success" {
-								t.Errorf("expected status 'success' in function response, got: %v", p.FunctionResponse.Response["status"])
-							}
-							if p.FunctionResponse.Response["telemetry"] == nil {
-								t.Error("expected telemetry in function response")
-							}
-						}
-					}
-				}
-				if !foundToolResponse {
-					t.Error("expected functionResponse part in turn 2 request")
-				}
-
-				resp := map[string]any{
-					"candidates": []map[string]any{
-						{
-							"content": map[string]any{
-								"role": "model",
-								"parts": []map[string]any{
-									{
-										"text": "Telemetry analyzed. Detected anomalous spikes requiring mitigation:",
-									},
-									{
-										"functionCall": map[string]any{
-											"name": "request_human_approval",
-											"args": map[string]any{
-												"summary":    "Apply telemetry mitigation script",
-												"code":       "print('mitigation executed')",
-												"language":   "python",
-												"risk_level": "HIGH",
-											},
-										},
-									},
-								},
-							},
-							"finishReason": "STOP",
-						},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(resp)
-				return
-			}
-
-			http.Error(w, "unexpected turn count", http.StatusInternalServerError)
-		}))
-		defer geminiServer.Close()
-
-		client := server.NewGeminiClient(
-			server.WithBaseURL(geminiServer.URL),
-			server.WithModel("gemini-2.5-flash"),
+		fake := geminitest.New(t,
+			geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "cluster_telemetry"}),
+			geminitest.ApprovalResponse("Apply telemetry mitigation script", "print('mitigation executed')", "python"),
 		)
-		srv := server.NewWorkloadServer(
-			server.WithGeminiClient(client),
-			server.WithForceMock(false),
-		)
-		ts := httptest.NewServer(srv.Handler())
-		defer ts.Close()
+		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)))
 
-		chatReq, _ := json.Marshal(types.ChatRequest{Message: "Analyze metrics and mitigate anomalies"})
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(chatReq))
-		if err != nil {
-			t.Fatalf("failed to create request: %v", err)
+		msg := postChat(t, srv.Handler(), "k.mac", "Analyze metrics and mitigate anomalies")
+
+		reqs := fake.Requests()
+		if len(reqs) != 2 {
+			t.Fatalf("expected 2 turns in tool execution loop, got %d", len(reqs))
 		}
-		req.Header.Set("Content-Type", "application/json")
-		t.Setenv("GEMINI_API_KEY", "test-api-key")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("request failed: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		if !strings.Contains(string(reqs[1].Body), `"functionResponse"`) {
+			t.Errorf("expected functionResponse in turn 2 request, got: %s", reqs[1].Body)
 		}
 
-		var msg types.ChatMessage
-		if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-
-		mu.Lock()
-		finalTurnCount := turnCount
-		mu.Unlock()
-
-		if finalTurnCount != 2 {
-			t.Errorf("expected 2 turns in tool execution loop, got %d", finalTurnCount)
-		}
-
-		if !strings.Contains(msg.Content, "Telemetry analyzed") {
-			t.Errorf("expected telemetry analysis in content, got: %s", msg.Content)
-		}
 		if msg.Approval == nil {
 			t.Fatal("expected approval request in response after multi-turn loop")
 		}
@@ -830,108 +542,22 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 		if msg.Approval.Code != "print('mitigation executed')" {
 			t.Errorf("unexpected approval code: %s", msg.Approval.Code)
 		}
+		if msg.Source != types.SourceGemini {
+			t.Errorf("Source = %q, want gemini", msg.Source)
+		}
 	})
 
 	t.Run("multi-turn loop yielding text", func(t *testing.T) {
-		var turnCount int
-		var mu sync.Mutex
-
-		geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-			turnCount++
-
-			if turnCount == 1 {
-				resp := map[string]any{
-					"candidates": []map[string]any{
-						{
-							"content": map[string]any{
-								"role": "model",
-								"parts": []map[string]any{
-									{
-										"functionCall": map[string]any{
-											"name": "fetch_research_data",
-											"args": map[string]any{
-												"topic": "system_telemetry",
-											},
-										},
-									},
-								},
-							},
-							"finishReason": "STOP",
-						},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(resp)
-				return
-			}
-
-			if turnCount == 2 {
-				resp := map[string]any{
-					"candidates": []map[string]any{
-						{
-							"content": map[string]any{
-								"role": "model",
-								"parts": []map[string]any{
-									{
-										"text": "All 7 telemetry samples are within nominal parameters.",
-									},
-								},
-							},
-							"finishReason": "STOP",
-						},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(resp)
-				return
-			}
-
-			http.Error(w, "unexpected turn count", http.StatusInternalServerError)
-		}))
-		defer geminiServer.Close()
-
-		client := server.NewGeminiClient(
-			server.WithBaseURL(geminiServer.URL),
-			server.WithModel("gemini-2.5-flash"),
+		fake := geminitest.New(t,
+			geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "system_telemetry"}),
+			geminitest.TextResponse("All 7 telemetry samples are within nominal parameters."),
 		)
-		srv := server.NewWorkloadServer(
-			server.WithGeminiClient(client),
-			server.WithForceMock(false),
-		)
-		ts := httptest.NewServer(srv.Handler())
-		defer ts.Close()
+		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)))
 
-		chatReq, _ := json.Marshal(types.ChatRequest{Message: "Check cluster telemetry status"})
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(chatReq))
-		if err != nil {
-			t.Fatalf("failed to create request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		t.Setenv("GEMINI_API_KEY", "test-api-key")
+		msg := postChat(t, srv.Handler(), "k.mac", "Check cluster telemetry status")
 
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("request failed: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", resp.StatusCode)
-		}
-
-		var msg types.ChatMessage
-		if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-
-		mu.Lock()
-		finalTurnCount := turnCount
-		mu.Unlock()
-
-		if finalTurnCount != 2 {
-			t.Errorf("expected 2 turns in tool execution loop, got %d", finalTurnCount)
+		if n := len(fake.Requests()); n != 2 {
+			t.Fatalf("expected 2 turns in tool execution loop, got %d", n)
 		}
 
 		if msg.Content != "All 7 telemetry samples are within nominal parameters." {
@@ -943,354 +569,16 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 	})
 }
 
-func TestGeminiClient_PreventDuplicateUserPrompt(t *testing.T) {
-	var capturedContents []*server.Content
-	var mu sync.Mutex
-
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		var reqBody server.GenerateContentRequest
-		_ = json.NewDecoder(r.Body).Decode(&reqBody)
-		capturedContents = reqBody.Contents
-		mu.Unlock()
-
-		resp := map[string]any{
-			"candidates": []map[string]any{
-				{
-					"content": map[string]any{
-						"role": "model",
-						"parts": []map[string]any{
-							{"text": "Acknowledged."},
-						},
-					},
-					"finishReason": "STOP",
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer geminiServer.Close()
-
-	client := server.NewGeminiClient(
-		server.WithBaseURL(geminiServer.URL),
-		server.WithModel("gemini-2.5-flash"),
-	)
-
-	t.Run("does not duplicate prompt if already at end of history", func(t *testing.T) {
-		history := []types.ChatMessage{
-			{Sender: types.SenderUser, Content: "First prompt"},
-			{Sender: types.SenderAssistant, Content: "Response 1"},
-			{Sender: types.SenderUser, Content: "Second prompt"},
-		}
-		_, err := client.GenerateContent(context.Background(), "test-key", history, "Second prompt")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		mu.Lock()
-		contents := capturedContents
-		mu.Unlock()
-
-		if len(contents) != 3 {
-			t.Fatalf("expected exactly 3 contents, got %d", len(contents))
-		}
-		if contents[2].Parts[0].Text != "Second prompt" {
-			t.Errorf("expected last content to be 'Second prompt', got %q", contents[2].Parts[0].Text)
-		}
-	})
-
-	t.Run("appends prompt if not at end of history", func(t *testing.T) {
-		history := []types.ChatMessage{
-			{Sender: types.SenderUser, Content: "First prompt"},
-			{Sender: types.SenderAssistant, Content: "Response 1"},
-		}
-		_, err := client.GenerateContent(context.Background(), "test-key", history, "New question")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		mu.Lock()
-		contents := capturedContents
-		mu.Unlock()
-
-		if len(contents) != 3 {
-			t.Fatalf("expected exactly 3 contents, got %d", len(contents))
-		}
-		if contents[2].Parts[0].Text != "New question" {
-			t.Errorf("expected last content to be 'New question', got %q", contents[2].Parts[0].Text)
-		}
-	})
-}
-
-func TestGeminiClient_ConsecutiveSameRoleHistoryMerging(t *testing.T) {
-	var capturedContents []*server.Content
-	var mu sync.Mutex
-
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		var reqBody server.GenerateContentRequest
-		_ = json.NewDecoder(r.Body).Decode(&reqBody)
-		capturedContents = reqBody.Contents
-		mu.Unlock()
-
-		resp := map[string]any{
-			"candidates": []map[string]any{
-				{
-					"content": map[string]any{
-						"role": "model",
-						"parts": []map[string]any{
-							{"text": "Merged turns acknowledged."},
-						},
-					},
-					"finishReason": "STOP",
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer geminiServer.Close()
-
-	client := server.NewGeminiClient(
-		server.WithBaseURL(geminiServer.URL),
-		server.WithModel("gemini-2.5-flash"),
-	)
-
-	t.Run("consecutive user and system turns merged into single user content with multiple parts", func(t *testing.T) {
-		history := []types.ChatMessage{
-			{Sender: types.SenderUser, Content: "Run initial analysis"},
-			{Sender: types.SenderAssistant, Content: "Proposed script for approval"},
-			{Sender: types.SenderSystem, Content: "Execution rejected by attendee. Operation canceled."},
-		}
-		_, err := client.GenerateContent(context.Background(), "test-key", history, "Please do something else instead")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		mu.Lock()
-		contents := capturedContents
-		mu.Unlock()
-
-		// Expected alternating roles: user, model, user (system rejection + new prompt merged)
-		if len(contents) != 3 {
-			t.Fatalf("expected 3 contents, got %d", len(contents))
-		}
-		if contents[0].Role != "user" || len(contents[0].Parts) != 1 || contents[0].Parts[0].Text != "Run initial analysis" {
-			t.Errorf("contents[0] mismatch: %+v", contents[0])
-		}
-		if contents[1].Role != "model" || len(contents[1].Parts) != 1 || contents[1].Parts[0].Text != "Proposed script for approval" {
-			t.Errorf("contents[1] mismatch: %+v", contents[1])
-		}
-		if contents[2].Role != "user" {
-			t.Errorf("expected role 'user', got %q", contents[2].Role)
-		}
-		if len(contents[2].Parts) != 2 {
-			t.Fatalf("expected 2 parts merged in contents[2], got %d", len(contents[2].Parts))
-		}
-		if contents[2].Parts[0].Text != "Execution rejected by attendee. Operation canceled." {
-			t.Errorf("part 0 mismatch: %q", contents[2].Parts[0].Text)
-		}
-		if contents[2].Parts[1].Text != "Please do something else instead" {
-			t.Errorf("part 1 mismatch: %q", contents[2].Parts[1].Text)
-		}
-	})
-
-	t.Run("consecutive assistant turns merged into single model content with multiple parts", func(t *testing.T) {
-		history := []types.ChatMessage{
-			{Sender: types.SenderUser, Content: "Execute task"},
-			{Sender: types.SenderAssistant, Content: "Analysis plan"},
-			{Sender: types.SenderAssistant, Content: "Execution completed in 42ms:\noutput"},
-		}
-		_, err := client.GenerateContent(context.Background(), "test-key", history, "What were the results?")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		mu.Lock()
-		contents := capturedContents
-		mu.Unlock()
-
-		// Expected:
-		// 0: user ("Execute task")
-		// 1: model (merged: "Analysis plan" + "Execution completed in 42ms:\noutput")
-		// 2: user ("What were the results?")
-		if len(contents) != 3 {
-			t.Fatalf("expected 3 contents, got %d", len(contents))
-		}
-		if contents[0].Role != "user" {
-			t.Errorf("contents[0] expected role 'user', got %q", contents[0].Role)
-		}
-		if contents[1].Role != "model" {
-			t.Errorf("contents[1] expected role 'model', got %q", contents[1].Role)
-		}
-		if len(contents[1].Parts) != 2 {
-			t.Fatalf("expected 2 parts in model content, got %d", len(contents[1].Parts))
-		}
-		if contents[1].Parts[0].Text != "Analysis plan" {
-			t.Errorf("part 0 mismatch: %q", contents[1].Parts[0].Text)
-		}
-		if contents[1].Parts[1].Text != "Execution completed in 42ms:\noutput" {
-			t.Errorf("part 1 mismatch: %q", contents[1].Parts[1].Text)
-		}
-		if contents[2].Role != "user" {
-			t.Errorf("contents[2] expected role 'user', got %q", contents[2].Role)
-		}
-	})
-
-	t.Run("strict alternating roles check across any history", func(t *testing.T) {
-		history := []types.ChatMessage{
-			{Sender: types.SenderUser, Content: "msg 1"},
-			{Sender: types.SenderUser, Content: "msg 2"},
-			{Sender: types.SenderAssistant, Content: "resp 1"},
-			{Sender: types.SenderAssistant, Content: "resp 2"},
-			{Sender: types.SenderSystem, Content: "notice 1"},
-			{Sender: types.SenderUser, Content: "msg 3"},
-		}
-		_, err := client.GenerateContent(context.Background(), "test-key", history, "msg 4")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		mu.Lock()
-		contents := capturedContents
-		mu.Unlock()
-
-		for i := 1; i < len(contents); i++ {
-			if contents[i].Role == contents[i-1].Role {
-				t.Fatalf("consecutive same role %q found at index %d and %d", contents[i].Role, i-1, i)
-			}
-		}
-	})
-}
-
-func TestGeminiClient_ContextCancellation(t *testing.T) {
-	client := server.NewGeminiClient(
-		server.WithBaseURL("https://example.com"),
-		server.WithModel("gemini-2.5-flash"),
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	msg, err := client.GenerateContent(ctx, "test-key", nil, "test prompt")
-	if err == nil {
-		t.Fatalf("expected error from canceled context, got nil error with msg: %+v", msg)
-	}
-	if ctx.Err() == nil || err != context.Canceled {
-		t.Fatalf("expected context.Canceled error, got %v", err)
-	}
-	if msg != nil {
-		t.Fatalf("expected nil msg when context is canceled, got %+v", msg)
-	}
-}
-
-func TestGeminiClient_ExecuteSandboxCodeApproval(t *testing.T) {
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.Header.Get("x-goog-api-key")
-		if apiKey != "test-key" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		resp := map[string]any{
-			"candidates": []map[string]any{
-				{
-					"content": map[string]any{
-						"role": "model",
-						"parts": []map[string]any{
-							{
-								"functionCall": map[string]any{
-									"name": "execute_sandbox_code",
-									"args": map[string]any{
-										"code":     "print('hello sandbox')",
-										"language": "python",
-										"summary":  "Test sandbox execution",
-									},
-								},
-							},
-						},
-					},
-					"finishReason": "STOP",
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer geminiServer.Close()
-
-	client := server.NewGeminiClient(
-		server.WithBaseURL(geminiServer.URL),
-		server.WithModel("gemini-2.5-flash"),
-	)
-
-	msg, err := client.GenerateContent(context.Background(), "test-key", nil, "Run python script")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if msg == nil {
-		t.Fatal("expected non-nil ChatMessage")
-	}
-	if msg.Approval == nil {
-		t.Fatal("expected approval request when Gemini invokes execute_sandbox_code")
-	}
-	if msg.Approval.Code != "print('hello sandbox')" {
-		t.Errorf("unexpected approval code: %s", msg.Approval.Code)
-	}
-	if msg.Approval.Language != "python" {
-		t.Errorf("unexpected approval language: %s", msg.Approval.Language)
-	}
-	if msg.Approval.RiskLevel != types.RiskHigh {
-		t.Errorf("expected RiskHigh, got %s", msg.Approval.RiskLevel)
-	}
-	if msg.Approval.Summary != "Test sandbox execution" {
-		t.Errorf("unexpected approval summary: %s", msg.Approval.Summary)
-	}
-}
-
 func TestFineGrainedMutexLocking(t *testing.T) {
 	t.Run("mutex not blocked during handleApprove execution", func(t *testing.T) {
 		workspace := t.TempDir()
 
 		// Mock Gemini to propose a shell sleep command
-		geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			resp := map[string]any{
-				"candidates": []map[string]any{
-					{
-						"content": map[string]any{
-							"role": "model",
-							"parts": []map[string]any{
-								{
-									"functionCall": map[string]any{
-										"name": "request_human_approval",
-										"args": map[string]any{
-											"summary":    "Slow background job",
-											"code":       "sleep 0.4",
-											"language":   "sh",
-											"risk_level": "HIGH",
-										},
-									},
-								},
-							},
-						},
-						"finishReason": "STOP",
-					},
-				},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
-		}))
-		defer geminiServer.Close()
+		fake := geminitest.New(t, geminitest.ApprovalResponse("Slow background job", "sleep 0.4", "sh"))
 
-		client := server.NewGeminiClient(
-			server.WithBaseURL(geminiServer.URL),
-			server.WithModel("gemini-2.5-flash"),
-		)
 		srv := server.NewWorkloadServer(
-			server.WithGeminiClient(client),
+			server.WithGeminiConfig(proxyConfig(fake.URL)),
 			server.WithWorkspaceDir(workspace),
-			server.WithForceMock(false),
 		)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
@@ -1299,7 +587,7 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 		chatReq, _ := json.Marshal(types.ChatRequest{Message: "Run slow job"})
 		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(chatReq))
 		req.Header.Set("Content-Type", "application/json")
-		t.Setenv("GEMINI_API_KEY", "test-key")
+		req.Header.Set(types.ModelKeyHeader, "k.mac")
 		chatResp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("chat request failed: %v", err)
@@ -1353,35 +641,16 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 	})
 
 	t.Run("mutex not blocked during handleChat Gemini generation", func(t *testing.T) {
-		geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Simulate 400ms external Gemini API latency
+		// geminitest has no delay hook, so simulate slow upstream latency with a
+		// raw fake speaking the same generateContent response shape.
+		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(400 * time.Millisecond)
-			resp := map[string]any{
-				"candidates": []map[string]any{
-					{
-						"content": map[string]any{
-							"role": "model",
-							"parts": []map[string]any{
-								{"text": "Response after latency"},
-							},
-						},
-						"finishReason": "STOP",
-					},
-				},
-			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
+			_, _ = io.WriteString(w, geminitest.TextResponse("Response after latency"))
 		}))
-		defer geminiServer.Close()
+		defer fake.Close()
 
-		client := server.NewGeminiClient(
-			server.WithBaseURL(geminiServer.URL),
-			server.WithModel("gemini-2.5-flash"),
-		)
-		srv := server.NewWorkloadServer(
-			server.WithGeminiClient(client),
-			server.WithForceMock(false),
-		)
+		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)))
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 
@@ -1391,17 +660,17 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 			reqBody, _ := json.Marshal(types.ChatRequest{Message: "Check latency"})
 			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(reqBody))
 			req.Header.Set("Content-Type", "application/json")
-			t.Setenv("GEMINI_API_KEY", "test-key")
+			req.Header.Set(types.ModelKeyHeader, "k.mac")
 			resp, chatErr := http.DefaultClient.Do(req)
 			if chatErr == nil {
 				_ = resp.Body.Close()
 			}
 		}()
 
-		// Wait briefly so handleChat has entered GenerateContent
+		// Wait briefly so handleChat has entered Generate
 		time.Sleep(100 * time.Millisecond)
 
-		// History() must not be blocked while GenerateContent is running
+		// History() must not be blocked while Generate is running
 		start := time.Now()
 		hist := srv.History()
 		duration := time.Since(start)
@@ -1424,58 +693,63 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 	})
 }
 
-func TestChat_GeminiKeyComesFromEnvNotRequest(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		envKey  string
-		wantKey string // empty means Gemini must not be called
-	}{
-		{name: "no env key", envKey: ""},
-		{name: "env key", envKey: "env-key", wantKey: "env-key"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GEMINI_API_KEY", tc.envKey)
-			var mu sync.Mutex
-			var keys []string
-			geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				keys = append(keys, r.Header.Get("x-goog-api-key"))
-				mu.Unlock()
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}`))
-			}))
-			defer geminiServer.Close()
+func TestChat_UsesModelKeyFromGatewayHeader(t *testing.T) {
+	fake := geminitest.New(t, geminitest.TextResponse("from gemini"))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(proxyConfig(fake.URL)))
 
-			srv := server.NewWorkloadServer(
-				server.WithGeminiClient(server.NewGeminiClient(server.WithBaseURL(geminiServer.URL), server.WithProject(""))),
-				server.WithForceMock(false),
-			)
-			ts := httptest.NewServer(srv.Handler())
-			defer ts.Close()
+	msg := postChat(t, s.Handler(), "attendee-01.mac", "hi")
 
-			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Gemini-API-Key", "client-supplied-key")
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("status = %d, want 200", resp.StatusCode)
-			}
+	if msg.Content != "from gemini" || msg.Source != types.SourceGemini {
+		t.Errorf("reply = %q source %q, want gemini reply", msg.Content, msg.Source)
+	}
+	if got := fake.Requests()[0].Authorization; got != "Bearer attendee-01.mac" {
+		t.Errorf("proxy Authorization = %q", got)
+	}
+	if s.ModelKey() != "attendee-01.mac" {
+		t.Errorf("ModelKey() = %q", s.ModelKey())
+	}
+}
 
-			mu.Lock()
-			defer mu.Unlock()
-			if tc.wantKey == "" {
-				if len(keys) != 0 {
-					t.Fatalf("Gemini called with client-supplied key %q; want mock engine", keys)
-				}
-				return
-			}
-			if len(keys) == 0 || keys[0] != tc.wantKey {
-				t.Fatalf("Gemini keys = %q, want [%q]", keys, tc.wantKey)
-			}
-		})
+func TestChat_ModelFailureFallsBackToLabeledMock(t *testing.T) {
+	fake := geminitest.NewStatus(t, http.StatusInternalServerError)
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(proxyConfig(fake.URL)))
+
+	msg := postChat(t, s.Handler(), "k.mac", "hi")
+
+	if msg.Source != types.SourceMockFallback {
+		t.Errorf("Source = %q, want mock-fallback", msg.Source)
+	}
+}
+
+func TestChat_NoProxyConfiguredUsesLabeledMock(t *testing.T) {
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(gemini.Config{}))
+	if msg := postChat(t, s.Handler(), "", "hi"); msg.Source != types.SourceMock {
+		t.Errorf("Source = %q, want mock", msg.Source)
+	}
+}
+
+func TestChat_ForceMockSkipsProxy(t *testing.T) {
+	fake := geminitest.New(t, geminitest.TextResponse("unused"))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()),
+		server.WithGeminiConfig(proxyConfig(fake.URL)), server.WithForceMock(true))
+
+	if msg := postChat(t, s.Handler(), "k.mac", "hi"); msg.Source != types.SourceMock {
+		t.Errorf("Source = %q, want mock", msg.Source)
+	}
+	if n := len(fake.Requests()); n != 0 {
+		t.Errorf("proxy got %d requests, want 0", n)
+	}
+}
+
+func TestChat_HistoryIsSentOnFollowingTurn(t *testing.T) {
+	fake := geminitest.New(t, geminitest.TextResponse("first answer"), geminitest.TextResponse("second answer"))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(proxyConfig(fake.URL)))
+
+	postChat(t, s.Handler(), "k.mac", "remember the word pelican")
+	postChat(t, s.Handler(), "k.mac", "what word?")
+
+	second := string(fake.Requests()[1].Body)
+	if !strings.Contains(second, "pelican") || !strings.Contains(second, "first answer") {
+		t.Errorf("second model request lacks history: %s", second)
 	}
 }

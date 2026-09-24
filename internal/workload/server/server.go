@@ -18,12 +18,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/internal/workload/engine"
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/gemini"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -37,13 +39,10 @@ func WithForceMock(forceMock bool) ServerOption {
 	}
 }
 
-// WithGeminiClient sets a custom GeminiClient.
-func WithGeminiClient(client *GeminiClient) ServerOption {
-	return func(s *WorkloadServer) {
-		if client != nil {
-			s.geminiClient = client
-		}
-	}
+// WithGeminiConfig points the actor's Gemini client at a model proxy. A
+// config that is not Enabled leaves the actor on the mock engine.
+func WithGeminiConfig(cfg gemini.Config) ServerOption {
+	return func(s *WorkloadServer) { s.geminiCfg = cfg }
 }
 
 // WithWorkspaceDir configures the execution sandbox workspace directory.
@@ -79,7 +78,9 @@ type WorkloadServer struct {
 	mux             *http.ServeMux
 	executor        *engine.SandboxExecutor
 	mockEngine      *engine.MockEngine
-	geminiClient    *GeminiClient
+	geminiCfg       gemini.Config
+	gemini          *gemini.Client
+	modelKey        string
 	forceMock       bool
 	workspaceDir    string
 	mu              sync.Mutex
@@ -100,7 +101,7 @@ func NewWorkloadServer(opts ...ServerOption) *WorkloadServer {
 		workspaceDir: workspace,
 		executor:     engine.NewSandboxExecutor(workspace),
 		mockEngine:   mockEngine,
-		geminiClient: NewGeminiClient(WithGeminiMockEngine(mockEngine)),
+		geminiCfg:    gemini.ConfigFromEnv(),
 		forceMock:    os.Getenv("DEMO_MOCK_LLM") == "true",
 	}
 
@@ -108,13 +109,32 @@ func NewWorkloadServer(opts ...ServerOption) *WorkloadServer {
 		opt(s)
 	}
 
+	if s.geminiCfg.Enabled() {
+		s.gemini = gemini.New(s.geminiCfg, s.ModelKey)
+	}
+
 	s.routes()
 	return s
 }
 
-// Handler returns the HTTP handler for the server.
+// ModelKey returns the latest model proxy key the gateway sent.
+func (s *WorkloadServer) ModelKey() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.modelKey
+}
+
+// Handler returns the HTTP handler for the server. Every request that
+// carries a model key refreshes the one the Gemini client uses.
 func (s *WorkloadServer) Handler() http.Handler {
-	return s.mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if k := r.Header.Get(types.ModelKeyHeader); k != "" {
+			s.mu.Lock()
+			s.modelKey = k
+			s.mu.Unlock()
+		}
+		s.mux.ServeHTTP(w, r)
+	})
 }
 
 // History returns a snapshot of the in-memory conversation history.
@@ -166,8 +186,6 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey := os.Getenv("GEMINI_API_KEY")
-
 	userMsg := types.ChatMessage{
 		ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
 		Sender:    types.SenderUser,
@@ -177,24 +195,10 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.history = append(s.history, userMsg)
-	historyCopy := make([]types.ChatMessage, len(s.history))
-	copy(historyCopy, s.history)
+	historyCopy := append([]types.ChatMessage(nil), s.history...)
 	s.mu.Unlock()
 
-	var assistantMsg *types.ChatMessage
-	var err error
-
-	if s.forceMock {
-		assistantMsg = s.mockEngine.GenerateTurn(req.Message)
-	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		defer cancel()
-
-		assistantMsg, err = s.geminiClient.GenerateContent(ctx, apiKey, historyCopy, req.Message)
-		if err != nil || assistantMsg == nil {
-			assistantMsg = s.mockEngine.GenerateTurn(req.Message)
-		}
-	}
+	assistantMsg := s.reply(r.Context(), historyCopy, req.Message)
 
 	s.mu.Lock()
 	if assistantMsg.Approval != nil {
@@ -205,6 +209,28 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(assistantMsg)
+}
+
+// chatTimeout bounds one Gemini turn, tool calls included.
+const chatTimeout = 60 * time.Second
+
+func (s *WorkloadServer) reply(ctx context.Context, history []types.ChatMessage, prompt string) *types.ChatMessage {
+	if s.forceMock || s.gemini == nil {
+		msg := s.mockEngine.GenerateTurn(prompt)
+		msg.Source = types.SourceMock
+		return msg
+	}
+	ctx, cancel := context.WithTimeout(ctx, chatTimeout)
+	defer cancel()
+	msg, err := s.gemini.Generate(ctx, history, prompt)
+	if err != nil {
+		log.Printf("gemini turn failed, replying with the mock engine: %v", err)
+		msg = s.mockEngine.GenerateTurn(prompt)
+		msg.Source = types.SourceMockFallback
+		return msg
+	}
+	msg.Source = types.SourceGemini
+	return msg
 }
 
 func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {

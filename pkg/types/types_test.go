@@ -86,6 +86,32 @@ func TestMessageSerialization(t *testing.T) {
 		}
 	})
 
+	t.Run("with source", func(t *testing.T) {
+		msg := types.ChatMessage{
+			ID:        "msg-3",
+			Sender:    types.SenderAssistant,
+			Content:   "Falling back to the mock engine",
+			Timestamp: 1789910100,
+			Source:    types.SourceMockFallback,
+		}
+
+		data, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatalf("failed to marshal ChatMessage: %v", err)
+		}
+		if !strings.Contains(string(data), `"source":"mock-fallback"`) {
+			t.Fatalf("expected source in JSON, got %s", string(data))
+		}
+
+		var decoded types.ChatMessage
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal ChatMessage: %v", err)
+		}
+		if diff := cmp.Diff(msg, decoded); diff != "" {
+			t.Fatalf("ChatMessage mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("without approval (omitempty)", func(t *testing.T) {
 		msg := types.ChatMessage{
 			ID:        "msg-2",
