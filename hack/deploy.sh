@@ -14,44 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# This is sourced as part of install-ate.sh, or executed directly.
+# Deploys the demo onto a cluster that runs Substrate. Sourced by
+# hack/test-deploy.sh for its cluster-free tests.
 
-ATE_DEMOS+=(demo-conference) # register demo-conference
+# shellcheck source=hack/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 DEMO_CONF_PATCH_ROUTER="${DEMO_CONF_PATCH_ROUTER:-false}"
-DEMO_CONF_ACTORS=50
+DEMO_CONF_ACTORS="${DEMO_CONF_ACTORS:-50}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to conference-template.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
 DEMO_CONF_TEMPLATE_REVISION=2
 
-demo-conference_usage() {
-  echo "  --patch-router                                Patch atenet-router's parked-request-budget/route-timeout"
-  echo "                                                 flags and terminationGracePeriodSeconds instead of failing"
-  echo "                                                 when they are too low for LLM turns and the shutdown they need."
-  echo "                                                 Must appear before --deploy-demo-conference: the install script"
-  echo "                                                 processes flags in order, so a --patch-router given after"
-  echo "                                                 deploy has already started has no effect. DEMO_CONF_PATCH_ROUTER=true"
-  echo "                                                 in the environment is equivalent and order-independent."
-  echo "  Required env: BUCKET_NAME, KO_DOCKER_REPO"
-  echo "  Optional env: PROJECT_ID (enables Vertex AI; unset runs in mock mode), VERTEX_LOCATION (default us-central1),"
-  echo "                DEMO_DOMAIN (fronts the gateway with a GKE-managed TLS Ingress)"
-}
-
-demo-conference_cmdline() {
-  case "${1}" in
-    --deploy-demo-conference) demo-conference_deploy ;;
-    --delete-demo-conference) demo-conference_delete ;;
-    --patch-router) DEMO_CONF_PATCH_ROUTER=true ;;
-    *)
-      ate_demo_flag_unhandled
-      ;;
-  esac
-}
-
-# demo-conference_seconds converts a Go duration made of h/m/s parts to
+# conf_seconds converts a Go duration made of h/m/s parts to
 # whole seconds, or prints nothing if it cannot parse it.
-demo-conference_seconds() {
+conf_seconds() {
   local d="$1" total=0 n unit
   while [[ "${d}" =~ ^([0-9]+)(h|m|s)(.*)$ ]]; do
     # 10# forces base 10: a leading zero (e.g. "08s") would otherwise read
@@ -68,9 +46,9 @@ demo-conference_seconds() {
   [[ -z "${d}" ]] && echo "${total}"
 }
 
-# demo-conference_flag_value prints the value of a --flag from a JSON array
+# conf_flag_value prints the value of a --flag from a JSON array
 # of args, accepting both "--flag=v" and "--flag" "v".
-demo-conference_flag_value() {
+conf_flag_value() {
   local args_json="$1" flag="$2"
   jq -r --arg f "${flag}" '
     . as $a | [range(0; length)] | map(
@@ -79,7 +57,7 @@ demo-conference_flag_value() {
       else empty end) | last // empty' <<<"${args_json}"
 }
 
-# demo-conference_grace_ok returns 0 if GRACE_SECONDS (the Deployment's
+# conf_grace_ok returns 0 if GRACE_SECONDS (the Deployment's
 # spec.template.spec.terminationGracePeriodSeconds, or empty/unparseable if
 # it could not be read) is at least 120: the minimum that fits
 # atenet-router's shutdown sequence once --parked-request-budget is raised
@@ -88,32 +66,32 @@ demo-conference_flag_value() {
 # config.go) already reaches about 75s, on top of --drain-delay and the
 # Envoy drain window (manifests/ate-install/atenet-router.yaml); a shorter
 # grace period lets the kubelet SIGKILL the router mid-drain.
-demo-conference_grace_ok() {
+conf_grace_ok() {
   local grace="${1:-}"
   [[ "${grace}" =~ ^[0-9]+$ ]] && ((10#${grace} >= 120))
 }
 
-# demo-conference_router_flags_ok prints the changes atenet-router needs for
+# conf_router_flags_ok prints the changes atenet-router needs for
 # long LLM turns and returns 1 if any are missing or too low. It also
-# requires GRACE_SECONDS (see demo-conference_grace_ok) to be at least 120,
+# requires GRACE_SECONDS (see conf_grace_ok) to be at least 120,
 # but only once the duration flags are themselves acceptable: a low grace
 # period is only unsafe once --parked-request-budget is raised to 60s, so
 # there is nothing to say about it before that.
-demo-conference_router_flags_ok() {
+conf_router_flags_ok() {
   local args_json="$1" grace="${2:-}" missing=() v s
-  v="$(demo-conference_flag_value "${args_json}" --parked-request-budget)"
-  s="$(demo-conference_seconds "${v:-5s}")"
+  v="$(conf_flag_value "${args_json}" --parked-request-budget)"
+  s="$(conf_seconds "${v:-5s}")"
   if [[ -z "${s}" || "${s}" -lt 60 ]]; then
     missing+=("--parked-request-budget=60s")
   fi
-  v="$(demo-conference_flag_value "${args_json}" --route-timeout)"
+  v="$(conf_flag_value "${args_json}" --route-timeout)"
   if [[ -n "${v}" ]]; then
-    s="$(demo-conference_seconds "${v}")"
+    s="$(conf_seconds "${v}")"
     if [[ -z "${s}" || "${s}" -lt 60 ]]; then
       missing+=("--route-timeout=5m")
     fi
   fi
-  if ((${#missing[@]} == 0)) && ! demo-conference_grace_ok "${grace}"; then
+  if ((${#missing[@]} == 0)) && ! conf_grace_ok "${grace}"; then
     missing+=("terminationGracePeriodSeconds=120")
   fi
   if ((${#missing[@]} > 0)); then
@@ -122,11 +100,11 @@ demo-conference_router_flags_ok() {
   fi
 }
 
-# demo-conference_router_patch prints a JSON patch that adds FLAGS... to the
+# conf_router_patch prints a JSON patch that adds FLAGS... to the
 # atenet-router container of the Deployment JSON in $1. The container is
 # found by name, since the Deployment also runs Envoy; a container without
 # args gets a new args array. Fails if there is no atenet-router container.
-demo-conference_router_patch() {
+conf_router_patch() {
   local deploy_json="$1"
   shift
   # Flags go in one newline-joined --arg: jq would parse a positional
@@ -142,13 +120,13 @@ demo-conference_router_patch() {
       end' <<<"${deploy_json}"
 }
 
-demo-conference_check_router() {
+conf_check_router() {
   local args_json grace missing flag flags patch
   args_json="$(run_kubectl get deployment atenet-router -n ate-system \
     -o jsonpath='{.spec.template.spec.containers[?(@.name=="atenet-router")].args}')"
   grace="$(run_kubectl get deployment atenet-router -n ate-system \
     -o jsonpath='{.spec.template.spec.terminationGracePeriodSeconds}')"
-  if missing="$(demo-conference_router_flags_ok "${args_json}" "${grace}")"; then
+  if missing="$(conf_router_flags_ok "${args_json}" "${grace}")"; then
     return 0
   fi
   if [[ "${DEMO_CONF_PATCH_ROUTER}" != true ]]; then
@@ -163,7 +141,7 @@ demo-conference_check_router() {
     [[ "${flag}" == --* ]] && flags+=("${flag}")
   done <<<"${missing}"
   if ((${#flags[@]} > 0)); then
-    if ! patch="$(demo-conference_router_patch \
+    if ! patch="$(conf_router_patch \
       "$(run_kubectl get deployment atenet-router -n ate-system -o json)" "${flags[@]}")"; then
       echo "error: cannot find the atenet-router container in the atenet-router Deployment" >&2
       exit 1
@@ -174,19 +152,19 @@ demo-conference_check_router() {
   # raising --parked-request-budget to 60s above always makes the grace
   # period requirement apply, even if it wasn't part of "missing" because
   # the flags were not yet acceptable before this patch.
-  if ! demo-conference_grace_ok "${grace}"; then
+  if ! conf_grace_ok "${grace}"; then
     run_kubectl_fatal patch deployment atenet-router -n ate-system --type=json \
       -p='[{"op":"add","path":"/spec/template/spec/terminationGracePeriodSeconds","value":120}]'
   fi
   run_kubectl_fatal rollout status deployment/atenet-router -n ate-system --timeout=120s
 }
 
-# demo-conference_iam_retry runs an IAM-binding gcloud command, retrying it
+# conf_iam_retry runs an IAM-binding gcloud command, retrying it
 # a few times with a short sleep when CREATED is true: IAM's view of a
 # service account lags its creation by a few seconds, so the first binding
 # attempt on a brand-new GSA can 404. A pre-existing GSA gets one attempt,
 # so a real permission or config error still fails immediately.
-demo-conference_iam_retry() {
+conf_iam_retry() {
   local created="$1" out attempt=1 max=5
   shift
   while true; do
@@ -204,30 +182,30 @@ demo-conference_iam_retry() {
   done
 }
 
-demo-conference_ensure_gsa() {
+conf_ensure_gsa() {
   local gsa="conf-gateway@${PROJECT_ID}.iam.gserviceaccount.com" created=false
   if ! gcloud iam service-accounts describe "${gsa}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
     gcloud iam service-accounts create conf-gateway --project "${PROJECT_ID}" \
       --display-name "Conference demo gateway (Vertex AI only)"
     created=true
   fi
-  demo-conference_iam_retry "${created}" gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  conf_iam_retry "${created}" gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --condition=None --member "serviceAccount:${gsa}" --role roles/aiplatform.user
-  demo-conference_iam_retry "${created}" gcloud iam service-accounts add-iam-policy-binding "${gsa}" \
+  conf_iam_retry "${created}" gcloud iam service-accounts add-iam-policy-binding "${gsa}" \
     --project "${PROJECT_ID}" \
     --member "serviceAccount:${PROJECT_ID}.svc.id.goog[ate-demo-conf/conf-gateway]" \
     --role roles/iam.workloadIdentityUser
   DEMO_CONF_GATEWAY_GSA="${gsa}"
 }
 
-# demo-conference_build_gateway pushes the gateway image and echoes its
+# conf_build_gateway pushes the gateway image and echoes its
 # digest-pinned reference.
-demo-conference_build_gateway() {
+conf_build_gateway() {
   local repo="${KO_DOCKER_REPO}/conf-gateway"
   # shellcheck disable=SC2155 # safe initialization
   local stage_tag="${repo}:build-$(date +%s)"
   docker buildx build --platform=linux/amd64 --push \
-    -f demos/conference/Dockerfile -t "${stage_tag}" . >&2
+    -f build/gateway.Dockerfile -t "${stage_tag}" . >&2
   local digest
   digest="$(docker buildx imagetools inspect "${stage_tag}" --format '{{json .}}' | jq -r '.manifest.digest')"
   if [[ -z "${digest}" || "${digest}" == "null" ]]; then
@@ -237,7 +215,7 @@ demo-conference_build_gateway() {
   echo "${repo}@${digest}"
 }
 
-demo-conference_render() {
+conf_render() {
   sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME:-placeholder}|g" \
       -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
       -e "s|\${GATEWAY_GSA}|${DEMO_CONF_GATEWAY_GSA:-}|g" \
@@ -247,10 +225,10 @@ demo-conference_render() {
       -e "s|\${ACTOR_COUNT}|${DEMO_CONF_ACTORS}|g" \
       -e "s|\${DEMO_DOMAIN}|${DEMO_DOMAIN:-}|g" \
       -e "s|\${TEMPLATE_REVISION}|${DEMO_CONF_TEMPLATE_REVISION}|g" \
-      "$1" | substitute_version
+      "$1"
 }
 
-demo-conference_ensure_secret() {
+conf_ensure_secret() {
   if run_kubectl get secret conf-gateway -n ate-demo-conf >/dev/null 2>&1; then
     return 0
   fi
@@ -271,15 +249,15 @@ demo-conference_ensure_secret() {
     --from-env-file=<(printf 'HMAC_SECRET=%s\nPRESENTER_TOKEN=%s\n' "${hmac}" "${token}")
 }
 
-# demo-conference_template_current succeeds if the conf-agent template JSON in
+# conf_template_current succeeds if the conf-agent template JSON in
 # $1 carries the current DEMO_CONF_TEMPLATE_REVISION.
-demo-conference_template_current() {
+conf_template_current() {
   jq -e --arg rev "${DEMO_CONF_TEMPLATE_REVISION}" '
     [.containers[]? | select(.name == "conf-workload")] | first // {}
     | [.env[]? | select(.name == "CONF_TEMPLATE_REVISION" and .value == $rev)] | length > 0' <<<"$1" >/dev/null
 }
 
-demo-conference_check_template() {
+conf_check_template() {
   local env
   if ! env="$(run_kubectl_ate get actor-template conf-agent -a ate-demo-conf -o json 2>&1)"; then
     if grep -qi "not found" <<<"${env}"; then
@@ -288,18 +266,55 @@ demo-conference_check_template() {
     echo "error: failed to check actor template conf-agent: ${env}" >&2
     exit 1
   fi
-  if ! demo-conference_template_current "${env}"; then
+  if ! conf_template_current "${env}"; then
     echo "error: actor template conf-agent is out of date (it lacks CONF_TEMPLATE_REVISION ${DEMO_CONF_TEMPLATE_REVISION}) and templates are immutable." >&2
-    echo "Run: hack/install-ate.sh --delete-demo-conference, then deploy again." >&2
+    echo "Run: hack/deploy.sh down, then hack/deploy.sh up." >&2
     exit 1
   fi
 }
 
-demo-conference_deploy() {
-  log_step "demo-conference_deploy"
+# conf_check_substrate requires Substrate on the cluster at the version
+# pinned in go.mod, installing it from SUBSTRATE_REPO if it is absent.
+conf_check_substrate() {
+  local pin labels
+  pin="$(substrate_pin)" || { echo "error: cannot read the substrate pin from go.mod" >&2; exit 1; }
+  if ! run_kubectl get namespace ate-system >/dev/null 2>&1; then
+    if [[ -z "${SUBSTRATE_REPO:-}" ]]; then
+      echo "error: Substrate is not installed (no ate-system namespace)." >&2
+      echo "Install it from a substrate checkout at commit ${pin}:" >&2
+      echo "  hack/install-ate.sh --deploy-ate-system" >&2
+      echo "or set SUBSTRATE_REPO to that checkout and run this again." >&2
+      exit 1
+    fi
+    local head
+    head="$(git -C "${SUBSTRATE_REPO}" rev-parse HEAD)"
+    if [[ "${head}" != "${pin}"* ]]; then
+      echo "error: SUBSTRATE_REPO is at ${head:0:12}, not the pinned ${pin}. Check out ${pin} there first." >&2
+      exit 1
+    fi
+    log_step "Installing Substrate from ${SUBSTRATE_REPO}..."
+    (cd "${SUBSTRATE_REPO}" && hack/install-ate.sh --deploy-ate-system)
+  fi
+  labels="$(run_kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.ate\.dev/substrate-version}{"\n"}{end}')"
+  if ! substrate_labels_match "${pin}" "${labels}"; then
+    echo "error: the cluster's nodes run Substrate $(sort -u <<<"${labels}" | tr '\n' ' ')but go.mod pins ${pin}." >&2
+    echo "Bump the pin to the cluster's commit:" >&2
+    echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/kubectl-ate@<commit>" >&2
+    echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/ateom-gvisor@<commit>" >&2
+    echo "  then copy substrate's go directive and k8s.io/apimachinery replace into go.mod and run go mod tidy." >&2
+    exit 1
+  fi
+}
+
+conf_deploy() {
+  log_step "Deploying the conference demo"
   : "${BUCKET_NAME:?BUCKET_NAME must be set}"
   : "${KO_DOCKER_REPO:?KO_DOCKER_REPO must be set}"
-  command -v jq >/dev/null || { echo "error: jq is required" >&2; exit 1; }
+  local tool
+  for tool in kubectl ko docker jq go; do
+    command -v "${tool}" >/dev/null || { echo "error: ${tool} is required" >&2; exit 1; }
+  done
+  conf_check_substrate
 
   if [[ -n "${PROJECT_ID:-}" ]]; then
     DEMO_CONF_VERTEX_PROJECT="${PROJECT_ID}"
@@ -313,22 +328,24 @@ demo-conference_deploy() {
 
   # Read-only and cheap: run before the router check so a stale conf-agent
   # aborts the deploy before atenet-router is ever patched.
-  demo-conference_check_template
-  demo-conference_check_router
+  conf_check_template
+  conf_check_router
   if [[ -n "${PROJECT_ID:-}" ]]; then
-    demo-conference_ensure_gsa
+    conf_ensure_gsa
   fi
 
-  deploy_substrate_demo demo-conference_render \
-    demos/conference/conference.yaml.tmpl ate-demo-conf conf-workers 300 \
-    demos/conference/conference-template.yaml.tmpl conf-agent
+  conf_render manifests/workerpool.yaml.tmpl | ko resolve -f - | run_kubectl_fatal apply -f -
+  log_step "Waiting for the conf-workers worker pool rollout..."
+  wait_for_pool_rollout_fatal conf-workers ate-demo-conf
+  ensure_atespace ate-demo-conf
+  create_actor_template conf_render manifests/actortemplate.yaml.tmpl ate-demo-conf conf-agent 300
 
   log_step "Building conf-gateway image..."
-  DEMO_CONF_GATEWAY_IMAGE="$(demo-conference_build_gateway)"
-  demo-conference_ensure_secret
-  demo-conference_render demos/conference/manifests/gateway.yaml.tmpl | run_kubectl_fatal apply -f -
+  DEMO_CONF_GATEWAY_IMAGE="$(conf_build_gateway)"
+  conf_ensure_secret
+  conf_render manifests/gateway.yaml.tmpl | run_kubectl_fatal apply -f -
   if [[ -n "${DEMO_DOMAIN:-}" ]]; then
-    demo-conference_render demos/conference/manifests/gateway-ingress.yaml.tmpl | run_kubectl_fatal apply -f -
+    conf_render manifests/gateway-ingress.yaml.tmpl | run_kubectl_fatal apply -f -
   fi
   run_kubectl_fatal rollout status deployment/conf-gateway -n ate-demo-conf --timeout=180s
 
@@ -351,15 +368,17 @@ demo-conference_deploy() {
   echo "Attendees: http://<conf-gateway EXTERNAL-IP>/chat (plain HTTP unless DEMO_DOMAIN is set)"
 }
 
-demo-conference_delete() {
-  log_step "demo-conference_delete"
-  run_kubectl delete -f <(demo-conference_render demos/conference/manifests/gateway.yaml.tmpl) --ignore-not-found
+conf_delete() {
+  log_step "Deleting the conference demo"
+  run_kubectl delete -f <(conf_render manifests/gateway.yaml.tmpl) --ignore-not-found
   if [[ -n "${DEMO_DOMAIN:-}" ]]; then
-    run_kubectl delete -f <(demo-conference_render demos/conference/manifests/gateway-ingress.yaml.tmpl) --ignore-not-found
+    run_kubectl delete -f <(conf_render manifests/gateway-ingress.yaml.tmpl) --ignore-not-found
   fi
   run_kubectl delete secret conf-gateway -n ate-demo-conf --ignore-not-found
-  delete_substrate_demo demo-conference_render \
-    demos/conference/conference.yaml.tmpl ate-demo-conf conf-agent
+  delete_actor_template ate-demo-conf conf-agent
+  run_kubectl_ate delete atespace ate-demo-conf 2>/dev/null \
+    || log_step "atespace ate-demo-conf not deleted (may not exist or is not empty)"
+  conf_render manifests/workerpool.yaml.tmpl | run_kubectl delete --ignore-not-found -f -
   log_step "atenet-router flags are left as they are."
   if [[ -n "${PROJECT_ID:-}" ]]; then
     local gsa="conf-gateway@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -370,48 +389,34 @@ demo-conference_delete() {
   fi
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  set -o errexit -o nounset -o pipefail
-  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd))"
-  cd "${ROOT}"
-
-  action=""
-  extra_args=()
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --deploy|--deploy-demo-conference)
-        action="deploy"
-        shift
-        ;;
-      --delete|--delete-demo-conference)
-        action="delete"
-        shift
-        ;;
-      -h|--help)
-        echo "Usage: $0 [--deploy|--delete] [--patch-router]"
-        echo "  --patch-router patches atenet-router's flags instead of failing when they"
-        echo "  are too low for LLM turns. It is forwarded ahead of --deploy so it always"
-        echo "  takes effect, regardless of where it appears on this command line."
-        exit 0
-        ;;
-      *)
-        extra_args+=("$1")
-        shift
-        ;;
+conf_main() {
+  local action="" arg
+  for arg in "$@"; do
+    case "${arg}" in
+      up | down) action="${arg}" ;;
+      --patch-router) DEMO_CONF_PATCH_ROUTER=true ;;
+      -h | --help) action=help ;;
+      *) echo "error: unknown argument ${arg}" >&2; action=help ;;
     esac
   done
+  case "${action}" in
+    up) conf_deploy ;;
+    down) conf_delete ;;
+    *)
+      echo "Usage: $0 up|down [--patch-router]"
+      echo "  up              deploy the demo onto a cluster running Substrate at the go.mod pin"
+      echo "  down            delete it (router flags and the gateway service account stay)"
+      echo "  --patch-router  patch atenet-router's timeouts and grace period instead of failing"
+      echo "  Required env: KO_DOCKER_REPO, BUCKET_NAME"
+      echo "  Optional env: PROJECT_ID (enables Vertex AI; unset runs mock replies), VERTEX_LOCATION,"
+      echo "                DEMO_DOMAIN, DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO"
+      [[ "${action}" == help ]] && return 0 || return 1
+      ;;
+  esac
+}
 
-  if [[ -z "${action}" ]]; then
-    echo "Usage: $0 [--deploy|--delete] [--patch-router]" >&2
-    exit 1
-  fi
-
-  # extra_args (e.g. --patch-router) precede the action flag: install-ate.sh
-  # processes flags in the order given, and --patch-router only has an effect
-  # if it runs before --deploy-demo-conference starts the deploy.
-  if [[ "${action}" == "deploy" ]]; then
-    exec "${ROOT}/hack/install-ate.sh" ${extra_args[@]+"${extra_args[@]}"} --deploy-demo-conference
-  else
-    exec "${ROOT}/hack/install-ate.sh" ${extra_args[@]+"${extra_args[@]}"} --delete-demo-conference
-  fi
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  set -o errexit -o nounset -o pipefail
+  cd "$(dirname "${BASH_SOURCE[0]}")/.."
+  conf_main "$@"
 fi
