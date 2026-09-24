@@ -52,16 +52,19 @@ func TestProxy_RewritesHeadersAndReportsReply(t *testing.T) {
 	req.Header.Set("Cookie", "c=1")
 	req.Header.Set(auth.PresenterHeaderName, "pk")
 	req.Header.Set(types.ModelKeyHeader, "forged")
+	req.Header.Set(auth.AttendeeTokenHeader, "jwt")
+	req.Header.Set(auth.AttendeeIDHeader, "attendee-01")
+	req.Header.Set("ate-target-actor", "space/attendee-99")
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, WithAttendee(req, "attendee-01"))
 
-	for _, h := range []string{"Authorization", "Cookie", auth.PresenterHeaderName} {
+	for _, h := range []string{"Authorization", "Cookie", auth.PresenterHeaderName, auth.AttendeeTokenHeader, auth.AttendeeIDHeader} {
 		if got.Get(h) != "" {
 			t.Errorf("router received %s", h)
 		}
 	}
-	if got.Get("ate-target-actor") != "space/attendee-01" {
-		t.Errorf("ate-target-actor = %q", got.Get("ate-target-actor"))
+	if v := got.Values("ate-target-actor"); len(v) != 1 || v[0] != "space/attendee-01" {
+		t.Errorf("ate-target-actor = %q, want only space/attendee-01", v)
 	}
 	if want := modelproxy.Key([]byte("secret"), "space", "attendee-01"); got.Get(types.ModelKeyHeader) != want {
 		t.Errorf("model key = %q, want %q", got.Get(types.ModelKeyHeader), want)

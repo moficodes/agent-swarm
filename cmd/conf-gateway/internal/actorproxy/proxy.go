@@ -80,8 +80,13 @@ func New(target *url.URL, atespace string, secret []byte, transport http.RoundTr
 				pr.Out.Host = target.Host
 			}
 			attendeeID := attendeeOf(pr.In)
-			// Gateway credentials stay here; the actor gets only its own model key.
-			for _, h := range []string{"Authorization", "Cookie", auth.PresenterHeaderName, types.ModelKeyHeader} {
+			// Gateway credentials stay here; the actor gets only its own model
+			// key, and routing comes only from the authenticated attendee.
+			for _, h := range []string{
+				"Authorization", "Cookie", auth.PresenterHeaderName,
+				auth.AttendeeTokenHeader, auth.AttendeeIDHeader,
+				types.ModelKeyHeader, "ate-target-actor",
+			} {
 				pr.Out.Header.Del(h)
 			}
 			if attendeeID != "" {

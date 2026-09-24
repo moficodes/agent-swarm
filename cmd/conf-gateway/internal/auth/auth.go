@@ -35,6 +35,10 @@ const (
 	PresenterCookieName = "conf_presenter"
 	// PresenterHeaderName carries the presenter key for scripts.
 	PresenterHeaderName = "X-Presenter-Key"
+	// AttendeeTokenHeader carries an attendee JWT when Authorization is unset.
+	AttendeeTokenHeader = "X-Attendee-Token"
+	// AttendeeIDHeader optionally names the attendee a request is for.
+	AttendeeIDHeader = "X-Attendee-ID"
 )
 
 // Claims represents the decoded JWT payload.
@@ -121,7 +125,7 @@ func (s *Signer) Authenticate(r *http.Request) (string, error) {
 	authHdr := r.Header.Get("Authorization")
 	if strings.HasPrefix(authHdr, "Bearer ") {
 		tokenStr = strings.TrimPrefix(authHdr, "Bearer ")
-	} else if tok := r.Header.Get("X-Attendee-Token"); tok != "" {
+	} else if tok := r.Header.Get(AttendeeTokenHeader); tok != "" {
 		tokenStr = tok
 	}
 
@@ -142,7 +146,7 @@ func (s *Signer) Authenticate(r *http.Request) (string, error) {
 		return "", errors.New("token expired")
 	}
 
-	if reqAttendeeID := r.Header.Get("X-Attendee-ID"); reqAttendeeID != "" {
+	if reqAttendeeID := r.Header.Get(AttendeeIDHeader); reqAttendeeID != "" {
 		if reqAttendeeID != claims.Sub {
 			return "", fmt.Errorf("mismatched attendee ID: header=%s, token=%s", reqAttendeeID, claims.Sub)
 		}

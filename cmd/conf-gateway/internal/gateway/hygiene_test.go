@@ -52,6 +52,9 @@ func TestProxy_DoesNotForwardSecretsToActor(t *testing.T) {
 	req.Header.Set(gateway.PresenterHeaderName, testPresenterKey)
 	req.AddCookie(presenterCookie())
 	req.Header.Set(types.ModelKeyHeader, "client-supplied-key")
+	req.Header.Set("X-Attendee-Token", gw.MintToken("attendee-01"))
+	req.Header.Set("X-Attendee-ID", "attendee-01")
+	req.Header.Set("ate-target-actor", "ate-demo-conf/attendee-02")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -66,10 +69,10 @@ func TestProxy_DoesNotForwardSecretsToActor(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if got.Get("ate-target-actor") != "ate-demo-conf/attendee-01" {
-		t.Errorf("ate-target-actor = %q, want ate-demo-conf/attendee-01", got.Get("ate-target-actor"))
+	if v := got.Values("ate-target-actor"); len(v) != 1 || v[0] != "ate-demo-conf/attendee-01" {
+		t.Errorf("ate-target-actor = %q, want only ate-demo-conf/attendee-01", v)
 	}
-	for _, h := range []string{"Authorization", "Cookie", gateway.PresenterHeaderName} {
+	for _, h := range []string{"Authorization", "Cookie", gateway.PresenterHeaderName, "X-Attendee-Token", "X-Attendee-ID"} {
 		if v := got.Get(h); v != "" {
 			t.Errorf("actor received %s: %q", h, v)
 		}
