@@ -91,6 +91,7 @@ type WorkloadServer struct {
 	mu              sync.Mutex
 	turn            *relay.Turn // the turn holding turnSlot
 	pendingApproval *types.ApprovalRequest
+	pendingFix      bool // pendingApproval fixes a failed run, so it gets no fix of its own
 	history         []types.ChatMessage
 }
 
@@ -198,6 +199,7 @@ func (s *WorkloadServer) handleClearHistory(w http.ResponseWriter, r *http.Reque
 	}
 	s.history = nil
 	s.pendingApproval = nil
+	s.pendingFix = false
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -249,6 +251,7 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		if assistantMsg.Approval != nil {
 			s.pendingApproval = assistantMsg.Approval
+			s.pendingFix = false
 		}
 		s.history = append(s.history, *assistantMsg)
 		s.turn = nil
@@ -349,6 +352,8 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.pendingApproval = nil
+	wasFix := s.pendingFix
+	s.pendingFix = false
 
 	if req.Decision == types.DecisionReject {
 		rejectMsg := types.ChatMessage{
@@ -366,23 +371,72 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
 	exec := runResult(s.executor.Execute(ctx, pending.Language, pending.Code))
+	cancel()
 
-	resultMsg := types.ChatMessage{
-		ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
-		Sender:    types.SenderAssistant,
-		Content:   describeRun(exec),
-		Timestamp: time.Now().Unix(),
-		Execution: exec,
+	if exec.ExitCode != 0 && !wasFix && !s.forceMock && s.gemini != nil {
+		s.startFix(w, r, pending, exec)
+		return
 	}
 
+	resultMsg := runMessage(exec)
 	s.mu.Lock()
 	s.history = append(s.history, resultMsg)
 	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resultMsg)
+}
+
+// startFix runs a relayed turn in which the model explains a failed run and
+// proposes a corrected script, and answers with the turn's first step.
+func (s *WorkloadServer) startFix(w http.ResponseWriter, r *http.Request, failed *types.ApprovalRequest, run *types.ExecutionResult) {
+	select {
+	case s.turnSlot <- struct{}{}:
+	case <-r.Context().Done():
+		return
+	}
+	t := relay.NewTurn()
+	s.mu.Lock()
+	historyCopy := append([]types.ChatMessage(nil), s.history...)
+	s.turn = t
+	s.mu.Unlock()
+
+	// Like a chat turn, the fix outlives this request.
+	t.Run(context.Background(), func(ctx context.Context) *types.ChatMessage {
+		msg := s.fix(ctx, historyCopy, failed, run)
+		s.mu.Lock()
+		if msg.Approval != nil {
+			s.pendingApproval = msg.Approval
+			s.pendingFix = true
+		}
+		s.history = append(s.history, *msg)
+		s.turn = nil
+		s.mu.Unlock()
+		<-s.turnSlot
+		return msg
+	})
+	writeStep(w, r, t)
+}
+
+// fix asks the model to correct a failed run. Its reply carries the run,
+// marked corrected, and the fix to approve. When the model cannot fix it,
+// the reply is the plain failed-run message; the mock engine's script would
+// have nothing to do with the request.
+func (s *WorkloadServer) fix(ctx context.Context, history []types.ChatMessage, failed *types.ApprovalRequest, run *types.ExecutionResult) *types.ChatMessage {
+	ctx, cancel := context.WithTimeout(ctx, chatTimeout)
+	defer cancel()
+	msg, err := s.gemini.Fix(ctx, history, failed, run)
+	if err != nil {
+		log.Printf("gemini fix failed, replying with the failed run: %v", err)
+		plain := runMessage(run)
+		return &plain
+	}
+	corrected := *run
+	corrected.Corrected = true
+	msg.Execution = &corrected
+	msg.Source = types.SourceGemini
+	return msg
 }
 
 // runResult folds an executor error into the result. ExitCode -1 means the
@@ -399,12 +453,28 @@ func runResult(res *types.ExecutionResult, err error) *types.ExecutionResult {
 	return &out
 }
 
-func describeRun(e *types.ExecutionResult) string {
-	if e.ExitCode == -1 {
-		return "Execution error:\n" + e.Stderr
+// failedRunReply answers a failed run the agent will not fix.
+const failedRunReply = "That approach didn't work in this sandbox. Try asking for something simpler."
+
+// runMessage reports a run: its output when it succeeded, otherwise the
+// plain reply, with the run attached for pages to show as much as they want.
+func runMessage(exec *types.ExecutionResult) types.ChatMessage {
+	content := failedRunReply
+	if exec.ExitCode == 0 {
+		content = describeRun(exec)
 	}
+	return types.ChatMessage{
+		ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+		Sender:    types.SenderAssistant,
+		Content:   content,
+		Timestamp: time.Now().Unix(),
+		Execution: exec,
+	}
+}
+
+func describeRun(e *types.ExecutionResult) string {
 	s := fmt.Sprintf("Execution completed in %dms (exit code %d):\n\n%s", e.DurationMs, e.ExitCode, e.Stdout)
-	if e.Stderr != "" || e.ExitCode != 0 {
+	if e.Stderr != "" {
 		s += "\nStderr:\n" + e.Stderr
 	}
 	return s

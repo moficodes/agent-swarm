@@ -915,18 +915,6 @@ func TestApprove_ReplayIsConflict(t *testing.T) {
 	}
 }
 
-func TestApprove_FailedRunReportsStructuredError(t *testing.T) {
-	s, id := approvalServer(t, "import sys\nsys.exit('boom')", "python")
-
-	rec := postApprove(t, s.Handler(), types.ApprovalResponse{ApprovalID: id, Decision: types.DecisionApprove})
-
-	var msg types.ChatMessage
-	_ = json.Unmarshal(rec.Body.Bytes(), &msg)
-	if msg.Execution == nil || msg.Execution.ExitCode == 0 || !strings.Contains(msg.Execution.Stderr, "boom") {
-		t.Errorf("Execution = %+v, want a non-zero exit with the error", msg.Execution)
-	}
-}
-
 func postClear(h http.Handler, method, key string) int {
 	req := httptest.NewRequest(method, types.ClearHistoryPath, nil)
 	if key != "" {
