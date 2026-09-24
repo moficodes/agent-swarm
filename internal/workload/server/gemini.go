@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload/internal/engine"
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/engine"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 	"google.golang.org/genai"
 )

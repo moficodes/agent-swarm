@@ -19,7 +19,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload/internal/server"
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/server"
 )
 
 func main() {

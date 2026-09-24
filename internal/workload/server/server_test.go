@@ -27,7 +27,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload/internal/server"
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/server"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
