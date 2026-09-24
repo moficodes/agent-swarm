@@ -22,6 +22,12 @@ containers:
 - name: conf-workload
   image: ko://github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload
   command: ["/ko-app/conf-workload"]
+  # The executor runs model-generated code as nobody; handing it the
+  # workspace, managing files nobody owns, and switching user need these
+  # beyond substrate's defaults.
+  securityContext:
+    capabilities:
+      add: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"]
   env:
   - name: MODEL_PROXY_URL
     value: "http://conf-gateway-internal.ate-demo-conf.svc:8091"

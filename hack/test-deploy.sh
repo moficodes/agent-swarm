@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Tests the router flag/grace-period checks, the router patch builder and
-# the duration parser in install-demo-conference.sh without a cluster.
+# Tests the router flag/grace-period checks, the router patch builder, the
+# stale actor template check and the duration parser in
+# install-demo-conference.sh without a cluster.
 set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 ATE_DEMOS=()
@@ -131,5 +132,24 @@ expect_patch '[{"op":"add","path":"/spec/template/spec/containers/1/args","value
 expect_patch error \
   '{"spec":{"template":{"spec":{"containers":[{"name":"envoy","args":["-c"]}]}}}}' \
   --parked-request-budget=60s
+
+# expect_template checks demo-conference_template_current against the JSON
+# kubectl-ate prints for an existing conf-agent template.
+expect_template() {
+  local want="$1" json="$2" got=0
+  demo-conference_template_current "${json}" >/dev/null 2>&1 || got=$?
+  if [[ "${want}" == ok && "${got}" != 0 ]] || [[ "${want}" == stale && "${got}" == 0 ]]; then
+    echo "FAIL: template ${want} for ${json}" >&2
+    fail=1
+  fi
+}
+current_caps='"securityContext":{"capabilities":{"add":["CHOWN","SETUID","SETGID","DAC_OVERRIDE"]}}'
+expect_template ok    '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}],'"${current_caps}"'}]}'
+# Predates the model proxy.
+expect_template stale '{"containers":[{"name":"conf-workload",'"${current_caps}"'}]}'
+# Predates the capabilities the executor needs to run scripts as nobody.
+expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}]}]}'
+expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}],"securityContext":{"capabilities":{"add":["CHOWN"]}}}]}'
+expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}],"securityContext":{"capabilities":{"add":["CHOWN","SETUID","SETGID"]}}}]}'
 
 exit "${fail}"

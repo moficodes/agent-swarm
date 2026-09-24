@@ -265,6 +265,17 @@ demo-conference_ensure_secret() {
     --from-env-file=<(printf 'HMAC_SECRET=%s\nPRESENTER_TOKEN=%s\n' "${hmac}" "${token}")
 }
 
+# demo-conference_template_current succeeds if the conf-agent template JSON in
+# $1 has what this demo needs: the model proxy URL, and the capabilities the
+# executor uses to run scripts as nobody.
+demo-conference_template_current() {
+  jq -e '
+    [.containers[]? | select(.name == "conf-workload")] | first // {}
+    | ([.env[]? | select(.name == "MODEL_PROXY_URL")] | length > 0)
+      and ((.securityContext.capabilities.add // []) as $add
+           | ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"] | all(. as $c | $add | index($c)))' <<<"$1" >/dev/null
+}
+
 demo-conference_check_template() {
   local env
   if ! env="$(run_kubectl_ate get actor-template conf-agent -a ate-demo-conf -o json 2>&1)"; then
@@ -274,8 +285,8 @@ demo-conference_check_template() {
     echo "error: failed to check actor template conf-agent: ${env}" >&2
     exit 1
   fi
-  if ! jq -e '[.. | objects | select(.name? == "MODEL_PROXY_URL")] | length > 0' <<<"${env}" >/dev/null; then
-    echo "error: actor template conf-agent predates the model proxy and templates are immutable." >&2
+  if ! demo-conference_template_current "${env}"; then
+    echo "error: actor template conf-agent is out of date (it lacks MODEL_PROXY_URL or the CHOWN/SETUID/SETGID/DAC_OVERRIDE capabilities) and templates are immutable." >&2
     echo "Run: hack/install-ate.sh --delete-demo-conference, then deploy again." >&2
     exit 1
   fi
