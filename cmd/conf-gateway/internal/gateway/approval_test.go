@@ -78,7 +78,7 @@ func newApprovalHarness(t *testing.T) *approvalHarness {
 	upstreamSrv := httptest.NewServer(upstream)
 	t.Cleanup(upstreamSrv.Close)
 
-	h.gw = newTestGateway(t, upstreamSrv.URL, "")
+	h.gw = newTestGateway(t, upstreamSrv.URL)
 	ts := httptest.NewServer(h.gw.Handler())
 	t.Cleanup(ts.Close)
 	h.url = ts.URL

@@ -65,11 +65,7 @@ func newHeldActor(t *testing.T, messages ...string) (*heldActor, *httptest.Serve
 }
 
 func newTurnGateway(t *testing.T, actorURL string, ctrl actorstate.ActorControl, suspendAfter time.Duration) *Gateway {
-	status := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"parking":{"active":0}}`))
-	}))
-	t.Cleanup(status.Close)
-	gw := NewGateway(actorURL, status.URL, WithActorControl(ctrl), WithSuspendAfter(suspendAfter))
+	gw := NewGateway(actorURL, WithActorControl(ctrl), WithSuspendAfter(suspendAfter))
 	t.Cleanup(gw.Close)
 	return gw
 }

@@ -31,10 +31,21 @@ import (
 	"time"
 
 	"golang.org/x/oauth2/google"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
+)
+
+// routerStatusNamespace and routerStatusService identify the atenet-router
+// Service whose EndpointSlices are read for router pod addresses.
+const (
+	routerStatusNamespace = "ate-system"
+	routerStatusService   = "atenet-router"
+	routerStatusPort      = 4040
 )
 
 //go:embed static/*
@@ -48,6 +59,11 @@ type Config struct {
 	HMACSecret   string
 	PresenterKey string
 	Atespace     string
+
+	// RouterStatusDiscovery selects how router pods are found for parking
+	// aggregation: "static" polls StatusURL alone, "endpointslices" discovers
+	// every ready atenet-router pod from Kubernetes EndpointSlices.
+	RouterStatusDiscovery string
 
 	// ATEAPIEndpoint is passed to kubectl-ate; empty uses its own default.
 	ATEAPIEndpoint string
@@ -108,24 +124,29 @@ func LoadConfig() Config {
 	if kubectlATE == "" {
 		kubectlATE = "kubectl-ate"
 	}
+	routerStatusDiscovery := os.Getenv("ROUTER_STATUS_DISCOVERY")
+	if routerStatusDiscovery == "" {
+		routerStatusDiscovery = "static"
+	}
 
 	return Config{
-		Port:              port,
-		RouterURL:         routerURL,
-		StatusURL:         statusURL,
-		HMACSecret:        hmacSecret,
-		PresenterKey:      presenterKey,
-		Atespace:          atespace,
-		ATEAPIEndpoint:    os.Getenv("ATEAPI_ENDPOINT"),
-		KubectlATE:        kubectlATE,
-		StatePollInterval: envDuration("STATE_POLL_INTERVAL", time.Second),
-		SuspendAfter:      envDuration("SUSPEND_AFTER", 0),
-		MockLLM:           os.Getenv("DEMO_MOCK_LLM") == "true",
-		LocalMode:         os.Getenv("LOCAL_MODE") == "true",
-		ModelProxyAddr:    modelProxyAddr,
-		VertexProject:     os.Getenv("VERTEX_PROJECT"),
-		VertexLocation:    vertexLocation,
-		ModelAllowlist:    splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
+		Port:                  port,
+		RouterURL:             routerURL,
+		StatusURL:             statusURL,
+		HMACSecret:            hmacSecret,
+		PresenterKey:          presenterKey,
+		Atespace:              atespace,
+		RouterStatusDiscovery: routerStatusDiscovery,
+		ATEAPIEndpoint:        os.Getenv("ATEAPI_ENDPOINT"),
+		KubectlATE:            kubectlATE,
+		StatePollInterval:     envDuration("STATE_POLL_INTERVAL", time.Second),
+		SuspendAfter:          envDuration("SUSPEND_AFTER", 0),
+		MockLLM:               os.Getenv("DEMO_MOCK_LLM") == "true",
+		LocalMode:             os.Getenv("LOCAL_MODE") == "true",
+		ModelProxyAddr:        modelProxyAddr,
+		VertexProject:         os.Getenv("VERTEX_PROJECT"),
+		VertexLocation:        vertexLocation,
+		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
 	}
 }
 
@@ -195,6 +216,29 @@ func newModelProxy(ctx context.Context, cfg Config, secret []byte) (*modelproxy.
 	return modelproxy.New(pc)
 }
 
+// newRouterStatusSource builds the router pod source cfg.RouterStatusDiscovery
+// selects. "static" polls cfg.StatusURL alone; "endpointslices" discovers
+// every ready atenet-router pod from the in-cluster Kubernetes API. Any other
+// value is an error.
+func newRouterStatusSource(cfg Config) (routerstatus.Source, error) {
+	switch cfg.RouterStatusDiscovery {
+	case "static":
+		return routerstatus.StaticTargets{cfg.StatusURL}, nil
+	case "endpointslices":
+		restCfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("loading in-cluster config: %w", err)
+		}
+		client, err := kubernetes.NewForConfig(restCfg)
+		if err != nil {
+			return nil, fmt.Errorf("building Kubernetes client: %w", err)
+		}
+		return routerstatus.NewEndpointSliceTargets(client, routerStatusNamespace, routerStatusService, routerStatusPort), nil
+	default:
+		return nil, fmt.Errorf("invalid ROUTER_STATUS_DISCOVERY %q; want %q or %q", cfg.RouterStatusDiscovery, "static", "endpointslices")
+	}
+}
+
 func main() {
 	cfg := LoadConfig()
 
@@ -214,6 +258,11 @@ func main() {
 		log.Printf("VERTEX_PROJECT is unset; the model proxy is disabled and actors must run with DEMO_MOCK_LLM=true.")
 	}
 
+	routerStatusSrc, err := newRouterStatusSource(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	opts := []gateway.Option{
 		gateway.WithAtespace(cfg.Atespace),
 		gateway.WithSecret(secret),
@@ -223,6 +272,7 @@ func main() {
 		gateway.WithUsage(proxy),
 		gateway.WithMockLLM(cfg.MockLLM || !proxy.Enabled()),
 		gateway.WithStaticFS(staticFS),
+		gateway.WithRouterStatus(routerstatus.NewAggregator(routerStatusSrc, http.DefaultClient)),
 	}
 	if cfg.LocalMode {
 		log.Printf("LOCAL_MODE=true; actor state is not read from ateapi and actors are never suspended.")
@@ -230,7 +280,7 @@ func main() {
 		opts = append(opts, gateway.WithActorControl(actorstate.NewKubectlATE(cfg.KubectlATE, cfg.ATEAPIEndpoint, cfg.Atespace)))
 	}
 
-	gw := gateway.NewGateway(cfg.RouterURL, cfg.StatusURL, opts...)
+	gw := gateway.NewGateway(cfg.RouterURL, opts...)
 	defer gw.Close()
 	if cfg.PresenterKey == "" {
 		log.Printf("PRESENTER_TOKEN is unset; generated a presenter key. Open /stage?key=%s to unlock the stage and feed.", gw.PresenterKey())

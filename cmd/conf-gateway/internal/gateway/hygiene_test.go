@@ -42,7 +42,7 @@ func TestProxy_DoesNotForwardSecretsToActor(t *testing.T) {
 	t.Cleanup(upstream.Close)
 
 	const secret = "hygiene-secret-hygiene-secret-000"
-	gw := newTestGateway(t, upstream.URL, "", gateway.WithSecret(secret))
+	gw := newTestGateway(t, upstream.URL, gateway.WithSecret(secret))
 	ts := httptest.NewServer(gw.Handler())
 	t.Cleanup(ts.Close)
 

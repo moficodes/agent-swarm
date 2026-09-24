@@ -76,7 +76,7 @@ func newContractEnv(t *testing.T, vertex *geminitest.Server, opts ...gateway.Opt
 	t.Cleanup(routerSrv.Close)
 	env.routerURL = routerSrv.URL
 
-	env.gw = newTestGateway(t, routerSrv.URL, "", append([]gateway.Option{gateway.WithSecret(contractSecret)}, opts...)...)
+	env.gw = newTestGateway(t, routerSrv.URL, append([]gateway.Option{gateway.WithSecret(contractSecret)}, opts...)...)
 	return env
 }
 

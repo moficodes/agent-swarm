@@ -46,6 +46,7 @@ import (
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -185,10 +186,21 @@ func WithStaticFS(staticFS fs.FS) Option {
 	}
 }
 
+// WithRouterStatus polls a every statusInterval and reports its Snapshot
+// through telemetry. Without this option, telemetry always reports
+// parking_available: false.
+func WithRouterStatus(a *routerstatus.Aggregator) Option {
+	return func(g *Gateway) {
+		if a != nil {
+			g.routerStatus = a
+		}
+	}
+}
+
 // Gateway manages sessions, reverse proxying to atenet-router, and telemetry aggregation.
 type Gateway struct {
 	routerURL      string
-	statusURL      string
+	routerStatus   *routerstatus.Aggregator
 	atespace       string
 	secret         string
 	presenterKey   string
@@ -219,8 +231,7 @@ type Gateway struct {
 	currentActionID   map[string]string
 	recentEvents      []string
 	actionFeed        []types.ActionLogEntry
-	parkedCount       int
-	parkingOK         bool
+	parking           atomic.Pointer[routerstatus.Snapshot]
 	simController     SimulationController
 	// suspendTimers holds each attendee's pending auto-suspend when
 	// suspendAfter is positive. Each pending timer holds one wg count.
@@ -237,10 +248,9 @@ type Gateway struct {
 }
 
 // NewGateway creates and initializes a new Gateway.
-func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
+func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw := &Gateway{
 		routerURL:         routerURL,
-		statusURL:         statusURL,
 		atespace:          "ate-demo-conf",
 		statusInterval:    500 * time.Millisecond,
 		pollInterval:      time.Second,
@@ -743,8 +753,13 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	g.mu.RLock()
 	eventsCopy := slices.Clone(g.recentEvents)
-	parked, parkingOK := g.parkedCount, g.parkingOK
 	g.mu.RUnlock()
+
+	var parked int
+	var parkingOK bool
+	if snap := g.parking.Load(); snap != nil {
+		parked, parkingOK = snap.Parked, snap.Available
+	}
 
 	telem := types.StageTelemetry{
 		ParkedRequests:   parked,
@@ -1660,6 +1675,10 @@ func decodeBase64URL(s string) ([]byte, error) {
 func (g *Gateway) pollStatus(ctx context.Context) {
 	defer g.wg.Done()
 
+	if g.routerStatus == nil {
+		return
+	}
+
 	ticker := time.NewTicker(g.statusInterval)
 	defer ticker.Stop()
 
@@ -1668,44 +1687,9 @@ func (g *Gateway) pollStatus(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			g.fetchStatus(ctx)
+			snap := g.routerStatus.Fetch(ctx)
+			g.parking.Store(&snap)
 		}
-	}
-}
-
-func (g *Gateway) fetchStatus(ctx context.Context) {
-	statusURL := strings.TrimRight(g.statusURL, "/") + "/statusz?format=json"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
-	if err != nil {
-		return
-	}
-
-	client := g.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-
-	var sz struct {
-		Parking struct {
-			Active int `json:"active"`
-		} `json:"parking"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&sz); err == nil {
-		g.mu.Lock()
-		g.parkedCount = sz.Parking.Active
-		g.parkingOK = true
-		g.mu.Unlock()
 	}
 }
 

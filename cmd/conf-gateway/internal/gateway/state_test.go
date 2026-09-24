@@ -133,7 +133,7 @@ func okActor(t *testing.T) *httptest.Server {
 
 func TestState_SSEStreamsSubstrateStateChanges(t *testing.T) {
 	ctrl := newFakeControl(actorstate.Status{Name: "attendee-01", State: types.StateSuspended})
-	gw := newTestGateway(t, "", "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
+	gw := newTestGateway(t, "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
 	sc := openEvents(t, gw, "attendee-01")
 
 	waitView(t, sc, func(v types.ActorView) bool { return v.NeverStarted })
@@ -146,7 +146,7 @@ func TestState_SSEStreamsSubstrateStateChanges(t *testing.T) {
 
 func TestState_ListFailureShowsUnavailable(t *testing.T) {
 	ctrl := newFakeControl(actorstate.Status{Name: "attendee-02", State: types.StateRunning})
-	gw := newTestGateway(t, "", "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
+	gw := newTestGateway(t, "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
 	sc := openEvents(t, gw, "attendee-02")
 	waitView(t, sc, func(v types.ActorView) bool { return v.State == types.StateRunning })
 
@@ -157,7 +157,7 @@ func TestState_ListFailureShowsUnavailable(t *testing.T) {
 }
 
 func TestState_LocalModeIsUnavailable(t *testing.T) {
-	gw := newTestGateway(t, "", "")
+	gw := newTestGateway(t, "")
 	sc := openEvents(t, gw, "attendee-03")
 	v := waitView(t, sc, func(types.ActorView) bool { return true })
 	if v.State != types.StateUnavailable || !strings.Contains(v.StateDetail, "local mode") {
@@ -177,7 +177,7 @@ func TestState_ActivityFollowsChatAndApproval(t *testing.T) {
 		})
 	}))
 	t.Cleanup(actor.Close)
-	gw := newTestGateway(t, actor.URL, "")
+	gw := newTestGateway(t, actor.URL)
 	sc := openEvents(t, gw, "attendee-04")
 
 	done := make(chan struct{})
@@ -198,7 +198,7 @@ func TestState_ActivityFollowsChatAndApproval(t *testing.T) {
 func TestState_AutoSuspendAfterIdle(t *testing.T) {
 	actor := okActor(t)
 	ctrl := newFakeControl()
-	gw := newTestGateway(t, actor.URL, "", gateway.WithActorControl(ctrl), gateway.WithSuspendAfter(time.Millisecond))
+	gw := newTestGateway(t, actor.URL, gateway.WithActorControl(ctrl), gateway.WithSuspendAfter(time.Millisecond))
 
 	postJSON(gw, "attendee-05", "/api/chat", types.ChatRequest{Message: "hi"})
 	if got := waitSuspended(t, ctrl); got != "attendee-05" {
@@ -209,7 +209,7 @@ func TestState_AutoSuspendAfterIdle(t *testing.T) {
 func TestState_SuspendsAfterTurnByDefault(t *testing.T) {
 	actor := okActor(t)
 	ctrl := newFakeControl()
-	gw := newTestGateway(t, actor.URL, "", gateway.WithActorControl(ctrl))
+	gw := newTestGateway(t, actor.URL, gateway.WithActorControl(ctrl))
 
 	if rec := postJSON(gw, "attendee-06", "/api/chat", types.ChatRequest{Message: "hi"}); rec.Code != http.StatusOK {
 		t.Fatalf("chat status = %d", rec.Code)
@@ -222,7 +222,7 @@ func TestState_SuspendsAfterTurnByDefault(t *testing.T) {
 func TestState_CloseCancelsPendingSuspend(t *testing.T) {
 	actor := okActor(t)
 	ctrl := newFakeControl()
-	gw := newTestGateway(t, actor.URL, "", gateway.WithActorControl(ctrl), gateway.WithSuspendAfter(time.Hour))
+	gw := newTestGateway(t, actor.URL, gateway.WithActorControl(ctrl), gateway.WithSuspendAfter(time.Hour))
 
 	postJSON(gw, "attendee-08", "/api/chat", types.ChatRequest{Message: "hi"})
 	postJSON(gw, "attendee-08", "/api/chat", types.ChatRequest{Message: "again"})
@@ -240,7 +240,7 @@ func TestState_ResetSuspendsOnlyRunningActors(t *testing.T) {
 		actorstate.Status{Name: "attendee-02", State: types.StateSuspended},
 		actorstate.Status{Name: "attendee-03", State: types.StateResuming},
 	)
-	gw := newTestGateway(t, "", "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
+	gw := newTestGateway(t, "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
 	sc := openEvents(t, gw, "attendee-03")
 	waitView(t, sc, func(v types.ActorView) bool { return v.State == types.StateResuming })
 
@@ -267,7 +267,7 @@ func TestState_ResetSuspendsOnlyRunningActors(t *testing.T) {
 }
 
 func TestState_ResetSendsResetEvent(t *testing.T) {
-	gw := newTestGateway(t, "", "")
+	gw := newTestGateway(t, "")
 	sc := openEvents(t, gw, "attendee-09")
 	waitView(t, sc, func(types.ActorView) bool { return true })
 
@@ -291,7 +291,7 @@ func TestState_TelemetryWorkersComeFromRealPods(t *testing.T) {
 		actorstate.Status{Name: "attendee-03", State: types.StateSuspended},
 		actorstate.Status{Name: "attendee-04", State: types.StateSuspending, WorkerPod: "pool-a"},
 	)
-	gw := newTestGateway(t, "", "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
+	gw := newTestGateway(t, "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
 	sc := openEvents(t, gw, "attendee-01")
 	waitView(t, sc, func(v types.ActorView) bool { return v.WorkerPod == "pool-b" })
 
@@ -313,7 +313,7 @@ func TestState_NonChatReplyLeavesActivityIdle(t *testing.T) {
 		_, _ = w.Write([]byte("plain text"))
 	}))
 	t.Cleanup(actor.Close)
-	gw := newTestGateway(t, actor.URL, "")
+	gw := newTestGateway(t, actor.URL)
 
 	if rec := postJSON(gw, "attendee-09", "/api/chat", types.ChatRequest{Message: "hi"}); rec.Code != http.StatusOK {
 		t.Fatalf("chat status = %d", rec.Code)

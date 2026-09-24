@@ -26,7 +26,7 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "MODEL_PROXY_ADDR", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST"}
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "MODEL_PROXY_ADDR", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY"}
 
 // clearConfigEnv clears every environment variable LoadConfig reads, so tests
 // start from a clean slate regardless of the host environment.
@@ -71,6 +71,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.Atespace != "ate-demo-conf" {
 		t.Errorf("expected default Atespace 'ate-demo-conf', got %q", cfg.Atespace)
+	}
+	if cfg.RouterStatusDiscovery != "static" {
+		t.Errorf("expected default RouterStatusDiscovery 'static', got %q", cfg.RouterStatusDiscovery)
 	}
 }
 
@@ -144,7 +147,7 @@ func TestLoadConfig_LocalMode(t *testing.T) {
 }
 
 func TestGatewayInstanceCreation(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+	gw := gateway.NewGateway("http://localhost:8000",
 		gateway.WithAtespace("ate-demo-conf"),
 		gateway.WithSecret("test-secret"),
 	)
@@ -182,6 +185,28 @@ func TestNewModelProxy_DisabledWithoutProject(t *testing.T) {
 	}
 	if p.Enabled() {
 		t.Error("proxy enabled with no VERTEX_PROJECT")
+	}
+}
+
+func TestNewRouterStatusSource_Static(t *testing.T) {
+	cfg := Config{RouterStatusDiscovery: "static", StatusURL: "http://localhost:4040"}
+	src, err := newRouterStatusSource(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := src.Targets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(targets, []string{"http://localhost:4040"}) {
+		t.Errorf("Targets = %v", targets)
+	}
+}
+
+func TestNewRouterStatusSource_InvalidValueIsFatal(t *testing.T) {
+	cfg := Config{RouterStatusDiscovery: "bogus"}
+	if _, err := newRouterStatusSource(cfg); err == nil {
+		t.Error("expected an error for an invalid ROUTER_STATUS_DISCOVERY value, got nil")
 	}
 }
 

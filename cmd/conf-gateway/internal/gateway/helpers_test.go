@@ -22,27 +22,34 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
-// newTestGateway builds a gateway that never polls a real statusz endpoint.
-// An empty statusURL gets a fake statusz server reporting zero parked
-// requests. Without a WithActorControl option the gateway runs in local mode
-// and never shells out to kubectl-ate.
-func newTestGateway(t *testing.T, routerURL, statusURL string, opts ...gateway.Option) *gateway.Gateway {
+// fakeStatuszTarget returns a statusz server URL that reports zero parked
+// requests, for the default WithRouterStatus option.
+func fakeStatuszTarget(t *testing.T) string {
 	t.Helper()
-	if statusURL == "" {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"parking":{"active":0}}`))
-		}))
-		t.Cleanup(srv.Close)
-		statusURL = srv.URL
-	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"parking":{"active":0}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// newTestGateway builds a gateway that never polls a real statusz endpoint.
+// It prepends a default WithRouterStatus option backed by a fake statusz
+// server reporting zero parked requests, so a WithRouterStatus in opts
+// overrides it since options apply in order. Without a WithActorControl
+// option the gateway runs in local mode and never shells out to kubectl-ate.
+func newTestGateway(t *testing.T, routerURL string, opts ...gateway.Option) *gateway.Gateway {
+	t.Helper()
 	all := append([]gateway.Option{
 		gateway.WithPresenterKey(testPresenterKey),
+		gateway.WithRouterStatus(routerstatus.NewAggregator(routerstatus.StaticTargets{fakeStatuszTarget(t)}, http.DefaultClient)),
 	}, opts...)
-	gw := gateway.NewGateway(routerURL, statusURL, all...)
+	gw := gateway.NewGateway(routerURL, all...)
 	t.Cleanup(gw.Close)
 	return gw
 }

@@ -37,7 +37,7 @@ func presenterCookie() *http.Cookie {
 }
 
 func TestPresenterPages_RequireKey(t *testing.T) {
-	gw := newTestGateway(t, "http://localhost:8000", "")
+	gw := newTestGateway(t, "http://localhost:8000")
 	ts := httptest.NewServer(gw.Handler())
 	t.Cleanup(ts.Close)
 	client := noRedirectClient()
@@ -104,7 +104,7 @@ func TestPresenterPages_RequireKey(t *testing.T) {
 }
 
 func TestChatPage_IsPublic(t *testing.T) {
-	gw := newTestGateway(t, "http://localhost:8000", "")
+	gw := newTestGateway(t, "http://localhost:8000")
 	ts := httptest.NewServer(gw.Handler())
 	t.Cleanup(ts.Close)
 	resp, err := http.Get(ts.URL + "/chat")
@@ -118,7 +118,7 @@ func TestChatPage_IsPublic(t *testing.T) {
 }
 
 func TestPresenterAPIs_RequirePresenter(t *testing.T) {
-	gw := newTestGateway(t, "http://localhost:8000", "", gateway.WithSimulationController(&mockSimulationController{}))
+	gw := newTestGateway(t, "http://localhost:8000", gateway.WithSimulationController(&mockSimulationController{}))
 	ts := httptest.NewServer(gw.Handler())
 	t.Cleanup(ts.Close)
 
@@ -196,7 +196,7 @@ func getSession(t *testing.T, url string, withPresenter bool) string {
 }
 
 func TestSession_AttendeeOverride(t *testing.T) {
-	gw := newTestGateway(t, "http://localhost:8000", "", gateway.WithMaxActors(10))
+	gw := newTestGateway(t, "http://localhost:8000", gateway.WithMaxActors(10))
 	ts := httptest.NewServer(gw.Handler())
 	t.Cleanup(ts.Close)
 
@@ -214,7 +214,7 @@ func TestSession_AttendeeOverride(t *testing.T) {
 }
 
 func TestEvents_RequireOwnToken(t *testing.T) {
-	gw := newTestGateway(t, "http://localhost:8000", "")
+	gw := newTestGateway(t, "http://localhost:8000")
 	ts := httptest.NewServer(gw.Handler())
 	t.Cleanup(ts.Close)
 
@@ -246,21 +246,21 @@ func TestEvents_RequireOwnToken(t *testing.T) {
 }
 
 func TestDefaultSecretIsRandom(t *testing.T) {
-	a := newTestGateway(t, "http://localhost:8000", "")
-	b := newTestGateway(t, "http://localhost:8000", "")
+	a := newTestGateway(t, "http://localhost:8000")
+	b := newTestGateway(t, "http://localhost:8000")
 	if _, err := b.VerifyToken(a.MintToken("attendee-01")); err == nil {
 		t.Errorf("gateways without WithSecret accepted each other's tokens")
 	}
-	old := newTestGateway(t, "http://localhost:8000", "", gateway.WithSecret("conf-demo-secret-key"))
+	old := newTestGateway(t, "http://localhost:8000", gateway.WithSecret("conf-demo-secret-key"))
 	if _, err := a.VerifyToken(old.MintToken("attendee-01")); err == nil {
 		t.Errorf("default gateway accepted a token signed with the old hardcoded secret")
 	}
 }
 
 func TestDefaultPresenterKeyIsRandom(t *testing.T) {
-	a := gateway.NewGateway("http://localhost:8000", "http://127.0.0.1:1")
+	a := gateway.NewGateway("http://localhost:8000")
 	t.Cleanup(a.Close)
-	b := gateway.NewGateway("http://localhost:8000", "http://127.0.0.1:1")
+	b := gateway.NewGateway("http://localhost:8000")
 	t.Cleanup(b.Close)
 	if len(a.PresenterKey()) < 32 || a.PresenterKey() == b.PresenterKey() {
 		t.Errorf("presenter keys %q and %q are not long random values", a.PresenterKey(), b.PresenterKey())
