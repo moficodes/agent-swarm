@@ -472,6 +472,30 @@ func TestEnhancementTypesSerialization(t *testing.T) {
 		}
 	})
 
+	t.Run("ModelUsage", func(t *testing.T) {
+		usage := types.ModelUsage{
+			Calls:           4,
+			PromptTokens:    44,
+			CandidateTokens: 28,
+			TotalLatencyMs:  900,
+			LastLatencyMs:   250,
+		}
+
+		data, err := json.Marshal(usage)
+		if err != nil {
+			t.Fatalf("failed to marshal ModelUsage: %v", err)
+		}
+
+		var decoded types.ModelUsage
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal ModelUsage: %v", err)
+		}
+
+		if diff := cmp.Diff(usage, decoded); diff != "" {
+			t.Fatalf("ModelUsage mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("StateChangeEvent", func(t *testing.T) {
 		event := types.StateChangeEvent{
 			AttendeeID: "attendee-12",

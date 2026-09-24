@@ -202,6 +202,15 @@ type StateChangeEvent struct {
 	Timestamp  int64               `json:"timestamp"`
 }
 
+// ModelUsage summarizes one actor's (or the fleet's) Gemini calls through the model proxy.
+type ModelUsage struct {
+	Calls           int64 `json:"calls"`
+	PromptTokens    int64 `json:"prompt_tokens"`
+	CandidateTokens int64 `json:"candidate_tokens"`
+	TotalLatencyMs  int64 `json:"total_latency_ms"`
+	LastLatencyMs   int64 `json:"last_latency_ms"`
+}
+
 // ActionLogEntry represents a full conversational or execution event streamed across the fleet.
 type ActionLogEntry struct {
 	ID            string              `json:"id"`
