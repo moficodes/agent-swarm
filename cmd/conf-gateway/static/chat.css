@@ -608,10 +608,6 @@ html, body {
   font-weight: 700;
 }
 
-.code-isolation {
-  color: var(--neon-cyan);
-}
-
 .code-block {
   padding: 10px 12px;
   overflow-x: auto;
