@@ -15,17 +15,26 @@
 package main
 
 import (
+	"context"
+	"slices"
 	"testing"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "JWT_SECRET", "PRESENTER_TOKEN", "GEMINI_API_KEY", "ATESPACE", "SUSPEND_MODE"}
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "GEMINI_API_KEY", "ATESPACE", "SUSPEND_MODE", "MODEL_PROXY_ADDR", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST"}
 
-func TestLoadConfig_Defaults(t *testing.T) {
+// clearConfigEnv clears every environment variable LoadConfig reads, so tests
+// start from a clean slate regardless of the host environment.
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
 	for _, env := range configEnvVars {
 		t.Setenv(env, "")
 	}
+}
+
+func TestLoadConfig_Defaults(t *testing.T) {
+	clearConfigEnv(t)
 
 	cfg := LoadConfig()
 
@@ -38,8 +47,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.StatusURL != "http://localhost:4040" {
 		t.Errorf("expected default StatusURL 'http://localhost:4040', got %q", cfg.StatusURL)
 	}
-	if cfg.JWTSecret != "" {
-		t.Errorf("expected empty default JWTSecret so the gateway generates one, got %q", cfg.JWTSecret)
+	if cfg.HMACSecret != "" {
+		t.Errorf("expected empty default HMACSecret so the gateway generates one, got %q", cfg.HMACSecret)
 	}
 	if cfg.SuspendMode != "" {
 		t.Errorf("expected empty default SuspendMode, got %q", cfg.SuspendMode)
@@ -59,7 +68,7 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	t.Setenv("PORT", "9099")
 	t.Setenv("ROUTER_URL", "http://router.example.com")
 	t.Setenv("STATUS_URL", "http://status.example.com")
-	t.Setenv("JWT_SECRET", "custom-secret")
+	t.Setenv("HMAC_SECRET", "custom-secret")
 	t.Setenv("PRESENTER_TOKEN", "custom-presenter")
 	t.Setenv("GEMINI_API_KEY", "custom-key")
 	t.Setenv("ATESPACE", "custom-ns")
@@ -76,8 +85,8 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	if cfg.StatusURL != "http://status.example.com" {
 		t.Errorf("expected StatusURL 'http://status.example.com', got %q", cfg.StatusURL)
 	}
-	if cfg.JWTSecret != "custom-secret" {
-		t.Errorf("expected JWTSecret 'custom-secret', got %q", cfg.JWTSecret)
+	if cfg.HMACSecret != "custom-secret" {
+		t.Errorf("expected HMACSecret 'custom-secret', got %q", cfg.HMACSecret)
 	}
 	if cfg.PresenterKey != "custom-presenter" {
 		t.Errorf("expected PresenterKey 'custom-presenter', got %q", cfg.PresenterKey)
@@ -114,5 +123,46 @@ func TestGatewayInstanceCreation(t *testing.T) {
 
 	if gw.Handler() == nil {
 		t.Fatalf("expected non-nil gateway handler")
+	}
+}
+
+func TestLoadConfig_ModelProxyDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := LoadConfig()
+	if cfg.ModelProxyAddr != ":8091" || cfg.VertexLocation != "us-central1" {
+		t.Errorf("defaults = %q %q", cfg.ModelProxyAddr, cfg.VertexLocation)
+	}
+	if !slices.Equal(cfg.ModelAllowlist, []string{"gemini-2.5-flash"}) {
+		t.Errorf("ModelAllowlist = %v", cfg.ModelAllowlist)
+	}
+}
+
+func TestLoadConfig_ModelAllowlistTrimsEntries(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("MODEL_ALLOWLIST", " gemini-2.5-flash , gemini-2.5-pro ,")
+	if got := LoadConfig().ModelAllowlist; !slices.Equal(got, []string{"gemini-2.5-flash", "gemini-2.5-pro"}) {
+		t.Errorf("ModelAllowlist = %v", got)
+	}
+}
+
+func TestNewModelProxy_DisabledWithoutProject(t *testing.T) {
+	clearConfigEnv(t)
+	p, err := newModelProxy(context.Background(), LoadConfig(), []byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Enabled() {
+		t.Error("proxy enabled with no VERTEX_PROJECT")
+	}
+}
+
+func TestResolveSecret(t *testing.T) {
+	if s, gen := resolveSecret("given"); s != "given" || gen {
+		t.Errorf("resolveSecret(given) = %q, %v", s, gen)
+	}
+	a, gen := resolveSecret("")
+	b, _ := resolveSecret("")
+	if !gen || len(a) < 32 || a == b {
+		t.Errorf("generated secrets %q %q", a, b)
 	}
 }
