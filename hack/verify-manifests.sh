@@ -22,9 +22,9 @@ set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
 
-GATEWAY_MANIFEST="demos/conference/manifests/gateway.yaml.tmpl"
-INGRESS_MANIFEST="demos/conference/manifests/gateway-ingress.yaml.tmpl"
-ACTOR_TEMPLATE="demos/conference/conference-template.yaml.tmpl"
+GATEWAY_MANIFEST="manifests/gateway.yaml.tmpl"
+INGRESS_MANIFEST="manifests/gateway-ingress.yaml.tmpl"
+ACTOR_TEMPLATE="manifests/actortemplate.yaml.tmpl"
 
 # render substitutes every install-script placeholder in $1, using $2 for
 # ${DEMO_DOMAIN}. Callers exercise the ingress template with both an empty
@@ -48,7 +48,7 @@ render() {
 # every document has an apiVersion, a kind and a metadata.name — all without
 # contacting a cluster.
 check_objects() {
-  go run ./demos/conference/hack/checkmanifests <<<"$1"
+  go run ./hack/checkmanifests <<<"$1"
 }
 
 status=0

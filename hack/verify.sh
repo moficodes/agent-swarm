@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Automated end-to-end verification script for the Interactive Conference Demo (demos/conference).
+# Automated end-to-end verification script for the conference demo.
 #
 # Verifies:
 #   Step 1: Health & Static UI Assets (/healthz, /stage, /chat, static JS/CSS)
@@ -82,7 +82,7 @@ print_usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
 
-Automated verification script for the Interactive Conference Demo (demos/conference).
+Automated verification script for the conference demo.
 
 Options:
   -h, --help               Show this help message and exit
@@ -166,6 +166,7 @@ SPAWNED_PIDS=()
 BURST_PIDS=()
 STREAM_PID=""
 
+# shellcheck disable=SC2329 # invoked indirectly via the trap set below
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
@@ -257,13 +258,13 @@ if [[ "${IS_GATEWAY_REACHABLE}" != "true" ]]; then
     log_info "Gateway at ${GATEWAY_URL} not detected. Initializing standalone mock environment..."
 
     log_info "Compiling conference binaries into temporary workspace..."
-    go build -o "${TMP_DIR}/conf-gateway" ./demos/conference/cmd/conf-gateway
+    go build -o "${TMP_DIR}/conf-gateway" ./cmd/conf-gateway
 
     MOCK_ROUTER_PORT=18080
     MOCK_GATEWAY_PORT=18090
 
     log_info "Starting conf-localrouter (2 slots, one real workload server per attendee)..."
-    go build -o "${TMP_DIR}/conf-localrouter" ./demos/conference/cmd/conf-localrouter
+    go build -o "${TMP_DIR}/conf-localrouter" ./cmd/conf-localrouter
     "${TMP_DIR}/conf-localrouter" --addr="127.0.0.1:${MOCK_ROUTER_PORT}" --slots=2 \
       --workspace-root="${TMP_DIR}/actors" >"${TMP_DIR}/localrouter.log" 2>&1 &
     SPAWNED_PIDS+=($!)
@@ -303,7 +304,7 @@ if [[ "${IS_GATEWAY_REACHABLE}" != "true" ]]; then
   else
     log_err "Conference gateway is not reachable at ${GATEWAY_URL}."
     printf "\nTo verify against a cluster:\n"
-    printf "  1. Deploy: hack/install-ate.sh --deploy-demo-conference\n"
+    printf "  1. Deploy: make deploy\n"
     printf "  2. kubectl port-forward -n ate-demo-conf svc/conf-gateway 8090:80 &\n"
     printf "  3. export PRESENTER_TOKEN=\"\$(kubectl get secret conf-gateway -n ate-demo-conf -o jsonpath='{.data.PRESENTER_TOKEN}' | base64 -d)\"\n\n"
     printf "To verify locally without a cluster:\n  %s --mock-mode\n\n" "$0"
