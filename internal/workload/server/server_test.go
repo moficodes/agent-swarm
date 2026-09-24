@@ -282,15 +282,15 @@ func TestApprove_Execute(t *testing.T) {
 		t.Errorf("expected execution output in content, got: %s", resultMsg.Content)
 	}
 
-	// 3. Trying to approve the same ID again must fail with 404
+	// 3. Trying to approve the same ID again must fail with 409
 	secondAppResp, err := http.Post(ts.URL+"/api/approve", "application/json", bytes.NewReader(appReq))
 	if err != nil {
 		t.Fatalf("second approve request failed: %v", err)
 	}
 	defer secondAppResp.Body.Close()
 
-	if secondAppResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected status 404 for consumed approval ID, got %d", secondAppResp.StatusCode)
+	if secondAppResp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected status 409 for consumed approval ID, got %d", secondAppResp.StatusCode)
 	}
 }
 
@@ -342,8 +342,8 @@ func TestApprove_Reject(t *testing.T) {
 	}
 	defer secondRejectResp.Body.Close()
 
-	if secondRejectResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 for already-processed approval, got %d", secondRejectResp.StatusCode)
+	if secondRejectResp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for already-processed approval, got %d", secondRejectResp.StatusCode)
 	}
 }
 
@@ -352,7 +352,7 @@ func TestApprove_InvalidAndNotFound(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	t.Run("nonexistent approval ID returns 404", func(t *testing.T) {
+	t.Run("nonexistent approval ID returns 409", func(t *testing.T) {
 		req, _ := json.Marshal(types.ApprovalResponse{
 			ApprovalID: "nonexistent-id",
 			Decision:   types.DecisionApprove,
@@ -363,8 +363,8 @@ func TestApprove_InvalidAndNotFound(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("expected 404, got %d", resp.StatusCode)
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("expected 409, got %d", resp.StatusCode)
 		}
 	})
 
@@ -761,5 +761,89 @@ func TestChat_HistoryIsSentOnFollowingTurn(t *testing.T) {
 	}
 	if n := strings.Count(second, "what word?"); n != 1 {
 		t.Errorf("second request contains the prompt %d times, want 1: %s", n, second)
+	}
+}
+
+func approvalServer(t *testing.T, code, lang string) (*server.WorkloadServer, string) {
+	t.Helper()
+	fake := geminitest.New(t, geminitest.ApprovalResponse("run it", code, lang))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(proxyConfig(fake.URL)))
+	msg := postChat(t, s.Handler(), "k.mac", "do the thing")
+	if msg.Approval == nil {
+		t.Fatal("expected an approval request")
+	}
+	return s, msg.Approval.ApprovalID
+}
+
+func postApprove(t *testing.T, h http.Handler, resp types.ApprovalResponse) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(resp)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/approve", bytes.NewReader(body)))
+	return rec
+}
+
+func TestApprove_RunsStoredCodeAndIgnoresRequestCode(t *testing.T) {
+	s, id := approvalServer(t, "echo stored", "sh")
+
+	rec := postApprove(t, s.Handler(), types.ApprovalResponse{
+		ApprovalID: id, Decision: types.DecisionApprove, Code: "echo injected", Language: "sh",
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+	var msg types.ChatMessage
+	_ = json.Unmarshal(rec.Body.Bytes(), &msg)
+	if msg.Execution == nil || msg.Execution.Stdout != "stored\n" || msg.Execution.ExitCode != 0 {
+		t.Errorf("Execution = %+v, want stdout from the stored code", msg.Execution)
+	}
+}
+
+func TestApprove_NoPendingApprovalIsConflictEvenWithCode(t *testing.T) {
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithForceMock(true))
+
+	rec := postApprove(t, s.Handler(), types.ApprovalResponse{
+		ApprovalID: "app-forged", Decision: types.DecisionApprove, Code: "echo pwned", Language: "sh",
+	})
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+}
+
+func TestApprove_WrongIDIsConflictAndKeepsPending(t *testing.T) {
+	s, id := approvalServer(t, "echo stored", "sh")
+
+	rec := postApprove(t, s.Handler(), types.ApprovalResponse{ApprovalID: id + "-other", Decision: types.DecisionApprove})
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	if p := s.PendingApproval(); p == nil || p.ApprovalID != id {
+		t.Errorf("PendingApproval = %+v, want it kept", p)
+	}
+}
+
+func TestApprove_ReplayIsConflict(t *testing.T) {
+	s, id := approvalServer(t, "echo once", "sh")
+	ok := types.ApprovalResponse{ApprovalID: id, Decision: types.DecisionApprove}
+	if rec := postApprove(t, s.Handler(), ok); rec.Code != http.StatusOK {
+		t.Fatalf("first approve = %d", rec.Code)
+	}
+	if rec := postApprove(t, s.Handler(), ok); rec.Code != http.StatusConflict {
+		t.Fatalf("replay = %d, want 409", rec.Code)
+	}
+}
+
+func TestApprove_FailedRunReportsStructuredError(t *testing.T) {
+	s, id := approvalServer(t, "print(1)", "cobol")
+
+	rec := postApprove(t, s.Handler(), types.ApprovalResponse{ApprovalID: id, Decision: types.DecisionApprove})
+
+	var msg types.ChatMessage
+	_ = json.Unmarshal(rec.Body.Bytes(), &msg)
+	if msg.Execution == nil || msg.Execution.ExitCode != -1 || !strings.Contains(msg.Execution.Stderr, "unsupported language") {
+		t.Errorf("Execution = %+v, want exit -1 with the error", msg.Execution)
 	}
 }

@@ -129,6 +129,7 @@ type ChatMessage struct {
 	Timestamp int64            `json:"timestamp"`
 	Approval  *ApprovalRequest `json:"approval,omitempty"`
 	Source    ReplySource      `json:"source,omitempty"`
+	Execution *ExecutionResult `json:"execution,omitempty"`
 }
 
 // ChatRequest is the payload sent to initiate a chat or task request.

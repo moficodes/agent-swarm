@@ -112,7 +112,37 @@ func TestMessageSerialization(t *testing.T) {
 		}
 	})
 
-	t.Run("without approval (omitempty)", func(t *testing.T) {
+	t.Run("with execution", func(t *testing.T) {
+		msg := types.ChatMessage{
+			ID:        "msg-4",
+			Sender:    types.SenderAssistant,
+			Content:   "Execution completed in 12ms (exit code 0):\n\nstored\n",
+			Timestamp: 1789910200,
+			Execution: &types.ExecutionResult{
+				Stdout:     "stored\n",
+				ExitCode:   0,
+				DurationMs: 12,
+			},
+		}
+
+		data, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatalf("failed to marshal ChatMessage: %v", err)
+		}
+		if !strings.Contains(string(data), `"execution":`) {
+			t.Fatalf("expected execution in JSON, got %s", string(data))
+		}
+
+		var decoded types.ChatMessage
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal ChatMessage: %v", err)
+		}
+		if diff := cmp.Diff(msg, decoded); diff != "" {
+			t.Fatalf("ChatMessage mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("without approval or execution (omitempty)", func(t *testing.T) {
 		msg := types.ChatMessage{
 			ID:        "msg-2",
 			Sender:    types.SenderUser,
@@ -128,6 +158,9 @@ func TestMessageSerialization(t *testing.T) {
 
 		if strings.Contains(string(data), `"approval"`) {
 			t.Fatalf("expected approval to be omitted, got %s", string(data))
+		}
+		if strings.Contains(string(data), `"execution"`) {
+			t.Fatalf("expected execution to be omitted, got %s", string(data))
 		}
 
 		var decoded types.ChatMessage

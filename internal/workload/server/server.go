@@ -21,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -251,15 +252,15 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	hasMatch := s.pendingApproval != nil && s.pendingApproval.ApprovalID == req.ApprovalID
-	if !hasMatch && req.Code == "" {
+	pending := s.pendingApproval
+	if pending == nil || pending.ApprovalID != req.ApprovalID {
 		s.mu.Unlock()
-		http.Error(w, "no matching pending approval found", http.StatusNotFound)
+		http.Error(w, "no matching pending approval", http.StatusConflict)
 		return
 	}
+	s.pendingApproval = nil
 
 	if req.Decision == types.DecisionReject {
-		s.pendingApproval = nil
 		rejectMsg := types.ChatMessage{
 			ID:        fmt.Sprintf("sys-%d", time.Now().UnixNano()),
 			Sender:    types.SenderSystem,
@@ -268,45 +269,22 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 		}
 		s.history = append(s.history, rejectMsg)
 		s.mu.Unlock()
-
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(rejectMsg)
 		return
 	}
-
-	// Decision is APPROVE: capture approval details and clear pending approval to prevent replay
-	lang := req.Language
-	code := req.Code
-	if code == "" && s.pendingApproval != nil {
-		lang = s.pendingApproval.Language
-		code = s.pendingApproval.Code
-	}
-	s.pendingApproval = nil
 	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-
-	res, err := s.executor.Execute(ctx, lang, code)
-
-	output := ""
-	if err != nil {
-		output = fmt.Sprintf("Execution error: %v", err)
-		if res != nil && (res.Stderr != "" || res.ExitCode != 0) {
-			output += fmt.Sprintf("\nStderr:\n%s", res.Stderr)
-		}
-	} else {
-		output = fmt.Sprintf("Execution completed in %dms (exit code %d):\n\n%s", res.DurationMs, res.ExitCode, res.Stdout)
-		if res.Stderr != "" || res.ExitCode != 0 {
-			output += fmt.Sprintf("\nStderr:\n%s", res.Stderr)
-		}
-	}
+	exec := runResult(s.executor.Execute(ctx, pending.Language, pending.Code))
 
 	resultMsg := types.ChatMessage{
 		ID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
 		Sender:    types.SenderAssistant,
-		Content:   output,
+		Content:   describeRun(exec),
 		Timestamp: time.Now().Unix(),
+		Execution: exec,
 	}
 
 	s.mu.Lock()
@@ -315,4 +293,29 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resultMsg)
+}
+
+// runResult folds an executor error into the result. ExitCode -1 means the
+// code did not run to completion.
+func runResult(res *types.ExecutionResult, err error) *types.ExecutionResult {
+	out := types.ExecutionResult{ExitCode: -1}
+	if res != nil {
+		out = *res
+	}
+	if err != nil {
+		out.ExitCode = -1
+		out.Stderr = strings.TrimSpace(out.Stderr + "\n" + err.Error())
+	}
+	return &out
+}
+
+func describeRun(e *types.ExecutionResult) string {
+	if e.ExitCode == -1 {
+		return "Execution error:\n" + e.Stderr
+	}
+	s := fmt.Sprintf("Execution completed in %dms (exit code %d):\n\n%s", e.DurationMs, e.ExitCode, e.Stdout)
+	if e.Stderr != "" || e.ExitCode != 0 {
+		s += "\nStderr:\n" + e.Stderr
+	}
+	return s
 }
