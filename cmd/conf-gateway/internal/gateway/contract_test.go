@@ -261,6 +261,54 @@ func TestContract_ExecutionIsRecordedFromStructuredField(t *testing.T) {
 	}
 }
 
+func TestContract_FailedRunIsCorrectedAndTheFixCanBeApproved(t *testing.T) {
+	const failing, fixed = "import sys\nsys.exit('boom')", "print('fixed')"
+	env := newContractEnv(t, geminitest.New(t,
+		geminitest.ApprovalResponse("run it", failing, "python"),
+		geminitest.ExplainedApprovalResponse("It exited on purpose; this one prints.", "run it", fixed, "python"),
+	))
+	chat := decodeMsg(t, env.post(t, "attendee-10", "/api/chat", types.ChatRequest{Message: "run"}))
+
+	fix := decodeMsg(t, env.post(t, "attendee-10", "/api/approve", types.ApprovalResponse{
+		ApprovalID: chat.Approval.ApprovalID, Decision: types.DecisionApprove,
+	}))
+
+	if fix.Execution == nil || !fix.Execution.Corrected || fix.Approval == nil || fix.Approval.Code != fixed {
+		t.Fatalf("approve reply = %+v, want the corrected run and the fix", fix)
+	}
+	if res, ok := env.gw.GetLastResult("attendee-10"); ok {
+		t.Errorf("GetLastResult = %+v, want the corrected run kept off the spotlight", res)
+	}
+	var approved, proposed *types.ActionLogEntry
+	feed := env.gw.GetFeedHistory()
+	for i := range feed {
+		switch {
+		case feed[i].AttendeeID != "attendee-10":
+		case feed[i].ApprovalID == chat.Approval.ApprovalID:
+			approved = &feed[i]
+		case feed[i].ApprovalID == fix.Approval.ApprovalID:
+			proposed = &feed[i]
+		}
+	}
+	if approved == nil || approved.Code != failing || approved.Execution == nil || !approved.Execution.Corrected {
+		t.Errorf("approved entry = %+v, want the failing code with its corrected run", approved)
+	}
+	if proposed == nil || proposed.Code != fixed || proposed.Execution != nil || proposed.Activity != types.ActivityAwaitingApproval {
+		t.Errorf("fix entry = %+v, want its own card awaiting approval", proposed)
+	}
+
+	res := decodeMsg(t, env.post(t, "attendee-10", "/api/approve", types.ApprovalResponse{
+		ApprovalID: fix.Approval.ApprovalID, Decision: types.DecisionApprove,
+	}))
+
+	if res.Execution == nil || res.Execution.Stdout != "fixed\n" {
+		t.Errorf("fix run = %+v, want its output", res.Execution)
+	}
+	if lr, ok := env.gw.GetLastResult("attendee-10"); !ok || lr.Stdout != "fixed\n" {
+		t.Errorf("GetLastResult = %+v, %v, want the fix's run", lr, ok)
+	}
+}
+
 // userTurns returns the user messages in an actor's history.
 func userTurns(ws *server.WorkloadServer) []string {
 	var out []string

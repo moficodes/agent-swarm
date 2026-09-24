@@ -143,9 +143,13 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 	hasNewExec := hasChatMsg && chatMsg.Execution != nil
 	if hasNewExec {
 		newExec = *chatMsg.Execution
-		g.mu.Lock()
-		g.lastResults[attendeeID] = &newExec
-		g.mu.Unlock()
+		// The agent already proposed a fix for a corrected run, so the
+		// spotlight keeps what it showed.
+		if !newExec.Corrected {
+			g.mu.Lock()
+			g.lastResults[attendeeID] = &newExec
+			g.mu.Unlock()
+		}
 	}
 
 	g.mu.RLock()
@@ -156,6 +160,23 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 	}
 
 	if isWaitingForApproval {
+		if hasNewExec && newExec.Corrected {
+			// The failed run closes the approved action; the fix opens its own,
+			// so it does not overwrite the approved card.
+			g.RecordActionEntry(types.ActionLogEntry{
+				ID:         actionID,
+				AttendeeID: attendeeID,
+				Timestamp:  time.Now().Unix(),
+				Execution:  &newExec,
+				WorkerPod:  workerPod,
+				Activity:   types.ActivityIdle,
+			})
+			actionID = fmt.Sprintf("act-fix-%s-%d", attendeeID, time.Now().UnixNano())
+			g.mu.Lock()
+			g.currentActionID[attendeeID] = actionID
+			g.mu.Unlock()
+		}
+
 		g.mu.Lock()
 		g.proxy.SetPending(attendeeID, chatMsg.Approval)
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
