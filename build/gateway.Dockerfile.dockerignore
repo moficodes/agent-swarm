@@ -13,13 +13,8 @@
 # limitations under the License.
 
 .git
-.worktrees
-.ate-dev-env.sh
 .superpowers
-**/node_modules
 **/*.test
-demos/*/ui/ui-server
-benchmarking
+bin
 docs
-reports
 *.env
