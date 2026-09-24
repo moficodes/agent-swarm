@@ -46,15 +46,22 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 		sc.Stop()
 	}
 
-	var toSuspend []string
+	var active []string
 	for name, v := range g.board.Views() {
 		if v.State == types.StateRunning || v.State == types.StateResuming {
-			toSuspend = append(toSuspend, name)
+			active = append(active, name)
 		}
 	}
-	slices.Sort(toSuspend)
+	slices.Sort(active)
 
 	g.mu.Lock()
+	// Actors that held a conversation get their history cleared; the clear
+	// suspends them again once it is done, so the reset leaves them alone.
+	cleared := make(map[string]bool, len(g.chatHistories))
+	for name := range g.chatHistories {
+		cleared[name] = true
+		g.requestHistoryClearLocked(name)
+	}
 	g.proxy.ResetPending()
 	g.chatHistories = make(map[string][]types.ChatMessage)
 	g.lastResults = make(map[string]*types.ExecutionResult)
@@ -68,6 +75,13 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 		g.usage.ResetUsage()
 	}
 	g.broker.Broadcast("reset", struct{}{})
+
+	var toSuspend []string
+	for _, name := range active {
+		if !cleared[name] {
+			toSuspend = append(toSuspend, name)
+		}
+	}
 
 	var failed atomic.Int64
 	if g.control != nil {
@@ -95,7 +109,7 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":         "ok",
-		"actors_reset":   len(toSuspend),
+		"actors_reset":   len(toSuspend) + len(cleared),
 		"suspend_errors": failed.Load(),
 	})
 }

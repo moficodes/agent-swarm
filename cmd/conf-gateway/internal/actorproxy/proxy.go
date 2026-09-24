@@ -61,8 +61,12 @@ type Hooks struct {
 
 // Proxy forwards attendee requests to atenet-router.
 type Proxy struct {
-	rp    *httputil.ReverseProxy
-	hooks Hooks
+	rp       *httputil.ReverseProxy
+	hooks    Hooks
+	target   *url.URL
+	atespace string
+	secret   []byte
+	client   *http.Client
 	*approvals
 }
 
@@ -71,6 +75,10 @@ type Proxy struct {
 func New(target *url.URL, atespace string, secret []byte, transport http.RoundTripper, hooks Hooks) *Proxy {
 	p := &Proxy{
 		hooks:     hooks,
+		target:    target,
+		atespace:  atespace,
+		secret:    secret,
+		client:    &http.Client{Transport: transport},
 		approvals: newApprovals(),
 	}
 	p.rp = &httputil.ReverseProxy{
@@ -106,6 +114,31 @@ func New(target *url.URL, atespace string, secret []byte, transport http.RoundTr
 		p.rp.Transport = transport
 	}
 	return p
+}
+
+// ClearHistory asks the attendee's actor, through the router, to drop its
+// conversation history and pending approval.
+func (p *Proxy) ClearHistory(ctx context.Context, attendee string) error {
+	if p.target == nil {
+		return fmt.Errorf("no router configured")
+	}
+	u := p.target.JoinPath(types.ClearHistoryPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", p.atespace, attendee))
+	req.Header.Set(types.ModelKeyHeader, modelproxy.Key(p.secret, p.atespace, attendee))
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("clear history: actor answered %s", resp.Status)
+	}
+	return nil
 }
 
 // ServeHTTP forwards r to the router.

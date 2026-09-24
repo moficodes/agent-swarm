@@ -15,6 +15,7 @@
 package actorproxy
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -183,5 +184,35 @@ func TestProxy_StripsModelKeyFromErrorResponse(t *testing.T) {
 	}
 	if got := rec.Header().Get(types.ModelKeyHeader); got != "" {
 		t.Errorf("model key header reached the client on an error response: %q", got)
+	}
+}
+
+func TestClearHistory_PostsToTheAttendeesActor(t *testing.T) {
+	var got *http.Request
+	status := http.StatusNoContent
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Clone(r.Context())
+		w.WriteHeader(status)
+	}))
+	defer router.Close()
+	u, _ := url.Parse(router.URL)
+	p := New(u, "space", []byte("secret"), nil, Hooks{})
+
+	if err := p.ClearHistory(context.Background(), "attendee-04"); err != nil {
+		t.Fatalf("ClearHistory = %v", err)
+	}
+	if got.Method != http.MethodPost || got.URL.Path != types.ClearHistoryPath {
+		t.Errorf("request = %s %s, want POST %s", got.Method, got.URL.Path, types.ClearHistoryPath)
+	}
+	if got.Header.Get("ate-target-actor") != "space/attendee-04" {
+		t.Errorf("ate-target-actor = %q", got.Header.Get("ate-target-actor"))
+	}
+	if want := modelproxy.Key([]byte("secret"), "space", "attendee-04"); got.Header.Get(types.ModelKeyHeader) != want {
+		t.Errorf("model key = %q, want %q", got.Header.Get(types.ModelKeyHeader), want)
+	}
+
+	status = http.StatusForbidden
+	if err := p.ClearHistory(context.Background(), "attendee-04"); err == nil {
+		t.Error("ClearHistory = nil for a 403, want an error")
 	}
 }

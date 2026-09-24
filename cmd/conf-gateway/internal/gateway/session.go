@@ -64,6 +64,7 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		seq := atomic.AddUint64(&g.attendeeSeq, 1)
 		index := startOffset + int((seq-1)%uint64(availableRange)) + 1
 		attendeeID = fmt.Sprintf("attendee-%02d", index)
+		g.forgetAttendee(attendeeID)
 	}
 
 	token := g.MintToken(attendeeID)
@@ -80,6 +81,18 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		"attendee_id": attendeeID,
 		"token":       token,
 	})
+}
+
+// forgetAttendee drops everything kept for the attendee's previous visitor,
+// in the gateway and in the actor's memory, before the slot is handed out.
+func (g *Gateway) forgetAttendee(attendee string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.chatHistories, attendee)
+	delete(g.lastResults, attendee)
+	delete(g.currentActionID, attendee)
+	g.proxy.ClearPending(attendee)
+	g.requestHistoryClearLocked(attendee)
 }
 
 func (g *Gateway) authenticateRequest(r *http.Request) (string, error) {

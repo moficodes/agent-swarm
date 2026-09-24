@@ -215,6 +215,11 @@ type Gateway struct {
 	// beforeSuspendCheck, when set by tests, runs just before a scheduled
 	// suspend re-checks for newer turns.
 	beforeSuspendCheck func(attendee string)
+	// historyClears tracks the actor history clears owed per attendee.
+	historyClears map[string]*historyClear
+	// waitingForHistoryClear, when set by tests, runs when a caller starts
+	// waiting for another's clear to finish.
+	waitingForHistoryClear func(attendee string)
 	// closed is set by Close; no background work starts after it.
 	closed bool
 
@@ -241,6 +246,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		suspendTimers:   make(map[string]*time.Timer),
 		turnsInFlight:   make(map[string]int),
 		turnSeq:         make(map[string]uint64),
+		historyClears:   make(map[string]*historyClear),
 		maxActors:       50,
 	}
 

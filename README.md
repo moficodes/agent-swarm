@@ -26,7 +26,9 @@ history lives in the actor's own process memory
 `snapshotsConfig` captures full content on pause and commit
 (`demos/conference/conference-template.yaml.tmpl`), so the conversation
 survives Substrate suspending and resuming the actor on a different worker
-pod.
+pod. A stage reset, or handing an `attendee-NN` slot to a new visitor, has
+the gateway clear that history through the actor's `/api/history/clear`
+endpoint.
 
 The `/stage` header's "2 Physical Worker Pods" and "50x Oversubscription"
 copy (`demos/conference/cmd/conf-gateway/static/stage.html`) states the

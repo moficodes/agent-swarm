@@ -226,3 +226,73 @@ func TestContract_ExecutionIsRecordedFromStructuredField(t *testing.T) {
 		t.Errorf("GetLastResult = %+v, %v", res, ok)
 	}
 }
+
+// userTurns returns the user messages in an actor's history.
+func userTurns(ws *server.WorkloadServer) []string {
+	var out []string
+	for _, m := range ws.History() {
+		if m.Sender == types.SenderUser {
+			out = append(out, m.Content)
+		}
+	}
+	return out
+}
+
+func TestContract_ResetClearsActorHistory(t *testing.T) {
+	env := newContractEnv(t, geminitest.New(t,
+		geminitest.ApprovalResponse("run it", "echo old", "sh"), geminitest.TextResponse("fresh")))
+	env.post(t, "attendee-01", "/api/chat", types.ChatRequest{Message: "before reset"})
+	if env.actor("attendee-01").PendingApproval() == nil {
+		t.Fatal("no pending approval before reset")
+	}
+
+	rec := httptest.NewRecorder()
+	env.gw.Handler().ServeHTTP(rec, presenterRequest(env.gw, httptest.NewRequest(http.MethodPost, "/api/reset", nil)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset status = %d", rec.Code)
+	}
+	// The next turn waits for the clear the reset started.
+	decodeMsg(t, env.post(t, "attendee-01", "/api/chat", types.ChatRequest{Message: "after reset"}))
+
+	ws := env.actor("attendee-01")
+	if got := userTurns(ws); len(got) != 1 || got[0] != "after reset" {
+		t.Errorf("actor user turns = %q, want only the post-reset turn", got)
+	}
+	if p := ws.PendingApproval(); p != nil {
+		t.Errorf("actor pending approval = %+v after reset", p)
+	}
+	if body := string(env.vertex.Requests()[1].Body); strings.Contains(body, "before reset") {
+		t.Errorf("post-reset model call carries pre-reset history: %s", body)
+	}
+}
+
+func TestContract_NewSessionClearsReassignedSlot(t *testing.T) {
+	env := newContractEnv(t, geminitest.New(t, geminitest.TextResponse("one"), geminitest.TextResponse("two")),
+		gateway.WithMaxActors(1))
+	newSession := func() string {
+		rec := getPath(env.gw, "/api/session")
+		var s struct {
+			AttendeeID string `json:"attendee_id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
+			t.Fatal(err)
+		}
+		return s.AttendeeID
+	}
+
+	first := newSession()
+	env.post(t, first, "/api/chat", types.ChatRequest{Message: "first visitor"})
+	if second := newSession(); second != first {
+		t.Fatalf("second visitor got %q, want the reused slot %q", second, first)
+	}
+	env.post(t, first, "/api/chat", types.ChatRequest{Message: "second visitor"})
+
+	if got := userTurns(env.actor(first)); len(got) != 1 || got[0] != "second visitor" {
+		t.Errorf("actor user turns = %q, want only the new visitor's", got)
+	}
+	rec := httptest.NewRecorder()
+	env.gw.Handler().ServeHTTP(rec, presenterRequest(env.gw, httptest.NewRequest(http.MethodGet, "/api/actor/"+first, nil)))
+	if strings.Contains(rec.Body.String(), "first visitor") {
+		t.Errorf("gateway still shows the previous visitor's chat: %s", rec.Body)
+	}
+}

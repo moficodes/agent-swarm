@@ -97,6 +97,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	}
 	g.beginTurn(attendeeID)
 	defer g.endTurn(attendeeID)
+	g.settleHistoryClear(r.Context(), attendeeID)
 
 	g.mu.Lock()
 	g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
