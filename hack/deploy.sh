@@ -20,6 +20,10 @@ ATE_DEMOS+=(demo-conference) # register demo-conference
 
 DEMO_CONF_PATCH_ROUTER="${DEMO_CONF_PATCH_ROUTER:-false}"
 DEMO_CONF_ACTORS=50
+# DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
+# are immutable, so bump it with every change to conference-template.yaml.tmpl
+# and the install refuses a stale template instead of running old actors.
+DEMO_CONF_TEMPLATE_REVISION=2
 
 demo-conference_usage() {
   echo "  --patch-router                                Patch atenet-router's parked-request-budget/route-timeout"
@@ -241,6 +245,7 @@ demo-conference_render() {
       -e "s|\${VERTEX_LOCATION}|${DEMO_CONF_VERTEX_LOCATION:-us-central1}|g" \
       -e "s|\${DEMO_MOCK_LLM}|${DEMO_CONF_MOCK_LLM:-true}|g" \
       -e "s|\${DEMO_DOMAIN}|${DEMO_DOMAIN:-}|g" \
+      -e "s|\${TEMPLATE_REVISION}|${DEMO_CONF_TEMPLATE_REVISION}|g" \
       "$1" | substitute_version
 }
 
@@ -266,14 +271,11 @@ demo-conference_ensure_secret() {
 }
 
 # demo-conference_template_current succeeds if the conf-agent template JSON in
-# $1 has what this demo needs: the model proxy URL, and the capabilities the
-# executor uses to run scripts as nobody.
+# $1 carries the current DEMO_CONF_TEMPLATE_REVISION.
 demo-conference_template_current() {
-  jq -e '
+  jq -e --arg rev "${DEMO_CONF_TEMPLATE_REVISION}" '
     [.containers[]? | select(.name == "conf-workload")] | first // {}
-    | ([.env[]? | select(.name == "MODEL_PROXY_URL")] | length > 0)
-      and ((.securityContext.capabilities.add // []) as $add
-           | ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"] | all(. as $c | $add | index($c)))' <<<"$1" >/dev/null
+    | [.env[]? | select(.name == "CONF_TEMPLATE_REVISION" and .value == $rev)] | length > 0' <<<"$1" >/dev/null
 }
 
 demo-conference_check_template() {
@@ -286,7 +288,7 @@ demo-conference_check_template() {
     exit 1
   fi
   if ! demo-conference_template_current "${env}"; then
-    echo "error: actor template conf-agent is out of date (it lacks MODEL_PROXY_URL or the CHOWN/SETUID/SETGID/DAC_OVERRIDE capabilities) and templates are immutable." >&2
+    echo "error: actor template conf-agent is out of date (it lacks CONF_TEMPLATE_REVISION ${DEMO_CONF_TEMPLATE_REVISION}) and templates are immutable." >&2
     echo "Run: hack/install-ate.sh --delete-demo-conference, then deploy again." >&2
     exit 1
   fi

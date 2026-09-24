@@ -152,8 +152,8 @@ func TestContract_AttendeeCannotPostModelResults(t *testing.T) {
 
 	rec := env.post(t, "attendee-06", types.ModelResultPath, types.ModelResult{CallID: "x", Status: 200, Body: []byte("{}")})
 
-	if strings.Contains(rec.Body.String(), "call_id") || strings.Contains(rec.Body.String(), "model_call") {
-		t.Errorf("model-result answered through the gateway: %d %s", rec.Code, rec.Body)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("POST %s through the gateway = %d %s, want 404", types.ModelResultPath, rec.Code, rec.Body)
 	}
 	if got := len(env.actor("attendee-06").History()); got != before {
 		t.Errorf("actor history changed from %d to %d", before, got)

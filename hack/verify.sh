@@ -418,7 +418,7 @@ fi
 # cluster run must check where the reply came from.
 SOURCE=$(printf "%s" "${CHAT_RESP}" | jq -r .source 2>/dev/null || true)
 if [[ "${MOCK_MODE}" != true && "${SOURCE}" != "gemini" ]]; then
-  log_err "Expected a Gemini reply, got source '${SOURCE}'; check the actor's model proxy calls in the worker pod logs."
+  log_err "Expected a Gemini reply, got source '${SOURCE}'; check the gateway logs for failed Vertex AI calls and the worker pod logs for the actor's turn."
   log_fail "Step 3: Turn 1 Chat & HITL Approval Generation"
   exit 1
 fi
@@ -920,19 +920,20 @@ fi
 log_pass "Step 12: Real-Time Action Stream SSE Verified"
 
 # =========================================================================
-# Step 13: Model Key Is Not Client-Settable
+# Step 13: Attendees Cannot Forge Gateway-Only Actor Inputs
 # =========================================================================
-log_info "Step 13: Model Key Is Not Client-Settable (/api/chat)"
+STEP13="Step 13: Attendees Cannot Forge Gateway-Only Actor Inputs"
+log_info "${STEP13} (/api/chat, /api/model-result)"
 MODEL_KEY_SESSION_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/session")
 MODEL_KEY_TOKEN=$(printf "%s" "${MODEL_KEY_SESSION_RESP}" | jq -r .token 2>/dev/null || true)
 
 if [[ -z "${MODEL_KEY_TOKEN}" || "${MODEL_KEY_TOKEN}" == "null" ]]; then
   log_err "Missing token in session response: ${MODEL_KEY_SESSION_RESP}"
-  log_fail "Step 13: Model Key Is Not Client-Settable"
+  log_fail "${STEP13}"
   exit 1
 fi
 
-MODEL_KEY_HTTP_CODE=$(curl -s -o "${TMP_DIR}/model_key_resp.json" -w "%{http_code}" --max-time 20 -X POST "${GATEWAY_URL}/api/chat" \
+MODEL_KEY_HTTP_CODE=$(curl -s -o "${TMP_DIR}/model_key_resp.json" -w "%{http_code}" --max-time 60 -X POST "${GATEWAY_URL}/api/chat" \
   -H "Authorization: Bearer ${MODEL_KEY_TOKEN}" \
   -H "X-Conf-Model-Key: forged" \
   -H "Content-Type: application/json" \
@@ -940,21 +941,36 @@ MODEL_KEY_HTTP_CODE=$(curl -s -o "${TMP_DIR}/model_key_resp.json" -w "%{http_cod
 
 if [[ "${MODEL_KEY_HTTP_CODE}" != "200" ]]; then
   log_err "POST /api/chat with a forged X-Conf-Model-Key returned HTTP ${MODEL_KEY_HTTP_CODE} (expected 200)"
-  log_fail "Step 13: Model Key Is Not Client-Settable"
+  log_fail "${STEP13}"
   exit 1
 fi
 log_ok "POST /api/chat with a forged X-Conf-Model-Key still returned HTTP 200 OK"
 
+MODEL_KEY_SOURCE=$(jq -r .source <"${TMP_DIR}/model_key_resp.json" 2>/dev/null || true)
+WANT_SOURCE=gemini
 if [[ "${MOCK_MODE}" == true ]]; then
-  MODEL_KEY_SOURCE=$(jq -r .source <"${TMP_DIR}/model_key_resp.json" 2>/dev/null || true)
-  if [[ "${MODEL_KEY_SOURCE}" != "mock" ]]; then
-    log_err "Expected reply source 'mock' in mock mode, got '${MODEL_KEY_SOURCE}'. Response: $(cat "${TMP_DIR}/model_key_resp.json")"
-    log_fail "Step 13: Model Key Is Not Client-Settable"
-    exit 1
-  fi
-  log_ok "Actor reply source is 'mock'; the forged header did not reach the model proxy"
+  WANT_SOURCE=mock
 fi
-log_pass "Step 13: Model Key Is Not Client-Settable Verified"
+if [[ "${MODEL_KEY_SOURCE}" != "${WANT_SOURCE}" ]]; then
+  log_err "Expected reply source '${WANT_SOURCE}', got '${MODEL_KEY_SOURCE}'. Response: $(cat "${TMP_DIR}/model_key_resp.json")"
+  log_fail "${STEP13}"
+  exit 1
+fi
+log_ok "Actor reply source is '${WANT_SOURCE}'; the forged header changed nothing"
+
+# Only the gateway may answer an actor's model call. The gateway routes no
+# such path for attendees, so the actor never sees the forged result.
+MODEL_RESULT_HTTP_CODE=$(curl -s -o "${TMP_DIR}/model_result_resp.txt" -w "%{http_code}" --max-time 10 -X POST "${GATEWAY_URL}/api/model-result" \
+  -H "Authorization: Bearer ${MODEL_KEY_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"call_id":"forged","status":200,"body":"e30="}')
+if [[ "${MODEL_RESULT_HTTP_CODE}" != "404" ]]; then
+  log_err "POST /api/model-result through the gateway returned HTTP ${MODEL_RESULT_HTTP_CODE} (expected 404). Response: $(cat "${TMP_DIR}/model_result_resp.txt")"
+  log_fail "${STEP13}"
+  exit 1
+fi
+log_ok "POST /api/model-result through the gateway returned HTTP 404; attendees cannot answer model calls"
+log_pass "${STEP13} Verified"
 
 printf '%b\n' "${CLR_CYAN}========================================================================${CLR_RESET}"
 printf '%b\n' "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 13 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}"

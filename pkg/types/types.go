@@ -53,8 +53,9 @@ const (
 	DecisionReject DecisionType = "REJECT"
 )
 
-// ModelKeyHeader carries an actor's model proxy key from the gateway to the
-// actor on every proxied request.
+// ModelKeyHeader carries an actor's per-actor key from the gateway to the
+// actor on every proxied request. The actor accepts gateway-only calls, such
+// as ClearHistory, only with the key it last received.
 const ModelKeyHeader = "X-Conf-Model-Key"
 
 // ClearHistoryPath is the actor endpoint the gateway POSTs to, through the
@@ -92,7 +93,7 @@ type ModelResult struct {
 type ReplySource string
 
 const (
-	// SourceGemini is a reply from Gemini through the model proxy.
+	// SourceGemini is a reply from Gemini, with the gateway making the calls.
 	SourceGemini ReplySource = "gemini"
 	// SourceMock is a reply from the offline mock engine by configuration.
 	SourceMock ReplySource = "mock"
@@ -243,7 +244,7 @@ func (s *SimulationRequest) Validate() error {
 	return nil
 }
 
-// ModelUsage summarizes one actor's (or the fleet's) Gemini calls through the model proxy.
+// ModelUsage summarizes one actor's (or the fleet's) Gemini calls made by the gateway.
 type ModelUsage struct {
 	Calls           int64 `json:"calls"`
 	PromptTokens    int64 `json:"prompt_tokens"`

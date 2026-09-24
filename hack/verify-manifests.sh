@@ -38,6 +38,7 @@ render() {
       -e "s|\${DEMO_MOCK_LLM}|false|g" \
       -e "s|\${DEMO_DOMAIN}|$2|g" \
       -e "s|\${BUCKET_NAME}|b|g" \
+      -e "s|\${TEMPLATE_REVISION}|1|g" \
       "$1"
 }
 
@@ -71,11 +72,19 @@ fi
 
 out="$(render "${GATEWAY_MANIFEST}" "demo.example.com")"
 for want in "kind: ServiceAccount" "iam.gke.io/gcp-service-account" "kind: Deployment" \
-            "name: conf-gateway-internal" "resourceNames:" "- ate-client" "clustertrustbundles" \
+            "resourceNames:" "- ate-client" "clustertrustbundles" \
             "endpointslices" "readOnlyRootFilesystem: true" "runAsNonRoot: true" "runAsUser: 65532" \
             "cloud.google.com/backend-config: '{\"default\":\"conf-gateway\"}'"; do
   if ! grep -qF -- "${want}" <<<"${out}"; then
     echo "error: gateway manifest lacks ${want}" >&2
+    status=1
+  fi
+done
+# Actors have no egress; the gateway makes their model calls itself, so it
+# exposes nothing to them.
+for unwanted in "conf-gateway-internal" "8091"; do
+  if grep -qF -- "${unwanted}" <<<"${out}"; then
+    echo "error: gateway manifest still has ${unwanted}" >&2
     status=1
   fi
 done

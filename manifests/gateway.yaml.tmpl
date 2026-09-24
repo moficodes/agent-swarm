@@ -107,13 +107,9 @@ spec:
         ports:
         - name: http
           containerPort: 8090
-        - name: model-proxy
-          containerPort: 8091
         env:
         - name: PORT
           value: "8090"
-        - name: MODEL_PROXY_ADDR
-          value: ":8091"
         - name: ROUTER_URL
           value: "http://atenet-router.ate-system.svc:80"
         - name: ROUTER_STATUS_DISCOVERY
@@ -181,18 +177,3 @@ spec:
   - name: http
     port: 80
     targetPort: http
----
-# Model proxy for actors only; never exposed outside the cluster.
-apiVersion: v1
-kind: Service
-metadata:
-  name: conf-gateway-internal
-  namespace: ate-demo-conf
-spec:
-  type: ClusterIP
-  selector:
-    app: conf-gateway
-  ports:
-  - name: model-proxy
-    port: 8091
-    targetPort: model-proxy

@@ -29,8 +29,9 @@ containers:
     capabilities:
       add: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"]
   env:
-  - name: MODEL_PROXY_URL
-    value: "http://conf-gateway-internal.ate-demo-conf.svc:8091"
+  # Read only by the install script, to refuse a stale template.
+  - name: CONF_TEMPLATE_REVISION
+    value: "${TEMPLATE_REVISION}"
   - name: VERTEX_PROJECT
     value: "${VERTEX_PROJECT}"
   - name: VERTEX_LOCATION

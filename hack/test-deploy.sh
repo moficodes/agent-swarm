@@ -15,12 +15,14 @@
 # limitations under the License.
 
 # Tests the router flag/grace-period checks, the router patch builder, the
-# stale actor template check and the duration parser in
+# stale actor template check, the template render and the duration parser in
 # install-demo-conference.sh without a cluster.
 set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 ATE_DEMOS=()
 ate_demo_flag_unhandled() { :; }
+# install-ate.sh defines this; the demo template has no version to substitute.
+substitute_version() { cat; }
 # shellcheck source=hack/install-demo-conference.sh
 source "${ROOT}/hack/install-demo-conference.sh"
 
@@ -143,13 +145,20 @@ expect_template() {
     fail=1
   fi
 }
-current_caps='"securityContext":{"capabilities":{"add":["CHOWN","SETUID","SETGID","DAC_OVERRIDE"]}}'
-expect_template ok    '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}],'"${current_caps}"'}]}'
-# Predates the model proxy.
-expect_template stale '{"containers":[{"name":"conf-workload",'"${current_caps}"'}]}'
-# Predates the capabilities the executor needs to run scripts as nobody.
-expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}]}]}'
-expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}],"securityContext":{"capabilities":{"add":["CHOWN"]}}}]}'
-expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}],"securityContext":{"capabilities":{"add":["CHOWN","SETUID","SETGID"]}}}]}'
+rev="${DEMO_CONF_TEMPLATE_REVISION}"
+expect_template ok    '{"containers":[{"name":"conf-workload","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"${rev}"'"}]}]}'
+# Templates from before the revision marker, with the old model proxy URL.
+expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"MODEL_PROXY_URL","value":"x"}],"securityContext":{"capabilities":{"add":["CHOWN","SETUID","SETGID","DAC_OVERRIDE"]}}}]}'
+expect_template stale '{"containers":[{"name":"conf-workload"}]}'
+# An older or newer revision.
+expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"$((rev - 1))"'"}]}]}'
+expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"$((rev + 1))"'"}]}]}'
+# The marker on another container does not count.
+expect_template stale '{"containers":[{"name":"sidecar","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"${rev}"'"}]}]}'
+# The rendered template carries the current revision.
+if ! demo-conference_render demos/conference/conference-template.yaml.tmpl | grep -A1 'name: CONF_TEMPLATE_REVISION' | grep -qF "value: \"${rev}\""; then
+  echo "FAIL: rendered conf-agent template lacks CONF_TEMPLATE_REVISION ${rev}" >&2
+  fail=1
+fi
 
 exit "${fail}"

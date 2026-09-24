@@ -1,6 +1,6 @@
 # Design: Conference Demo B1 — Actor-Owned Agent Loop, Real Substrate State, In-Cluster Gateway
 
-Status: approved in review. Implementation plan to follow.
+Status: implemented. Amended 2026-09-24: actors run with egress denied, so the gateway makes their model calls through a relay (§5) instead of serving a model proxy port to them.
 
 ## 1. Problem
 
@@ -21,7 +21,7 @@ Phase A (commits `050f6a15`..`7e222130`) closed the security holes. B1 fixes the
 | Topic | Decision | Rejected alternatives |
 |---|---|---|
 | Who runs the agent loop | The actor: Gemini loop, history, tool calls, pending approval | The gateway runs the loop (as today) |
-| Model credentials | Actors call a stateless model proxy in the gateway with a per-actor key. The proxy calls Vertex using Application Default Credentials, which is Workload Identity in-cluster. | **Workload Identity inside the actor:** it would be the shared worker-pool identity, tokens would land in snapshots, and metadata-server reachability through Substrate egress is unverified. **Egress credential injection:** it does not apply on the CONNECT leg, no in-tree `CredentialProvider` exists, and hermes found it unusable. **API key in template env:** the key would be baked into the template and golden snapshot. |
+| Model credentials | The actor hands each model request back to the gateway, which checks it against an allowlist and calls Vertex using Application Default Credentials, which is Workload Identity in-cluster. | **Actor calls a gateway model proxy port** (the first B1 design): actors have no egress, and opening it needs an EgressPolicy. **Workload Identity inside the actor:** it would be the shared worker-pool identity, tokens would land in snapshots, and metadata-server reachability through Substrate egress is unverified. **Egress credential injection:** it does not apply on the CONNECT leg, no in-tree `CredentialProvider` exists, and hermes found it unusable. **API key in template env:** the key would be baked into the template and golden snapshot. |
 | Where the gateway runs | In-cluster Deployment | On a laptop behind port-forwards |
 | How the gateway reaches ateapi | A `kubectl-ate` binary built from the same substrate commit, run as a subprocess with `--endpoint` set to the in-cluster ateapi Service | Copying `internal/ateclient` (core code). Promoting it to `pkg/` (a core API decision). A hand-written gRPC client (hermes and always-on-agent both avoided this). |
 | Source of actor state | Poll `kubectl-ate get actors -o json` about once a second and push changes to the UI over SSE | Gateway-tracked state, OTLP events |
@@ -37,12 +37,12 @@ Prior art: `agent-substrate/hermes` and `agent-substrate/always-on-agent` both r
 ┌──────────────── conf-gateway (Deployment, 1 replica) ─────────────────┐
 │ UI, sessions, presenter auth                                          │
 │ /api/chat, /api/approve ──► atenet-router (ate-target-actor header)   │
-│ :8091 /model/* ◄── actors: model proxy (ADC / Workload Identity)      │
+│ model calls actors hand back ──► Vertex (ADC / Workload Identity)     │
 │ actor state poller: kubectl-ate get actors -o json ──► SSE            │
 │ lifecycle calls: kubectl-ate suspend (Phase C adds pause, revert)     │
 └───────────────────────────────────────────────────────────────────────┘
-        │ via router                         ▲ via Substrate egress
-        ▼                                    │
+        │ via router (chat, approve, model results)
+        ▼
 ┌──────── conf-workload actor (one per attendee, gVisor) ────────┐
 │ Gemini loop, chat history, pending approval (in memory)        │
 │ /api/approve runs only its own pending code                    │
@@ -53,8 +53,8 @@ Prior art: `agent-substrate/hermes` and `agent-substrate/always-on-agent` both r
 ### 3.1 Chat turn
 
 1. The phone POSTs to `/api/chat` on the gateway, which authenticates the attendee JWT.
-2. The gateway proxies the request to the router with `ate-target-actor: <atespace>/<attendee>` and the actor's model key header (§5.1). The router resumes the actor if needed, parking the request while it does.
-3. The actor appends the message to its history and calls Gemini through the proxy. It returns either a reply or an approval request, and records the approval as its pending approval.
+2. The gateway proxies the request to the router with `ate-target-actor: <atespace>/<attendee>` and the actor's key header (§5.1). The router resumes the actor if needed, parking the request while it does.
+3. The actor appends the message to its history and runs its Gemini loop. Each model request comes back to the gateway as a `model_call` step, and the gateway posts the result to the actor through the router (§5.2). The actor finally returns either a reply or an approval request, and records the approval as its pending approval.
 4. The gateway records the turn in the action feed from the proxied response. It keeps its own copy of the pending approval only for the Phase A binding check.
 
 ### 3.2 Approval
@@ -125,40 +125,35 @@ The gateway diffs successive polls and sends only changed `ActorView`s over SSE.
 
 ### 5.1 Per-actor key
 
-- `key = <actor>.<base64url(HMAC-SHA256(secret, atespace + "/" + actor))>`, where `secret` is the gateway's HMAC secret (§6).
-- The gateway sends the key to the actor on every proxied request in `X-Conf-Model-Key`. The actor keeps the latest key in memory.
-- No key appears in the template or env.
-- A key captured in a snapshot is valid only for that one actor, against the proxy. Rotating the secret revokes every key.
-- The proxy strips `X-Conf-Model-Key` from anything it forwards upstream. The gateway sets it only on requests to the router, never on responses.
+- `key = <actor>.<base64url(HMAC-SHA256(secret, "model-key/" + atespace + "/" + actor))>`, where `secret` is the gateway's HMAC secret (§6). The prefix separates it from the JWT signing input.
+- The gateway sends the key to the actor on every proxied request in `X-Conf-Model-Key`. The actor keeps the latest key in memory and accepts a history clear only with it. The key carries no model access.
+- No key appears in the template or env. The gateway strips client-supplied copies and never returns the header to a client.
 
-### 5.2 Actor side
+### 5.2 Relay
 
-- The genai SDK runs with the Vertex backend and `HTTPOptions.BaseURL = MODEL_PROXY_URL`.
-- `Credentials` is a static token source returning the key as a bearer token. The vendored SDK exposes `ClientConfig.Credentials *auth.Credentials`.
-- `VERTEX_PROJECT`, `VERTEX_LOCATION` and `GEMINI_MODEL` come from template env. They are not secret.
-- `DEMO_MOCK_LLM=true` forces the mock engine.
-- The first plan task verifies this client configuration end to end against a fake proxy before anything else depends on it.
+- The actor's genai SDK uses the Vertex backend with a transport that sends nothing over the network. Each request becomes a step: `/api/chat` answers `{"model_call":{"call_id","path","body"}}`, where `path` starts at the API version.
+- The gateway makes the call (§5.3) and POSTs `{"call_id","status","body"}` to the actor's `/api/model-result` through the router. The actor answers with the next step: another model call or the final message. The gateway makes at most 4 calls per request, then answers 502.
+- Call IDs are 128 random bits and single-use. A result for an unknown or already answered call gets 409. The gateway routes no `/api/model-result` for attendees.
+- The actor runs one turn at a time; a second chat waits for the running one. A turn whose result never comes ends at the 60s turn timeout with a mock fallback.
+- The gateway request stays open for the whole turn, so the gateway's turn tracking keeps auto-suspend away from an actor mid-turn.
+- `VERTEX_PROJECT`, `VERTEX_LOCATION` and `GEMINI_MODEL` come from template env. They are not secret. `DEMO_MOCK_LLM=true` forces the mock engine.
 
-### 5.3 Proxy (`modelproxy`)
+### 5.3 Model calls (`modelproxy`)
 
-1. **Authenticate:** parse `Authorization: Bearer <actor>.<mac>`, recompute the MAC and compare in constant time. Failure returns 401.
-2. **Authorize:** allow only `POST /model/v1*/projects/{P}/locations/{L}/publishers/google/models/{M}:generateContent`, where P and L equal the gateway's configuration and M is in `MODEL_ALLOWLIST`. Anything else returns 403. Streaming is not allowed.
-3. **Forward:**
-   - remove `Authorization` and set `Authorization: Bearer <ADC token>`, with ADC from `golang.org/x/oauth2/google`, scope `cloud-platform`;
-   - send the request to `https://{L}-aiplatform.googleapis.com` with the `/model` prefix stripped;
-   - apply a 30s upstream timeout.
-4. **Limit:** request bodies are capped at 256 KiB (413), and each actor may have at most 2 calls in flight (429).
-5. **Account:** parse `usageMetadata` from the response and add prompt and candidate tokens and latency to that attendee's stats. The stage and spotlight read these stats.
+1. **Authorize:** allow only `/v1*/projects/{P}/locations/{L}/publishers/google/models/{M}:generateContent`, where P and L equal the gateway's configuration and M is in `MODEL_ALLOWLIST`. Paths with `..`, `%`, `?` or `#` are refused. Anything else returns 403. Streaming is not allowed.
+2. **Call:** set `Authorization: Bearer <ADC token>`, with ADC from `golang.org/x/oauth2/google`, scope `cloud-platform`; send the request to `https://{L}-aiplatform.googleapis.com`; apply a 30s upstream timeout.
+3. **Limit:** request bodies are capped at 256 KiB (413), and each actor may have at most 2 calls in flight (429).
+4. **Account:** parse `usageMetadata` from the response and add prompt and candidate tokens and latency to that attendee's stats. The stage and spotlight read these stats.
 
-The proxy listens on its own port (`MODEL_PROXY_ADDR`, default `:8091`), exposed only through a ClusterIP Service. The public Service never routes to it.
+The gateway's refusals come back to the actor as results in Vertex's error shape.
 
-When no `VERTEX_PROJECT` is configured, the proxy is disabled (every request returns 503), the install script sets `DEMO_MOCK_LLM=true` on actors, and the stage header shows "Mock LLM".
+When no `VERTEX_PROJECT` is configured, model calls are disabled (every call returns 503), the install script sets `DEMO_MOCK_LLM=true` on actors, and the stage header shows "Mock LLM".
 
 `GEMINI_API_KEY` is removed from both binaries.
 
 ### 5.4 Remaining risk (documented in the README)
 
-Code approved into an actor's sandbox can call the proxy as that actor. That spends the attendee's quota on the allowlisted endpoint. No credential can leave the cluster.
+An actor, including code approved into its sandbox, can make the gateway spend the attendee's quota on the allowlisted endpoint. No credential reaches an actor or a snapshot.
 
 ## 6. Deployment
 
@@ -175,10 +170,9 @@ Code approved into an actor's sandbox can call the proxy as that actor. That spe
 | ServiceAccount `conf-gateway` | `iam.gke.io/gcp-service-account` pointing at a GSA with only `roles/aiplatform.user` |
 | ClusterRole and binding | `list` on `certificates.k8s.io/clustertrustbundles`, which `kubectl-ate` uses to verify ateapi |
 | Role and binding in `ate-system` | `create` on `serviceaccounts/token`, `resourceNames: [ate-client]` |
-| Secret `conf-gateway` | `PRESENTER_TOKEN`, `HMAC_SECRET` (also signs JWTs). Created by the install script if missing, so sessions and model keys survive gateway restarts. |
+| Secret `conf-gateway` | `PRESENTER_TOKEN`, `HMAC_SECRET` (also signs JWTs). Created by the install script if missing, so sessions and actor keys survive gateway restarts. |
 | Deployment | 1 replica. Sessions, feed and approvals are in memory, and this limit is documented. Env: `ATEAPI_ENDPOINT=api.ate-system.svc:443`, `ROUTER_URL`, a router statusz target, `VERTEX_*`, `MODEL_ALLOWLIST`. |
 | Service `conf-gateway` | LoadBalancer, UI and API port only |
-| Service `conf-gateway-internal` | ClusterIP, model proxy port only |
 | Ingress (optional) | Created when `DEMO_DOMAIN` is set, with a Google-managed certificate. Without it, attendee traffic is plain HTTP, and the README says so. |
 
 No port-forward permission is needed.

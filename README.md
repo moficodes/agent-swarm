@@ -49,10 +49,11 @@ conf-gateway (in-cluster, Deployment in ate-demo-conf, 1 replica)
 atenet-router (ate-system)
   |
   v
-actor (conf-workload, on a conf-workers pod)
-  |  model call, Authorization: Bearer <model key>
+actor (conf-workload, on a conf-workers pod; no egress)
+  |  answers with a model_call step; the gateway posts the result
+  |  back to /api/model-result through the router
   v
-conf-gateway-internal:8091 (ClusterIP, actors only, model proxy)
+conf-gateway makes the model call
   |  Vertex AI call, Workload Identity token
   v
 Vertex AI (generateContent)
@@ -71,10 +72,15 @@ conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
   in `demos/conference/manifests/gateway.yaml.tmpl`) with an
   `ate-target-actor` header identifying the attendee's actor
   (`demos/conference/cmd/conf-gateway/internal/actorproxy/proxy.go`).
-- Actor to model: the actor's Gemini client calls
-  `MODEL_PROXY_URL=http://conf-gateway-internal.ate-demo-conf.svc:8091`
-  (`demos/conference/conference-template.yaml.tmpl`), a `ClusterIP` Service
-  that is never exposed outside the cluster.
+- Actor to model: actors run with egress denied, so the actor never calls
+  out. Its Gemini client hands each request to the gateway instead
+  (`demos/conference/internal/workload/relay`): `/api/chat` answers with a
+  `model_call` step, the gateway makes the call and posts the result to the
+  actor's `/api/model-result` through the router, and repeats until the
+  actor answers with its reply, at most four times per request
+  (`demos/conference/cmd/conf-gateway/internal/actorproxy/proxy.go`). Call
+  IDs are random and single-use, and the gateway routes no
+  `/api/model-result` for attendees.
 - Gateway to ateapi: the gateway shells out to `kubectl-ate` against
   `ATEAPI_ENDPOINT=api.ate-system.svc:443` to read actor state and to issue
   suspends (`demos/conference/cmd/conf-gateway/internal/actorstate`).
@@ -89,19 +95,18 @@ conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
   `Authorization`, `Cookie` and any client-supplied model-key header, then
   sets its own `X-Conf-Model-Key` header to a value scoped to that one actor:
   `<actor>.<base64 HMAC(HMAC_SECRET, "model-key/" + atespace + "/" + actor)>`
-  (`demos/conference/cmd/conf-gateway/internal/actorproxy/proxy.go`,
-  `demos/conference/cmd/conf-gateway/internal/modelproxy/key.go`). The
+  (`demos/conference/cmd/conf-gateway/internal/actorproxy/key.go`). The
   `model-key/` prefix domain-separates it from the HMAC that signs attendee
   session tokens, so the same `HMAC_SECRET` cannot be replayed between the
   two uses.
-- The actor's workload server remembers the latest key it was sent and hands
-  it to the Gemini client as a bearer token
-  (`demos/conference/internal/workload/gemini/transport.go`) when it calls
-  the gateway's model proxy at `conf-gateway-internal:8091`. The proxy
-  verifies the key's HMAC before forwarding
-  (`demos/conference/cmd/conf-gateway/internal/modelproxy/proxy.go`); a
-  forged key never reaches Vertex.
-- The model proxy itself calls Vertex AI with the gateway's own Workload
+- The actor's workload server remembers the latest key it was sent and
+  accepts a history clear only with that key. The key carries no model
+  access.
+- The gateway checks each model call against an allowlist (the configured
+  project, location and models, `generateContent` only, a body size cap and
+  a per-actor in-flight limit) before making it
+  (`demos/conference/cmd/conf-gateway/internal/modelproxy/proxy.go`).
+- The gateway calls Vertex AI with its own Workload
   Identity: the `conf-gateway` `ServiceAccount` is annotated with a GCP
   service account that holds `roles/aiplatform.user` only
   (`hack/install-demo-conference.sh`'s `demo-conference_ensure_gsa`,
@@ -202,10 +207,10 @@ Gemini reply carries no tag.
   restart drops them all.
 - Plain HTTP end to end unless `DEMO_DOMAIN` is set to front the gateway
   with a TLS Ingress.
-- The model key the gateway hands an actor is a bearer credential valid on
-  the cluster network for as long as `HMAC_SECRET` is unchanged; anyone who
-  can reach `conf-gateway-internal:8091` and obtain a valid key can spend the
-  gateway's Vertex AI quota as that actor.
+- An actor can make the gateway spend Vertex AI quota, within the allowlist,
+  up to four calls per attendee request and two in flight at a time.
+- A relayed turn holds its gateway request open for every model call it
+  makes, bounded by the actor's 60s turn timeout.
 - `SUSPEND_AFTER` defaults to `0`: the gateway asks Substrate to suspend the
   actor immediately after each turn completes. A positive duration delays
   that suspend, and starting a new turn cancels a pending one
