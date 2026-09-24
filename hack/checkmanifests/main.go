@@ -15,7 +15,7 @@
 // Command checkmanifests validates that a multi-document YAML stream on
 // stdin parses as Kubernetes objects, without contacting any cluster: every
 // non-empty document must decode and carry an apiVersion, a kind and a
-// metadata.name. hack/verify-demo-conference-manifests.sh runs it in place
+// metadata.name. hack/verify-manifests.sh runs it in place
 // of "kubectl apply --dry-run=client", which needs a reachable kube context
 // for API discovery even in dry-run mode.
 package main

@@ -180,6 +180,77 @@ expect_labels bad ''                      # no labeled nodes at all
 expect_labels bad $'\n\n'
 expect_labels bad 'c7a1be177d0f99'        # longer than the pin is not a match
 
+# expect_dirty checks substrate_labels_match's third, dirty-accepting
+# argument: a "-dirty" label whose prefix (before "-dirty") is a prefix of
+# PIN is accepted only when ALLOW is true.
+expect_dirty() {
+  local want="$1" labels="$2" allow="$3" got=0
+  substrate_labels_match c7a1be177d0f "${labels}" "${allow}" || got=$?
+  if [[ "${want}" == ok && "${got}" != 0 ]] || [[ "${want}" == bad && "${got}" == 0 ]]; then
+    echo "FAIL: dirty labels ${want} for '${labels//$'\n'/,}' allow=${allow}" >&2
+    fail=1
+  fi
+}
+expect_dirty bad 'c7a1be17-dirty' false
+expect_dirty bad 'c7a1be17-dirty' ''                          # omitted defaults to strict
+expect_dirty ok  'c7a1be17-dirty' true
+expect_dirty bad '0123abcd-dirty' true                        # dirty prefix must still match the pin
+expect_dirty ok  $'c7a1be17\nc7a1be17-dirty' true              # mix of clean pin and dirty pin
+expect_dirty bad $'c7a1be17\nc7a1be17-dirty' false             # ...only with the override
+
+# expect_kind checks substrate_label_mismatch_kind, which classifies a
+# substrate_labels_match failure so conf_check_substrate can tell an
+# uninstalled Substrate from a dirty install from an actual version bump.
+expect_kind() {
+  local want="$1" labels="$2" got
+  got="$(substrate_label_mismatch_kind c7a1be177d0f "${labels}")"
+  if [[ "${got}" != "${want}" ]]; then
+    echo "FAIL: mismatch kind for '${labels//$'\n'/,}' = '${got}', want '${want}'" >&2
+    fail=1
+  fi
+}
+expect_kind unlabeled ''
+expect_kind unlabeled $'\n\n'
+expect_kind dirty 'c7a1be17-dirty'
+expect_kind dirty $'c7a1be17-dirty\nc7a1be17-dirty'
+expect_kind mismatch $'c7a1be17\n0123abcd'
+expect_kind mismatch '0123abcd-dirty'
+expect_kind mismatch $'c7a1be17-dirty\n0123abcd'
+
+# substrate_repo_clean flags an uncommitted change in SUBSTRATE_REPO before
+# conf_check_substrate installs from it: install-ate.sh would stamp nodes
+# "-dirty" from a modified checkout, which substrate_labels_match then
+# refuses by default.
+tmp_repo="$(mktemp -d)"
+(
+  cd "${tmp_repo}"
+  git init -q
+  git config user.email test@example.com
+  git config user.name test
+  echo one >file.txt
+  git add file.txt
+  git commit -q -m init
+)
+if ! substrate_repo_clean "${tmp_repo}"; then
+  echo "FAIL: substrate_repo_clean should accept a clean repo" >&2
+  fail=1
+fi
+echo two >>"${tmp_repo}/file.txt"
+if substrate_repo_clean "${tmp_repo}"; then
+  echo "FAIL: substrate_repo_clean should reject a dirty repo" >&2
+  fail=1
+fi
+rm -rf "${tmp_repo}"
+
+# log_target_context must report an explicit KUBECTL_CONTEXT itself, since
+# `kubectl --context=X config current-context` prints the kubeconfig file's
+# current-context, not X.
+out="$(KUBECTL_CONTEXT=my-ctx log_target_context 2>&1)"
+if [[ "${out}" != *"Target cluster context: my-ctx"* ]]; then
+  echo "FAIL: log_target_context with KUBECTL_CONTEXT set: ${out}" >&2
+  fail=1
+fi
+
 # substrate_pin reads the pinned commit from go.mod.
 if [[ "$(substrate_pin)" != "c7a1be177d0f" ]]; then
   echo "FAIL: substrate_pin = '$(substrate_pin)', want c7a1be177d0f" >&2

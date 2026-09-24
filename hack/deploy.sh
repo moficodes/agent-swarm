@@ -23,7 +23,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 DEMO_CONF_PATCH_ROUTER="${DEMO_CONF_PATCH_ROUTER:-false}"
 DEMO_CONF_ACTORS="${DEMO_CONF_ACTORS:-50}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
-# are immutable, so bump it with every change to conference-template.yaml.tmpl
+# are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
 DEMO_CONF_TEMPLATE_REVISION=2
 
@@ -62,10 +62,10 @@ conf_flag_value() {
 # it could not be read) is at least 120: the minimum that fits
 # atenet-router's shutdown sequence once --parked-request-budget is raised
 # to 60s. At that budget the derived --drain-timeout alone (budget +
-# drainRouteBudget + margin, see cmd/atenet/internal/router/xds.go and
-# config.go) already reaches about 75s, on top of --drain-delay and the
-# Envoy drain window (manifests/ate-install/atenet-router.yaml); a shorter
-# grace period lets the kubelet SIGKILL the router mid-drain.
+# drainRouteBudget + margin, see substrate's cmd/atenet/internal/router/xds.go
+# and config.go) already reaches about 75s, on top of --drain-delay and the
+# Envoy drain window (substrate's manifests/ate-install/atenet-router.yaml);
+# a shorter grace period lets the kubelet SIGKILL the router mid-drain.
 conf_grace_ok() {
   local grace="${1:-}"
   [[ "${grace}" =~ ^[0-9]+$ ]] && ((10#${grace} >= 120))
@@ -275,8 +275,10 @@ conf_check_template() {
 
 # conf_check_substrate requires Substrate on the cluster at the version
 # pinned in go.mod, installing it from SUBSTRATE_REPO if it is absent.
+# DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true also accepts a cluster labeled
+# "<pin>-dirty" (see substrate_labels_match).
 conf_check_substrate() {
-  local pin labels
+  local pin labels allow_dirty="${DEMO_CONF_ALLOW_DIRTY_SUBSTRATE:-false}"
   pin="$(substrate_pin)" || { echo "error: cannot read the substrate pin from go.mod" >&2; exit 1; }
   if ! run_kubectl get namespace ate-system >/dev/null 2>&1; then
     if [[ -z "${SUBSTRATE_REPO:-}" ]]; then
@@ -292,28 +294,50 @@ conf_check_substrate() {
       echo "error: SUBSTRATE_REPO is at ${head:0:12}, not the pinned ${pin}. Check out ${pin} there first." >&2
       exit 1
     fi
+    if ! substrate_repo_clean "${SUBSTRATE_REPO}"; then
+      echo "error: SUBSTRATE_REPO has uncommitted changes." >&2
+      echo "install-ate.sh would stamp nodes ate.dev/substrate-version=${pin}-dirty, which the check below refuses by default." >&2
+      echo "Commit or stash them, or set DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true to accept a dirty install." >&2
+      exit 1
+    fi
     log_step "Installing Substrate from ${SUBSTRATE_REPO}..."
     (cd "${SUBSTRATE_REPO}" && hack/install-ate.sh --deploy-ate-system)
   fi
   labels="$(run_kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.ate\.dev/substrate-version}{"\n"}{end}')"
-  if ! substrate_labels_match "${pin}" "${labels}"; then
-    echo "error: the cluster's nodes run Substrate $(sort -u <<<"${labels}" | tr '\n' ' ')but go.mod pins ${pin}." >&2
-    echo "Bump the pin to the cluster's commit:" >&2
-    echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/kubectl-ate@<commit>" >&2
-    echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/ateom-gvisor@<commit>" >&2
-    echo "  then copy substrate's go directive and k8s.io/apimachinery replace into go.mod and run go mod tidy." >&2
+  if ! substrate_labels_match "${pin}" "${labels}" "${allow_dirty}"; then
+    case "$(substrate_label_mismatch_kind "${pin}" "${labels}")" in
+      unlabeled)
+        echo "error: no node carries ate.dev/substrate-version; is Substrate installed at a version that labels nodes?" >&2
+        ;;
+      dirty)
+        echo "error: the cluster's nodes run the pinned commit ${pin}, but Substrate was installed from a modified checkout ($(sort -u <<<"${labels}" | tr '\n' ' ')):" >&2
+        echo "Reinstall Substrate from a clean checkout at ${pin}, or set DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true to accept it." >&2
+        ;;
+      *)
+        echo "error: the cluster's nodes run Substrate $(sort -u <<<"${labels}" | tr '\n' ' ')but go.mod pins ${pin}." >&2
+        echo "Bump the pin to the cluster's commit:" >&2
+        echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/kubectl-ate@<commit>" >&2
+        echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/ateom-gvisor@<commit>" >&2
+        echo "  then copy substrate's go directive and k8s.io/apimachinery replace into go.mod and run go mod tidy." >&2
+        ;;
+    esac
     exit 1
   fi
 }
 
 conf_deploy() {
   log_step "Deploying the conference demo"
+  log_target_context
   : "${BUCKET_NAME:?BUCKET_NAME must be set}"
   : "${KO_DOCKER_REPO:?KO_DOCKER_REPO must be set}"
   local tool
   for tool in kubectl ko docker jq go; do
     command -v "${tool}" >/dev/null || { echo "error: ${tool} is required" >&2; exit 1; }
   done
+  if ! docker buildx version >/dev/null 2>&1; then
+    echo "error: docker buildx is required" >&2
+    exit 1
+  fi
   conf_check_substrate
 
   if [[ -n "${PROJECT_ID:-}" ]]; then
@@ -370,6 +394,7 @@ conf_deploy() {
 
 conf_delete() {
   log_step "Deleting the conference demo"
+  log_target_context
   run_kubectl delete -f <(conf_render manifests/gateway.yaml.tmpl) --ignore-not-found
   if [[ -n "${DEMO_DOMAIN:-}" ]]; then
     run_kubectl delete -f <(conf_render manifests/gateway-ingress.yaml.tmpl) --ignore-not-found
@@ -409,7 +434,11 @@ conf_main() {
       echo "  --patch-router  patch atenet-router's timeouts and grace period instead of failing"
       echo "  Required env: KO_DOCKER_REPO, BUCKET_NAME"
       echo "  Optional env: PROJECT_ID (enables Vertex AI; unset runs mock replies), VERTEX_LOCATION,"
-      echo "                DEMO_DOMAIN, DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO"
+      echo "                DEMO_DOMAIN, DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO,"
+      echo "                KUBECTL_CONTEXT (defaults to the current kube context),"
+      echo "                DEMO_CONF_ALLOW_DIRTY_SUBSTRATE (accept a cluster labeled <pin>-dirty),"
+      echo "                KO_DEFAULTPLATFORMS=linux/amd64 (skip the arm64 build)"
+      echo "  This script sources no dev-env file; export the variables above yourself."
       [[ "${action}" == help ]] && return 0 || return 1
       ;;
   esac

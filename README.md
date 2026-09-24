@@ -27,9 +27,14 @@ limitations under the License.
 - Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.
   `PROJECT_ID` is optional and enables Vertex AI; leave it unset to run with
   mock replies. Also optional: `VERTEX_LOCATION`, `DEMO_DOMAIN`,
-  `DEMO_CONF_ACTORS` (default 50), and `SUBSTRATE_REPO` (a substrate checkout
+  `DEMO_CONF_ACTORS` (default 50), `SUBSTRATE_REPO` (a substrate checkout
   at the pin; `hack/deploy.sh` installs Substrate from it when the
-  `ate-system` namespace is missing).
+  `ate-system` namespace is missing), `KUBECTL_CONTEXT` (which kube context
+  to target; defaults to the current one), `DEMO_CONF_ALLOW_DIRTY_SUBSTRATE`
+  (accept a cluster labeled `<pin>-dirty`; see "Bumping Substrate"), and
+  `KO_DEFAULTPLATFORMS=linux/amd64` (skip the arm64 build `ko` does by
+  default). `hack/deploy.sh` sources no dev-env file, so export these
+  yourself.
 
 ## What it shows
 
@@ -146,6 +151,11 @@ make deploy DEPLOY_FLAGS=--patch-router
 unset to deploy without patching the router, or set
 `DEMO_CONF_PATCH_ROUTER=true` in the environment instead, which has the same
 effect regardless of any flags passed.
+
+`hack/deploy.sh` sources no dev-env file: it targets `KUBECTL_CONTEXT` if
+set, otherwise the current kube context, and logs which one at the start of
+`up` and `down`. `ko` builds for both `linux/amd64` and `linux/arm64` by
+default; set `KO_DEFAULTPLATFORMS=linux/amd64` to skip the arm64 build.
 
 `atenet-router` needs `--parked-request-budget` at least 60s, any
 `--route-timeout` at least 60s, and `terminationGracePeriodSeconds` at least
@@ -269,13 +279,22 @@ the gateway's log output.
 `make verify-local` runs `hack/verify.sh --mock-mode`, which builds the same
 two pieces and runs all 13 verification steps against them without a
 cluster. `make e2e` runs the identical `hack/verify.sh` against a real
-deployed cluster.
+deployed cluster; it needs a port-forward to `svc/conf-gateway` and a
+`PRESENTER_TOKEN` from the gateway's Secret first:
+
+```bash
+kubectl port-forward -n ate-demo-conf svc/conf-gateway 8090:80 &
+export PRESENTER_TOKEN="$(kubectl get secret conf-gateway -n ate-demo-conf -o jsonpath='{.data.PRESENTER_TOKEN}' | base64 -d)"
+```
 
 ## Bumping Substrate
 
 `hack/deploy.sh` compares the cluster nodes' `ate.dev/substrate-version`
 label against the commit `go.mod` pins substrate at, and refuses to deploy
-on a mismatch. To move the pin to a new commit:
+on a mismatch. The label is matched as a prefix of the pinned commit, so the
+cluster must be installed from an untagged, clean checkout of that commit —
+a tagged build labels nodes `v...` and will not match. To move the pin to a
+new commit:
 
 ```bash
 go get -tool github.com/agent-substrate/substrate/cmd/kubectl-ate@<commit>

@@ -166,7 +166,7 @@ SPAWNED_PIDS=()
 BURST_PIDS=()
 STREAM_PID=""
 
-# shellcheck disable=SC2329 # invoked indirectly via the trap set below
+# shellcheck disable=SC2317,SC2329 # invoked indirectly via the trap set below
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM

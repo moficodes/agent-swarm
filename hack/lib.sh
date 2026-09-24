@@ -27,6 +27,18 @@ run_kubectl() {
   kubectl ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} "$@"
 }
 
+# log_target_context logs the cluster context a deploy or delete run will
+# target. `kubectl --context=X config current-context` prints the
+# kubeconfig file's current-context, not X, so an explicit KUBECTL_CONTEXT
+# is reported directly instead of asking kubectl.
+log_target_context() {
+  if [[ -n "${KUBECTL_CONTEXT:-}" ]]; then
+    log_step "Target cluster context: ${KUBECTL_CONTEXT}"
+  else
+    log_step "Target cluster context: $(run_kubectl config current-context)"
+  fi
+}
+
 # run_kubectl_fatal runs kubectl and aborts the deploy if it fails.
 run_kubectl_fatal() {
   if ! run_kubectl "$@"; then
@@ -51,14 +63,62 @@ substrate_pin() {
 # substrate_labels_match succeeds if at least one line of LABELS is set and
 # every set line is a prefix of PIN. LABELS holds one node's
 # ate.dev/substrate-version per line; unlabeled nodes are empty lines.
+# ALLOW_DIRTY (default false; pass "true", e.g. from
+# DEMO_CONF_ALLOW_DIRTY_SUBSTRATE) also accepts a label of the form
+# "<prefix-of-PIN>-dirty", which Substrate stamps on nodes when installed
+# from a modified checkout.
 substrate_labels_match() {
-  local pin="$1" labels="$2" label seen=false
+  local pin="$1" labels="$2" allow_dirty="${3:-false}" label seen=false
   while IFS= read -r label; do
     [[ -z "${label}" ]] && continue
-    [[ "${pin}" == "${label}"* ]] || return 1
-    seen=true
+    if [[ "${pin}" == "${label}"* ]]; then
+      seen=true
+      continue
+    fi
+    if [[ "${allow_dirty}" == true && "${label}" == *-dirty \
+        && "${pin}" == "${label%-dirty}"* ]]; then
+      seen=true
+      continue
+    fi
+    return 1
   done <<<"${labels}"
   [[ "${seen}" == true ]]
+}
+
+# substrate_label_mismatch_kind classifies why LABELS failed
+# substrate_labels_match against PIN, so conf_check_substrate can print a
+# message that fits the actual cause instead of always suggesting a pin
+# bump. Prints one of:
+#   unlabeled  no node carries ate.dev/substrate-version at all
+#   dirty      every set label is "<prefix-of-PIN>-dirty": the cluster runs
+#              the pinned commit, but from a modified checkout
+#   mismatch   otherwise: at least one node runs a different commit
+substrate_label_mismatch_kind() {
+  local pin="$1" labels="$2" label seen=false all_dirty=true
+  while IFS= read -r label; do
+    [[ -z "${label}" ]] && continue
+    seen=true
+    if [[ "${label}" == *-dirty && "${pin}" == "${label%-dirty}"* ]]; then
+      continue
+    fi
+    all_dirty=false
+  done <<<"${labels}"
+  if [[ "${seen}" == false ]]; then
+    echo unlabeled
+  elif [[ "${all_dirty}" == true ]]; then
+    echo dirty
+  else
+    echo mismatch
+  fi
+}
+
+# substrate_repo_clean succeeds if REPO's working tree has no uncommitted
+# changes. install-ate.sh stamps nodes "<commit>-dirty" when run from a
+# modified checkout, which substrate_labels_match then refuses by default,
+# so conf_check_substrate checks this before installing from SUBSTRATE_REPO.
+substrate_repo_clean() {
+  local repo="$1"
+  [[ -z "$(git -C "${repo}" status --porcelain)" ]]
 }
 
 # wait_for_pool_rollout_fatal waits for a WorkerPool's Deployment, which

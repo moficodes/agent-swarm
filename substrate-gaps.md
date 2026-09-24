@@ -28,10 +28,12 @@ non-root workload user for the model-generated code it executes, but cannot
 have one; instead it runs as root inside gVisor and grants itself
 `CHOWN`, `SETUID`, `SETGID` and `DAC_OVERRIDE` so its executor can `setuid`
 down to `nobody` per sandboxed run
-(`manifests/actortemplate.yaml.tmpl`). The fix belongs in atelet
-(`cmd/atelet/oci.go`, which builds the overlay) and ateom
-(`internal/imagecache/bundle_linux.go`, which lays out the bundle), so the
-overlay is traversable by whatever user the image specifies.
+(`manifests/actortemplate.yaml.tmpl`). The fix belongs in substrate's atelet
+([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/c7a1be177d0f1391c38a3b77f333d10ce8ec324a/cmd/atelet/oci.go),
+which builds the overlay) and ateom
+([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/c7a1be177d0f1391c38a3b77f333d10ce8ec324a/internal/imagecache/bundle_linux.go),
+which lays out the bundle), so the overlay is traversable by whatever user
+the image specifies.
 
 ## `kubectl-ate` cannot manage egress policies
 
