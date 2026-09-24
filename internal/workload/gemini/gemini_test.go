@@ -169,3 +169,19 @@ func TestBuildContents_PromptAlreadyLastInHistoryIsNotDuplicated(t *testing.T) {
 		t.Fatalf("last content = %+v, want a single-part user content with the prompt once", last)
 	}
 }
+
+// The sandbox image is python:3.12-slim, so a script that imports numpy or
+// another third-party package fails.
+func TestToolDeclarations_CodeIsLimitedToTheStandardLibrary(t *testing.T) {
+	for _, tool := range gemini.ToolDeclarations() {
+		for _, fn := range tool.FunctionDeclarations {
+			code, ok := fn.Parameters.Properties["code"]
+			if !ok {
+				continue
+			}
+			if !strings.Contains(code.Description, "standard library") {
+				t.Errorf("%s code description = %q, want it to limit scripts to the standard library", fn.Name, code.Description)
+			}
+		}
+	}
+}

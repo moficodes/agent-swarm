@@ -37,7 +37,7 @@ func ToolDeclarations() []*genai.Tool {
 							},
 							"code": {
 								Type:        genai.TypeString,
-								Description: "The exact script or code snippet to execute.",
+								Description: "The exact script or code snippet to execute. Python scripts may use only the standard library; numpy, pandas and other third-party packages are not installed.",
 							},
 							"language": {
 								Type:        genai.TypeString,
@@ -63,7 +63,7 @@ func ToolDeclarations() []*genai.Tool {
 							},
 							"code": {
 								Type:        genai.TypeString,
-								Description: "Source code to run inside sandbox.",
+								Description: "Source code to run inside sandbox. Python scripts may use only the standard library; numpy, pandas and other third-party packages are not installed.",
 							},
 							"summary": {
 								Type:        genai.TypeString,
