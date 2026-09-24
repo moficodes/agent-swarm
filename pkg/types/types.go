@@ -69,25 +69,65 @@ const (
 	SourceMockFallback ReplySource = "mock-fallback"
 )
 
+// SubstrateState is an actor's state as reported by ateapi, without the
+// ACTOR_STATE_ prefix. StateUnavailable means the gateway could not read it.
+type SubstrateState string
+
+const (
+	StateUnknown     SubstrateState = "UNKNOWN"
+	StateResuming    SubstrateState = "RESUMING"
+	StateRunning     SubstrateState = "RUNNING"
+	StateSuspending  SubstrateState = "SUSPENDING"
+	StateSuspended   SubstrateState = "SUSPENDED"
+	StatePausing     SubstrateState = "PAUSING"
+	StatePaused      SubstrateState = "PAUSED"
+	StateCrashed     SubstrateState = "CRASHED"
+	StateDeleting    SubstrateState = "DELETING"
+	StateReverting   SubstrateState = "REVERTING"
+	StateUnavailable SubstrateState = "UNAVAILABLE"
+)
+
+// Activity is what the gateway knows the actor is doing for its attendee.
+type Activity string
+
+const (
+	ActivityIdle             Activity = ""
+	ActivityThinking         Activity = "THINKING"
+	ActivityAwaitingApproval Activity = "AWAITING_APPROVAL"
+	ActivityExecuting        Activity = "EXECUTING"
+)
+
+// ActorView is everything the UI shows about one actor's state.
+type ActorView struct {
+	ActorID      string         `json:"actor_id"`
+	State        SubstrateState `json:"state"`
+	NeverStarted bool           `json:"never_started"`
+	StateDetail  string         `json:"state_detail,omitempty"`
+	Activity     Activity       `json:"activity,omitempty"`
+	WorkerPod    string         `json:"worker_pod,omitempty"`
+	SnapshotURI  string         `json:"snapshot_uri,omitempty"`
+	Source       ReplySource    `json:"source,omitempty"`
+}
+
 // ActorLifecycleState represents the lifecycle phase of an interactive agent actor.
 type ActorLifecycleState string
 
 const (
-	// StateSuspended indicates the actor process is frozen to storage consuming 0 compute.
-	StateSuspended ActorLifecycleState = "SUSPENDED"
-	// StateParked indicates the request is waiting in Envoy's L7 request parking queue.
-	StateParked ActorLifecycleState = "PARKED"
-	// StateRunning indicates the actor is currently scheduled and running on a worker pod.
-	StateRunning ActorLifecycleState = "RUNNING"
-	// StateAwaitingApproval indicates the actor is paused awaiting human operator signoff.
-	StateAwaitingApproval ActorLifecycleState = "AWAITING_APPROVAL"
+	// LifecycleSuspended indicates the actor process is frozen to storage consuming 0 compute.
+	LifecycleSuspended ActorLifecycleState = "SUSPENDED"
+	// LifecycleParked indicates the request is waiting in Envoy's L7 request parking queue.
+	LifecycleParked ActorLifecycleState = "PARKED"
+	// LifecycleRunning indicates the actor is currently scheduled and running on a worker pod.
+	LifecycleRunning ActorLifecycleState = "RUNNING"
+	// LifecycleAwaitingApproval indicates the actor is paused awaiting human operator signoff.
+	LifecycleAwaitingApproval ActorLifecycleState = "AWAITING_APPROVAL"
 
-	// StateThinkingVertexAI indicates Gemini on Vertex AI is actively reasoning on the prompt.
-	StateThinkingVertexAI ActorLifecycleState = "THINKING_VERTEX_AI"
-	// StateParkedEnvoy indicates the request is explicitly held in Envoy ext_proc buffer.
-	StateParkedEnvoy ActorLifecycleState = "PARKED_ENVOY"
-	// StateRunningGVisor indicates the code is executing inside the gVisor sandbox container.
-	StateRunningGVisor ActorLifecycleState = "RUNNING_GVISOR"
+	// LifecycleThinkingVertexAI indicates Gemini on Vertex AI is actively reasoning on the prompt.
+	LifecycleThinkingVertexAI ActorLifecycleState = "THINKING_VERTEX_AI"
+	// LifecycleParkedEnvoy indicates the request is explicitly held in Envoy ext_proc buffer.
+	LifecycleParkedEnvoy ActorLifecycleState = "PARKED_ENVOY"
+	// LifecycleRunningGVisor indicates the code is executing inside the gVisor sandbox container.
+	LifecycleRunningGVisor ActorLifecycleState = "RUNNING_GVISOR"
 )
 
 // ApprovalRequest contains the details and security context of an execution requiring approval.

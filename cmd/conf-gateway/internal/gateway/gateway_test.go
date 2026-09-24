@@ -421,7 +421,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 		t.Errorf("expected suspendCall{%q, 'attendee-01'}, got %+v", atespace, lastCall)
 	}
 
-	// Verify actor state is StateAwaitingApproval
+	// Verify actor state is LifecycleAwaitingApproval
 	telemResp, err := http.Get(ts.URL + "/api/stage/telemetry")
 	if err != nil {
 		t.Fatalf("failed to get telemetry: %v", err)
@@ -430,8 +430,8 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	_ = json.NewDecoder(telemResp.Body).Decode(&telem)
 	_ = telemResp.Body.Close()
 
-	if state, ok := telem.Actors["attendee-01"]; !ok || state != types.StateAwaitingApproval {
-		t.Errorf("expected actor attendee-01 state %s, got %s (present: %v)", types.StateAwaitingApproval, state, ok)
+	if state, ok := telem.Actors["attendee-01"]; !ok || state != types.LifecycleAwaitingApproval {
+		t.Errorf("expected actor attendee-01 state %s, got %s (present: %v)", types.LifecycleAwaitingApproval, state, ok)
 	}
 
 	// Case 2: Approve request completion
@@ -460,7 +460,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 		t.Errorf("expected suspend call for attendee-01, got %+v", lastApproveCall)
 	}
 
-	// Verify actor state transitioned to StateSuspended
+	// Verify actor state transitioned to LifecycleSuspended
 	telemResp2, err := http.Get(ts.URL + "/api/stage/telemetry")
 	if err != nil {
 		t.Fatalf("failed to get telemetry after approve: %v", err)
@@ -469,8 +469,8 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	_ = json.NewDecoder(telemResp2.Body).Decode(&telem2)
 	_ = telemResp2.Body.Close()
 
-	if state, ok := telem2.Actors["attendee-01"]; !ok || state != types.StateSuspended {
-		t.Errorf("expected actor attendee-01 state %s, got %s", types.StateSuspended, state)
+	if state, ok := telem2.Actors["attendee-01"]; !ok || state != types.LifecycleSuspended {
+		t.Errorf("expected actor attendee-01 state %s, got %s", types.LifecycleSuspended, state)
 	}
 }
 
@@ -871,8 +871,8 @@ func TestProxyRouting_ApprovalDetection_SubstringIgnored(t *testing.T) {
 	if !ok {
 		t.Fatalf("actor %s not found in activeActors", sess.AttendeeID)
 	}
-	if state != types.StateSuspended {
-		t.Errorf("expected actor %s state %s (normal completed turn), but got %s", sess.AttendeeID, types.StateSuspended, state)
+	if state != types.LifecycleSuspended {
+		t.Errorf("expected actor %s state %s (normal completed turn), but got %s", sess.AttendeeID, types.LifecycleSuspended, state)
 	}
 
 	// A reply that merely mentions an approval must not create one.
@@ -1007,9 +1007,9 @@ func TestProxyRouting_ProxyErrorResetsActorState(t *testing.T) {
 		t.Fatalf("failed to decode telemetry: %v", err)
 	}
 
-	if state, ok := telem.Actors[sess.AttendeeID]; !ok || state != types.StateSuspended {
+	if state, ok := telem.Actors[sess.AttendeeID]; !ok || state != types.LifecycleSuspended {
 		t.Errorf("expected actor %s state %s after proxy error, got %s (present: %v)",
-			sess.AttendeeID, types.StateSuspended, state, ok)
+			sess.AttendeeID, types.LifecycleSuspended, state, ok)
 	}
 }
 
@@ -1066,9 +1066,9 @@ func TestProxyRouting_UpstreamErrorStatusResetsActorState(t *testing.T) {
 		t.Fatalf("failed to decode telemetry: %v", err)
 	}
 
-	if state, ok := telem.Actors[sess.AttendeeID]; !ok || state != types.StateSuspended {
+	if state, ok := telem.Actors[sess.AttendeeID]; !ok || state != types.LifecycleSuspended {
 		t.Errorf("expected actor %s state %s after upstream 500 error, got %s (present: %v)",
-			sess.AttendeeID, types.StateSuspended, state, ok)
+			sess.AttendeeID, types.LifecycleSuspended, state, ok)
 	}
 }
 
@@ -1663,7 +1663,7 @@ func TestSSEEventStreaming(t *testing.T) {
 		reader := bufio.NewReader(resp.Body)
 
 		// Broadcast event for attendee-01
-		gw.BroadcastStateChange("attendee-01", types.StateThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
+		gw.BroadcastStateChange("attendee-01", types.LifecycleThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
 
 		// Read event line
 		eventChan := make(chan types.StateChangeEvent, 1)
@@ -1684,7 +1684,7 @@ func TestSSEEventStreaming(t *testing.T) {
 						errChan <- err
 						return
 					}
-					if ev.State == types.StateThinkingVertexAI {
+					if ev.State == types.LifecycleThinkingVertexAI {
 						eventChan <- ev
 						return
 					}
@@ -1697,8 +1697,8 @@ func TestSSEEventStreaming(t *testing.T) {
 			if ev.AttendeeID != "attendee-01" {
 				t.Errorf("expected attendee_id attendee-01, got %q", ev.AttendeeID)
 			}
-			if ev.State != types.StateThinkingVertexAI {
-				t.Errorf("expected state %s, got %s", types.StateThinkingVertexAI, ev.State)
+			if ev.State != types.LifecycleThinkingVertexAI {
+				t.Errorf("expected state %s, got %s", types.LifecycleThinkingVertexAI, ev.State)
 			}
 			if ev.Label != "Thinking..." {
 				t.Errorf("expected label 'Thinking...', got %q", ev.Label)
@@ -1793,7 +1793,7 @@ func TestSSEEventStreaming(t *testing.T) {
 		// Concurrently broadcast
 		for b := 0; b < numBroadcasts; b++ {
 			attID := fmt.Sprintf("attendee-conc-%d", b%3)
-			gw.BroadcastStateChange(attID, types.StateRunningGVisor, "Running", "Executing")
+			gw.BroadcastStateChange(attID, types.LifecycleRunningGVisor, "Running", "Executing")
 			time.Sleep(5 * time.Millisecond)
 		}
 
@@ -1874,8 +1874,8 @@ func TestActorInspectorEndpoint(t *testing.T) {
 		if details.ActorID != "attendee-05" {
 			t.Errorf("expected actor_id attendee-05, got %q", details.ActorID)
 		}
-		if details.State != types.StateSuspended {
-			t.Errorf("expected state %s, got %s", types.StateSuspended, details.State)
+		if details.State != types.LifecycleSuspended {
+			t.Errorf("expected state %s, got %s", types.LifecycleSuspended, details.State)
 		}
 		if !strings.Contains(details.SnapshotLocation, "bucket") || !strings.Contains(details.SnapshotLocation, "ate-demo-conf") {
 			t.Errorf("expected snapshot_location to contain bucket and atespace path, got %q", details.SnapshotLocation)
@@ -1916,8 +1916,8 @@ func TestActorInspectorEndpoint(t *testing.T) {
 		if details.ActorID != "attendee-02" {
 			t.Errorf("expected actor_id attendee-02, got %q", details.ActorID)
 		}
-		if details.State != types.StateAwaitingApproval {
-			t.Errorf("expected state %s, got %s", types.StateAwaitingApproval, details.State)
+		if details.State != types.LifecycleAwaitingApproval {
+			t.Errorf("expected state %s, got %s", types.LifecycleAwaitingApproval, details.State)
 		}
 		if details.PendingApproval == nil {
 			t.Fatalf("expected populated pending_approval, got nil")
@@ -2114,7 +2114,7 @@ func TestResetEndpoint(t *testing.T) {
 		_ = resp2.Body.Close()
 
 		// Set attendee-01 to Running with last result
-		gw.SetActorState("attendee-01", types.StateRunning)
+		gw.SetActorState("attendee-01", types.LifecycleRunning)
 		gw.SetLastResult("attendee-01", &types.ExecutionResult{
 			Stdout:     "simulation report",
 			ExitCode:   0,
@@ -2122,9 +2122,9 @@ func TestResetEndpoint(t *testing.T) {
 		})
 
 		// Set attendee-03 to Suspended (already suspended)
-		gw.SetActorState("attendee-03", types.StateSuspended)
+		gw.SetActorState("attendee-03", types.LifecycleSuspended)
 
-		// Subscribe to SSE for attendee-01 to verify StateSuspended broadcast
+		// Subscribe to SSE for attendee-01 to verify LifecycleSuspended broadcast
 		sseCtx, sseCancel := context.WithCancel(context.Background())
 		defer sseCancel()
 
@@ -2199,18 +2199,18 @@ func TestResetEndpoint(t *testing.T) {
 			t.Errorf("expected actors_reset 2, got %d", resetBody.ActorsReset)
 		}
 
-		// Verify all actor states reset to StateSuspended
+		// Verify all actor states reset to LifecycleSuspended
 		st1, _ := gw.GetActorState("attendee-01")
 		st2, _ := gw.GetActorState("attendee-02")
 		st3, _ := gw.GetActorState("attendee-03")
-		if st1 != types.StateSuspended {
-			t.Errorf("expected attendee-01 state %s, got %s", types.StateSuspended, st1)
+		if st1 != types.LifecycleSuspended {
+			t.Errorf("expected attendee-01 state %s, got %s", types.LifecycleSuspended, st1)
 		}
-		if st2 != types.StateSuspended {
-			t.Errorf("expected attendee-02 state %s, got %s", types.StateSuspended, st2)
+		if st2 != types.LifecycleSuspended {
+			t.Errorf("expected attendee-02 state %s, got %s", types.LifecycleSuspended, st2)
 		}
-		if st3 != types.StateSuspended {
-			t.Errorf("expected attendee-03 state %s, got %s", types.StateSuspended, st3)
+		if st3 != types.LifecycleSuspended {
+			t.Errorf("expected attendee-03 state %s, got %s", types.LifecycleSuspended, st3)
 		}
 
 		// Verify suspender was called for previously active actors (attendee-01 and attendee-02), but not attendee-03
@@ -2279,17 +2279,17 @@ func TestResetEndpoint(t *testing.T) {
 			t.Errorf("expected reset event in recentEvents, got %+v", telem.RecentEvents)
 		}
 
-		// Verify SSE broadcasted StateSuspended event
+		// Verify SSE broadcasted LifecycleSuspended event
 		select {
 		case sseEv := <-sseEvents:
 			if sseEv.AttendeeID != "attendee-01" {
 				t.Errorf("expected SSE event attendee_id 'attendee-01', got %q", sseEv.AttendeeID)
 			}
-			if sseEv.State != types.StateSuspended {
-				t.Errorf("expected SSE event state %s, got %s", types.StateSuspended, sseEv.State)
+			if sseEv.State != types.LifecycleSuspended {
+				t.Errorf("expected SSE event state %s, got %s", types.LifecycleSuspended, sseEv.State)
 			}
 		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for StateSuspended SSE broadcast")
+			t.Fatalf("timed out waiting for LifecycleSuspended SSE broadcast")
 		}
 	})
 
@@ -2919,7 +2919,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 			RiskLevel:     types.RiskLow,
 			ApprovalID:    "app-test-1",
 			Decision:      types.DecisionApprove,
-			State:         types.StateRunningGVisor,
+			State:         types.LifecycleRunningGVisor,
 		}
 		gw.RecordActionEntry(singleEntry)
 
@@ -2947,7 +2947,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 				AttendeeID: fmt.Sprintf("attendee-%02d", i%10),
 				Timestamp:  time.Now().Unix(),
 				Prompt:     fmt.Sprintf("Prompt %d", i),
-				State:      types.StateThinkingVertexAI,
+				State:      types.LifecycleThinkingVertexAI,
 			})
 		}
 
@@ -3045,7 +3045,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 			AttendeeID: "attendee-77",
 			Timestamp:  time.Now().Unix(),
 			Prompt:     "Stream test prompt",
-			State:      types.StateThinkingVertexAI,
+			State:      types.LifecycleThinkingVertexAI,
 		}
 		gw.RecordActionEntry(broadcastEntry)
 
@@ -3191,7 +3191,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 			case ev := <-streamEvents:
 				if ev.AttendeeID == "attendee-99" {
 					events = append(events, ev)
-					if ev.Execution != nil && (ev.State == types.StateSuspended || ev.State == types.StateRunningGVisor) {
+					if ev.Execution != nil && (ev.State == types.LifecycleSuspended || ev.State == types.LifecycleRunningGVisor) {
 						break drainLoop
 					}
 				}
@@ -3209,13 +3209,13 @@ func TestActionStreamEndpoints(t *testing.T) {
 
 		for i := range events {
 			ev := &events[i]
-			if chatEvent == nil && (ev.State == types.StateThinkingVertexAI || ev.State == types.StateRunning) {
+			if chatEvent == nil && (ev.State == types.LifecycleThinkingVertexAI || ev.State == types.LifecycleRunning) {
 				chatEvent = ev
 			}
-			if approvalEvent == nil && ev.State == types.StateAwaitingApproval {
+			if approvalEvent == nil && ev.State == types.LifecycleAwaitingApproval {
 				approvalEvent = ev
 			}
-			if executionEvent == nil && (ev.State == types.StateRunningGVisor || ev.State == types.StateSuspended) {
+			if executionEvent == nil && (ev.State == types.LifecycleRunningGVisor || ev.State == types.LifecycleSuspended) {
 				executionEvent = ev
 			}
 			if completedEntry == nil && ev.Execution != nil {
@@ -3224,13 +3224,13 @@ func TestActionStreamEndpoints(t *testing.T) {
 		}
 
 		if chatEvent == nil {
-			t.Fatalf("expected chat event with state StateThinkingVertexAI or StateRunning, none found in %d events", len(events))
+			t.Fatalf("expected chat event with state LifecycleThinkingVertexAI or LifecycleRunning, none found in %d events", len(events))
 		}
 		if approvalEvent == nil {
-			t.Fatalf("expected approval event with state StateAwaitingApproval, none found in %d events", len(events))
+			t.Fatalf("expected approval event with state LifecycleAwaitingApproval, none found in %d events", len(events))
 		}
 		if executionEvent == nil {
-			t.Fatalf("expected execution event with state StateRunningGVisor or StateSuspended, none found in %d events", len(events))
+			t.Fatalf("expected execution event with state LifecycleRunningGVisor or LifecycleSuspended, none found in %d events", len(events))
 		}
 		if completedEntry == nil {
 			t.Fatalf("expected completed entry with Execution result, none found in %d events", len(events))
@@ -3318,7 +3318,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 							AttendeeID: fmt.Sprintf("attendee-%d", gid),
 							Timestamp:  time.Now().Unix(),
 							Prompt:     "Concurrent test prompt",
-							State:      types.StateThinkingVertexAI,
+							State:      types.LifecycleThinkingVertexAI,
 						})
 					case 1:
 						_ = gw.GetFeedHistory()

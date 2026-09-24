@@ -1,0 +1,35 @@
+{
+  "actors": [
+    {
+      "metadata": {"atespace": "ate-demo-conf", "name": "attendee-01", "version": "1"},
+      "actorTemplate": {"atespace": "ate-demo-conf", "name": "conf-workload"},
+      "status": {"state": "ACTOR_STATE_SUSPENDED"}
+    },
+    {
+      "metadata": {"atespace": "ate-demo-conf", "name": "attendee-02", "version": "7"},
+      "actorTemplate": {"atespace": "ate-demo-conf", "name": "conf-workload"},
+      "status": {
+        "state": "ACTOR_STATE_RUNNING",
+        "workerAssignment": {"worker": {"name": "w-abc"}, "workerNamespace": "ate-demo-conf", "workerPool": "conf-pool", "workerPod": "conf-pool-7d9f-x2k4p", "workerPodIp": "10.8.0.12"}
+      }
+    },
+    {
+      "metadata": {"atespace": "ate-demo-conf", "name": "attendee-03", "version": "9"},
+      "actorTemplate": {"atespace": "ate-demo-conf", "name": "conf-workload"},
+      "status": {
+        "state": "ACTOR_STATE_SUSPENDED",
+        "externalSnapshot": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-03/9"}
+      }
+    },
+    {
+      "metadata": {"atespace": "ate-demo-conf", "name": "attendee-04", "version": "3"},
+      "actorTemplate": {"atespace": "ate-demo-conf", "name": "conf-workload"},
+      "status": {"state": "ACTOR_STATE_CRASHED"}
+    },
+    {
+      "metadata": {"atespace": "ate-demo-conf", "name": "attendee-05", "version": "2"},
+      "actorTemplate": {"atespace": "ate-demo-conf", "name": "conf-workload"},
+      "status": {}
+    }
+  ]
+}

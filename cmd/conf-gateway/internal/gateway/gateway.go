@@ -321,9 +321,9 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		ModifyResponse: gw.modifyResponse,
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			attendeeID, _ := req.Context().Value(attendeeContextKey{}).(string)
-			gw.setActorState(attendeeID, types.StateSuspended)
+			gw.setActorState(attendeeID, types.LifecycleSuspended)
 			if attendeeID != "" {
-				gw.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Proxy error - suspended to GCS")
+				gw.BroadcastStateChange(attendeeID, types.LifecycleSuspended, "Suspended", "Proxy error - suspended to GCS")
 			}
 			gw.mu.Lock()
 			if attendeeID != "" {
@@ -576,7 +576,7 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	g.mu.Lock()
 	if _, exists := g.activeActors[attendeeID]; !exists {
-		g.activeActors[attendeeID] = types.StateSuspended
+		g.activeActors[attendeeID] = types.LifecycleSuspended
 		g.addEventLocked(fmt.Sprintf("Provisioned session for %s", attendeeID))
 	}
 	g.mu.Unlock()
@@ -607,9 +607,9 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	var parkedActorsCount int
 	for k, v := range g.activeActors {
 		actorsCopy[k] = v
-		if v == types.StateRunning || v == types.StateRunningGVisor {
+		if v == types.LifecycleRunning || v == types.LifecycleRunningGVisor {
 			runningActors = append(runningActors, k)
-		} else if v == types.StateParked || v == types.StateParkedEnvoy {
+		} else if v == types.LifecycleParked || v == types.LifecycleParkedEnvoy {
 			parkedActorsCount++
 		}
 	}
@@ -693,7 +693,7 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	currentState, exists := g.GetActorState(attendeeID)
 	if !exists {
-		currentState = types.StateSuspended
+		currentState = types.LifecycleSuspended
 	}
 	initialEvent := types.StateChangeEvent{
 		AttendeeID: attendeeID,
@@ -809,13 +809,13 @@ func (g *Gateway) handleActionStream(w http.ResponseWriter, r *http.Request) {
 
 func stateToLabel(state types.ActorLifecycleState) string {
 	switch state {
-	case types.StateThinkingVertexAI:
+	case types.LifecycleThinkingVertexAI:
 		return "🧠 Reasoning on Vertex AI..."
-	case types.StateAwaitingApproval:
+	case types.LifecycleAwaitingApproval:
 		return "⏸️ Awaiting Approval"
-	case types.StateParked, types.StateParkedEnvoy:
+	case types.LifecycleParked, types.LifecycleParkedEnvoy:
 		return "⏳ Parked in Envoy Buffer"
-	case types.StateRunning, types.StateRunningGVisor:
+	case types.LifecycleRunning, types.LifecycleRunningGVisor:
 		return "🚀 Running in Sandbox"
 	default:
 		return "⚡ Suspended in GCS"
@@ -824,13 +824,13 @@ func stateToLabel(state types.ActorLifecycleState) string {
 
 func stateToSubtext(state types.ActorLifecycleState) string {
 	switch state {
-	case types.StateThinkingVertexAI:
+	case types.LifecycleThinkingVertexAI:
 		return "Gemini 2.5 Flash generating analysis script"
-	case types.StateAwaitingApproval:
+	case types.LifecycleAwaitingApproval:
 		return "Process frozen in GCS (0 MB RAM used)"
-	case types.StateParked, types.StateParkedEnvoy:
+	case types.LifecycleParked, types.LifecycleParkedEnvoy:
 		return "Queued in Envoy L7 buffer — waiting for worker slot..."
-	case types.StateRunning, types.StateRunningGVisor:
+	case types.LifecycleRunning, types.LifecycleRunningGVisor:
 		return "Executing script inside gVisor container"
 	default:
 		return "Process snapshot written to GCS — 0 vCPU, 0 RAM"
@@ -950,7 +950,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 					AttendeeID: attendeeID,
 					Timestamp:  time.Now().Unix(),
 					Prompt:     chatReq.Message,
-					State:      types.StateRunning,
+					State:      types.LifecycleRunning,
 				})
 			}
 		}
@@ -974,24 +974,24 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 			Decision:   apprReq.Decision,
 			Code:       apprReq.Code,
 			Language:   apprReq.Language,
-			State:      types.StateRunningGVisor,
+			State:      types.LifecycleRunningGVisor,
 			WorkerPod:  "conf-workers-0",
 		})
 	}
 
 	g.mu.Lock()
 	if r.URL.Path == "/api/approve" {
-		g.activeActors[attendeeID] = types.StateRunningGVisor
+		g.activeActors[attendeeID] = types.LifecycleRunningGVisor
 	} else {
-		g.activeActors[attendeeID] = types.StateRunning
+		g.activeActors[attendeeID] = types.LifecycleRunning
 	}
 	g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
 	g.mu.Unlock()
 
 	if r.URL.Path == "/api/approve" {
-		g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing in gVisor sandbox")
+		g.BroadcastStateChange(attendeeID, types.LifecycleRunningGVisor, "Running in Sandbox", "Executing in gVisor sandbox")
 	} else {
-		g.BroadcastStateChange(attendeeID, types.StateRunning, "Running", "Executing request")
+		g.BroadcastStateChange(attendeeID, types.LifecycleRunning, "Running", "Executing request")
 	}
 
 	ctx := context.WithValue(r.Context(), attendeeContextKey{}, attendeeID)
@@ -1171,8 +1171,8 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	}
 
 	if resp.StatusCode >= 400 {
-		g.setActorState(attendeeID, types.StateSuspended)
-		g.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Error response - suspended to GCS")
+		g.setActorState(attendeeID, types.LifecycleSuspended)
+		g.BroadcastStateChange(attendeeID, types.LifecycleSuspended, "Suspended", "Error response - suspended to GCS")
 		return nil
 	}
 
@@ -1213,7 +1213,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 
 	if isWaitingForApproval {
 		g.mu.Lock()
-		g.activeActors[attendeeID] = types.StateAwaitingApproval
+		g.activeActors[attendeeID] = types.LifecycleAwaitingApproval
 		g.pendingApprovals[attendeeID] = chatMsg.Approval
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
 			history := g.chatHistories[attendeeID]
@@ -1224,7 +1224,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.addEventLocked(fmt.Sprintf("Actor %s awaiting human approval", attendeeID))
 		g.mu.Unlock()
 
-		g.BroadcastStateChange(attendeeID, types.StateAwaitingApproval, "Awaiting Approval", "Awaiting human approval")
+		g.BroadcastStateChange(attendeeID, types.LifecycleAwaitingApproval, "Awaiting Approval", "Awaiting human approval")
 		g.RecordActionEntry(types.ActionLogEntry{
 			ID:            actionID,
 			AttendeeID:    attendeeID,
@@ -1234,12 +1234,12 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 			Language:      chatMsg.Approval.Language,
 			RiskLevel:     chatMsg.Approval.RiskLevel,
 			ApprovalID:    chatMsg.Approval.ApprovalID,
-			State:         types.StateAwaitingApproval,
+			State:         types.LifecycleAwaitingApproval,
 		})
 		g.asyncSuspendActor(attendeeID)
 	} else if resp.StatusCode == http.StatusOK {
 		g.mu.Lock()
-		g.activeActors[attendeeID] = types.StateSuspended
+		g.activeActors[attendeeID] = types.LifecycleSuspended
 		delete(g.pendingApprovals, attendeeID)
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
 			history := g.chatHistories[attendeeID]
@@ -1250,7 +1250,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.addEventLocked(fmt.Sprintf("Actor %s completed turn - suspended to GCS", attendeeID))
 		g.mu.Unlock()
 
-		g.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Turn completed - suspended to GCS")
+		g.BroadcastStateChange(attendeeID, types.LifecycleSuspended, "Suspended", "Turn completed - suspended to GCS")
 		if hasNewExec {
 			entry := types.ActionLogEntry{
 				ID:         actionID,
@@ -1258,7 +1258,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 				Timestamp:  time.Now().Unix(),
 				Execution:  &newExec,
 				WorkerPod:  "conf-workers-0",
-				State:      types.StateSuspended,
+				State:      types.LifecycleSuspended,
 			}
 			if hasChatMsg && chatMsg.Content != "" {
 				entry.ModelResponse = chatMsg.Content
@@ -1270,7 +1270,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 				AttendeeID:    attendeeID,
 				Timestamp:     time.Now().Unix(),
 				ModelResponse: chatMsg.Content,
-				State:         types.StateSuspended,
+				State:         types.LifecycleSuspended,
 			})
 		}
 		g.asyncSuspendActor(attendeeID)
@@ -1295,7 +1295,7 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 	g.mu.RLock()
 	state, exists := g.activeActors[actorID]
 	if !exists {
-		state = types.StateSuspended
+		state = types.LifecycleSuspended
 	}
 
 	var history []types.ChatMessage
@@ -1322,7 +1322,7 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 	var snapshotLoc string
 	var snapshotSize int64
 
-	if state == types.StateRunning || state == types.StateRunningGVisor || state == types.StateThinkingVertexAI {
+	if state == types.LifecycleRunning || state == types.LifecycleRunningGVisor || state == types.LifecycleThinkingVertexAI {
 		workerPod = "conf-workers-0"
 	} else {
 		snapshotLoc = fmt.Sprintf("gs://conf-demo-bucket/%s/actors/%s.snap", g.atespace, actorID)
@@ -1369,10 +1369,10 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	var actorsToSuspend []string
 	for id, st := range g.activeActors {
-		if st != types.StateSuspended {
+		if st != types.LifecycleSuspended {
 			actorsToSuspend = append(actorsToSuspend, id)
 		}
-		g.activeActors[id] = types.StateSuspended
+		g.activeActors[id] = types.LifecycleSuspended
 	}
 	sort.Strings(actorsToSuspend)
 
@@ -1432,7 +1432,7 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, id := range actorsToSuspend {
-		g.BroadcastStateChange(id, types.StateSuspended, "Suspended", "Cluster reset - suspended to GCS")
+		g.BroadcastStateChange(id, types.LifecycleSuspended, "Suspended", "Cluster reset - suspended to GCS")
 	}
 
 	w.Header().Set("Content-Type", "application/json")
