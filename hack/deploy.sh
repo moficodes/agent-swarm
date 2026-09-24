@@ -23,7 +23,8 @@ DEMO_CONF_ACTORS=50
 
 demo-conference_usage() {
   echo "  --patch-router                                Patch atenet-router's parked-request-budget/route-timeout"
-  echo "                                                 flags instead of failing when they are too low for LLM turns."
+  echo "                                                 flags and terminationGracePeriodSeconds instead of failing"
+  echo "                                                 when they are too low for LLM turns and the shutdown they need."
   echo "                                                 Must appear before --deploy-demo-conference: the install script"
   echo "                                                 processes flags in order, so a --patch-router given after"
   echo "                                                 deploy has already started has no effect. DEMO_CONF_PATCH_ROUTER=true"
@@ -49,7 +50,9 @@ demo-conference_cmdline() {
 demo-conference_seconds() {
   local d="$1" total=0 n unit
   while [[ "${d}" =~ ^([0-9]+)(h|m|s)(.*)$ ]]; do
-    n="${BASH_REMATCH[1]}"
+    # 10# forces base 10: a leading zero (e.g. "08s") would otherwise read
+    # as an invalid octal literal and abort the arithmetic.
+    n=$((10#${BASH_REMATCH[1]}))
     unit="${BASH_REMATCH[2]}"
     d="${BASH_REMATCH[3]}"
     case "${unit}" in
@@ -72,10 +75,28 @@ demo-conference_flag_value() {
       else empty end) | last // empty' <<<"${args_json}"
 }
 
-# demo-conference_router_flags_ok prints the flags atenet-router needs for
-# long LLM turns and returns 1 if any are missing or too low.
+# demo-conference_grace_ok returns 0 if GRACE_SECONDS (the Deployment's
+# spec.template.spec.terminationGracePeriodSeconds, or empty/unparseable if
+# it could not be read) is at least 120: the minimum that fits
+# atenet-router's shutdown sequence once --parked-request-budget is raised
+# to 60s. At that budget the derived --drain-timeout alone (budget +
+# drainRouteBudget + margin, see cmd/atenet/internal/router/xds.go and
+# config.go) already reaches about 75s, on top of --drain-delay and the
+# Envoy drain window (manifests/ate-install/atenet-router.yaml); a shorter
+# grace period lets the kubelet SIGKILL the router mid-drain.
+demo-conference_grace_ok() {
+  local grace="${1:-}"
+  [[ "${grace}" =~ ^[0-9]+$ ]] && ((10#${grace} >= 120))
+}
+
+# demo-conference_router_flags_ok prints the changes atenet-router needs for
+# long LLM turns and returns 1 if any are missing or too low. It also
+# requires GRACE_SECONDS (see demo-conference_grace_ok) to be at least 120,
+# but only once the duration flags are themselves acceptable: a low grace
+# period is only unsafe once --parked-request-budget is raised to 60s, so
+# there is nothing to say about it before that.
 demo-conference_router_flags_ok() {
-  local args_json="$1" missing=() v s
+  local args_json="$1" grace="${2:-}" missing=() v s
   v="$(demo-conference_flag_value "${args_json}" --parked-request-budget)"
   s="$(demo-conference_seconds "${v:-5s}")"
   if [[ -z "${s}" || "${s}" -lt 60 ]]; then
@@ -88,6 +109,9 @@ demo-conference_router_flags_ok() {
       missing+=("--route-timeout=5m")
     fi
   fi
+  if ((${#missing[@]} == 0)) && ! demo-conference_grace_ok "${grace}"; then
+    missing+=("terminationGracePeriodSeconds=120")
+  fi
   if ((${#missing[@]} > 0)); then
     printf '%s\n' "${missing[@]}"
     return 1
@@ -95,37 +119,73 @@ demo-conference_router_flags_ok() {
 }
 
 demo-conference_check_router() {
-  local args_json missing flag
+  local args_json grace missing flag
   args_json="$(run_kubectl get deployment atenet-router -n ate-system \
     -o jsonpath='{.spec.template.spec.containers[?(@.name=="atenet-router")].args}')"
-  if missing="$(demo-conference_router_flags_ok "${args_json}")"; then
+  grace="$(run_kubectl get deployment atenet-router -n ate-system \
+    -o jsonpath='{.spec.template.spec.terminationGracePeriodSeconds}')"
+  if missing="$(demo-conference_router_flags_ok "${args_json}" "${grace}")"; then
     return 0
   fi
   if [[ "${DEMO_CONF_PATCH_ROUTER}" != true ]]; then
-    echo "error: atenet-router needs these flags for LLM turns that outlast its defaults:" >&2
+    echo "error: atenet-router needs these changes for LLM turns that outlast its defaults:" >&2
     sed 's/^/  /' <<<"${missing}" >&2
-    echo "Add them to the atenet-router container args, or rerun with --patch-router." >&2
+    echo "Apply them to the atenet-router Deployment, or rerun with --patch-router." >&2
     exit 1
   fi
   log_step "Patching atenet-router flags (not restored on delete)..."
   while IFS= read -r flag; do
+    [[ "${flag}" == --* ]] || continue
     run_kubectl_fatal patch deployment atenet-router -n ate-system --type=json \
       -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"${flag}\"}]"
   done <<<"${missing}"
+  # Checked unconditionally, not just when "missing" already listed it:
+  # raising --parked-request-budget to 60s above always makes the grace
+  # period requirement apply, even if it wasn't part of "missing" because
+  # the flags were not yet acceptable before this patch.
+  if ! demo-conference_grace_ok "${grace}"; then
+    run_kubectl_fatal patch deployment atenet-router -n ate-system --type=json \
+      -p='[{"op":"add","path":"/spec/template/spec/terminationGracePeriodSeconds","value":120}]'
+  fi
   run_kubectl_fatal rollout status deployment/atenet-router -n ate-system --timeout=120s
 }
 
+# demo-conference_iam_retry runs an IAM-binding gcloud command, retrying it
+# a few times with a short sleep when CREATED is true: IAM's view of a
+# service account lags its creation by a few seconds, so the first binding
+# attempt on a brand-new GSA can 404. A pre-existing GSA gets one attempt,
+# so a real permission or config error still fails immediately.
+demo-conference_iam_retry() {
+  local created="$1" out attempt=1 max=5
+  shift
+  while true; do
+    if out="$("$@" 2>&1)"; then
+      return 0
+    fi
+    if [[ "${created}" != true ]] || ((attempt >= max)); then
+      echo "error: $* failed:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    log_step "conf-gateway service account not yet visible to IAM; retrying (${attempt}/${max})..."
+    sleep 2
+    ((attempt++))
+  done
+}
+
 demo-conference_ensure_gsa() {
-  local gsa="conf-gateway@${PROJECT_ID}.iam.gserviceaccount.com"
+  local gsa="conf-gateway@${PROJECT_ID}.iam.gserviceaccount.com" created=false
   if ! gcloud iam service-accounts describe "${gsa}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
     gcloud iam service-accounts create conf-gateway --project "${PROJECT_ID}" \
       --display-name "Conference demo gateway (Vertex AI only)"
+    created=true
   fi
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" --condition=None \
-    --member "serviceAccount:${gsa}" --role roles/aiplatform.user >/dev/null
-  gcloud iam service-accounts add-iam-policy-binding "${gsa}" --project "${PROJECT_ID}" \
+  demo-conference_iam_retry "${created}" gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --condition=None --member "serviceAccount:${gsa}" --role roles/aiplatform.user
+  demo-conference_iam_retry "${created}" gcloud iam service-accounts add-iam-policy-binding "${gsa}" \
+    --project "${PROJECT_ID}" \
     --member "serviceAccount:${PROJECT_ID}.svc.id.goog[ate-demo-conf/conf-gateway]" \
-    --role roles/iam.workloadIdentityUser >/dev/null
+    --role roles/iam.workloadIdentityUser
   DEMO_CONF_GATEWAY_GSA="${gsa}"
 }
 
@@ -161,15 +221,31 @@ demo-conference_ensure_secret() {
   if run_kubectl get secret conf-gateway -n ate-demo-conf >/dev/null 2>&1; then
     return 0
   fi
+  # Generated into locals first: a command substitution embedded directly in
+  # a --from-literal=... argument doesn't trip errexit on failure, so a
+  # failed openssl would otherwise create a permanently empty Secret.
+  local hmac token
+  hmac="$(openssl rand -hex 32)"
+  token="$(openssl rand -hex 24)"
+  if [[ -z "${hmac}" || -z "${token}" ]]; then
+    echo "error: failed to generate conf-gateway secret values" >&2
+    exit 1
+  fi
+  # --from-env-file reads the values from a file (here, a process
+  # substitution backed by the printf builtin), so neither value ever
+  # appears in this or any other process's argv.
   run_kubectl_fatal create secret generic conf-gateway -n ate-demo-conf \
-    --from-literal=HMAC_SECRET="$(openssl rand -hex 32)" \
-    --from-literal=PRESENTER_TOKEN="$(openssl rand -hex 24)"
+    --from-env-file=<(printf 'HMAC_SECRET=%s\nPRESENTER_TOKEN=%s\n' "${hmac}" "${token}")
 }
 
 demo-conference_check_template() {
   local env
-  if ! env="$(run_kubectl_ate get actor-template conf-agent -a ate-demo-conf -o json 2>/dev/null)"; then
-    return 0
+  if ! env="$(run_kubectl_ate get actor-template conf-agent -a ate-demo-conf -o json 2>&1)"; then
+    if grep -qi "not found" <<<"${env}"; then
+      return 0
+    fi
+    echo "error: failed to check actor template conf-agent: ${env}" >&2
+    exit 1
   fi
   if ! jq -e '[.. | objects | select(.name? == "MODEL_PROXY_URL")] | length > 0' <<<"${env}" >/dev/null; then
     echo "error: actor template conf-agent predates the model proxy and templates are immutable." >&2
@@ -194,8 +270,10 @@ demo-conference_deploy() {
     DEMO_CONF_MOCK_LLM=true
   fi
 
-  demo-conference_check_router
+  # Read-only and cheap: run before the router check so a stale conf-agent
+  # aborts the deploy before atenet-router is ever patched.
   demo-conference_check_template
+  demo-conference_check_router
   if [[ -n "${PROJECT_ID:-}" ]]; then
     demo-conference_ensure_gsa
   fi
@@ -242,6 +320,13 @@ demo-conference_delete() {
   delete_substrate_demo demo-conference_render \
     demos/conference/conference.yaml.tmpl ate-demo-conf conf-agent
   log_step "atenet-router flags are left as they are."
+  if [[ -n "${PROJECT_ID:-}" ]]; then
+    local gsa="conf-gateway@${PROJECT_ID}.iam.gserviceaccount.com"
+    log_step "conf-gateway service account and its IAM bindings are left in place."
+    echo "  Remove them with:"
+    echo "    gcloud iam service-accounts delete ${gsa} --project ${PROJECT_ID}"
+    echo "    gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member serviceAccount:${gsa} --role roles/aiplatform.user"
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
