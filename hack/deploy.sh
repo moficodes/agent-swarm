@@ -118,8 +118,28 @@ demo-conference_router_flags_ok() {
   fi
 }
 
+# demo-conference_router_patch prints a JSON patch that adds FLAGS... to the
+# atenet-router container of the Deployment JSON in $1. The container is
+# found by name, since the Deployment also runs Envoy; a container without
+# args gets a new args array. Fails if there is no atenet-router container.
+demo-conference_router_patch() {
+  local deploy_json="$1"
+  shift
+  # Flags go in one newline-joined --arg: jq would parse a positional
+  # "--flag" as its own option.
+  jq -c --arg flags "$(printf '%s\n' "$@")" '
+    ($flags | split("\n") | map(select(. != ""))) as $flags
+    | (.spec.template.spec.containers | map(.name) | index("atenet-router")) as $i
+    | if $i == null then error("atenet-router container not found") else . end
+    | "/spec/template/spec/containers/\($i)/args" as $path
+    | if .spec.template.spec.containers[$i].args == null
+      then [{op: "add", path: $path, value: $flags}]
+      else [$flags[] | {op: "add", path: ($path + "/-"), value: .}]
+      end' <<<"${deploy_json}"
+}
+
 demo-conference_check_router() {
-  local args_json grace missing flag
+  local args_json grace missing flag flags patch
   args_json="$(run_kubectl get deployment atenet-router -n ate-system \
     -o jsonpath='{.spec.template.spec.containers[?(@.name=="atenet-router")].args}')"
   grace="$(run_kubectl get deployment atenet-router -n ate-system \
@@ -134,11 +154,18 @@ demo-conference_check_router() {
     exit 1
   fi
   log_step "Patching atenet-router flags (not restored on delete)..."
+  flags=()
   while IFS= read -r flag; do
-    [[ "${flag}" == --* ]] || continue
-    run_kubectl_fatal patch deployment atenet-router -n ate-system --type=json \
-      -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"${flag}\"}]"
+    [[ "${flag}" == --* ]] && flags+=("${flag}")
   done <<<"${missing}"
+  if ((${#flags[@]} > 0)); then
+    if ! patch="$(demo-conference_router_patch \
+      "$(run_kubectl get deployment atenet-router -n ate-system -o json)" "${flags[@]}")"; then
+      echo "error: cannot find the atenet-router container in the atenet-router Deployment" >&2
+      exit 1
+    fi
+    run_kubectl_fatal patch deployment atenet-router -n ate-system --type=json -p="${patch}"
+  fi
   # Checked unconditionally, not just when "missing" already listed it:
   # raising --parked-request-budget to 60s above always makes the grace
   # period requirement apply, even if it wasn't part of "missing" because

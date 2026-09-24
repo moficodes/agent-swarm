@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Tests the router flag/grace-period checks and the duration parser in
-# install-demo-conference.sh without a cluster.
+# Tests the router flag/grace-period checks, the router patch builder and
+# the duration parser in install-demo-conference.sh without a cluster.
 set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 ATE_DEMOS=()
@@ -101,5 +101,35 @@ expect_seconds 3600 1h
 expect_seconds "" 500ms
 # A leading zero must not be read as an invalid octal literal.
 expect_seconds 8 08s
+
+# expect_patch checks the JSON patch demo-conference_router_patch builds for
+# a Deployment, where WANT is "error" if it must refuse.
+expect_patch() {
+  local want="$1" deploy="$2" got
+  shift 2
+  if ! got="$(demo-conference_router_patch "${deploy}" "$@" 2>/dev/null)"; then
+    got=error
+  fi
+  if [[ "${got}" != "${want}" ]]; then
+    echo "FAIL: demo-conference_router_patch(${deploy}) = '${got}', want '${want}'" >&2
+    fail=1
+  fi
+}
+
+# The router container is found by name, wherever it sits.
+expect_patch '[{"op":"add","path":"/spec/template/spec/containers/1/args/-","value":"--parked-request-budget=60s"},{"op":"add","path":"/spec/template/spec/containers/1/args/-","value":"--route-timeout=5m"}]' \
+  '{"spec":{"template":{"spec":{"containers":[{"name":"envoy","args":["-c"]},{"name":"atenet-router","args":["--mode=ingress"]}]}}}}' \
+  --parked-request-budget=60s --route-timeout=5m
+expect_patch '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--route-timeout=5m"}]' \
+  '{"spec":{"template":{"spec":{"containers":[{"name":"atenet-router","args":[]},{"name":"envoy"}]}}}}' \
+  --route-timeout=5m
+# A container without args gets a new args array rather than an append.
+expect_patch '[{"op":"add","path":"/spec/template/spec/containers/1/args","value":["--parked-request-budget=60s","--route-timeout=5m"]}]' \
+  '{"spec":{"template":{"spec":{"containers":[{"name":"envoy","args":["-c"]},{"name":"atenet-router"}]}}}}' \
+  --parked-request-budget=60s --route-timeout=5m
+# No atenet-router container: refuse rather than patch another container.
+expect_patch error \
+  '{"spec":{"template":{"spec":{"containers":[{"name":"envoy","args":["-c"]}]}}}}' \
+  --parked-request-budget=60s
 
 exit "${fail}"
