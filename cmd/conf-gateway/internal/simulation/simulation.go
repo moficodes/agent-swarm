@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package gateway
+// Package simulation drives virtual attendees through the gateway's own
+// HTTP handler.
+package simulation
 
 import (
 	"bytes"
@@ -29,6 +31,21 @@ import (
 
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
+
+// SimulationController defines the interface for managing background audience simulations.
+type SimulationController interface {
+	Start(count int) error
+	Stop()
+	Status() (bool, int)
+}
+
+// Target is the gateway a simulation drives.
+type Target interface {
+	// Context is canceled when the gateway closes.
+	Context() context.Context
+	MintToken(attendee string) string
+	Handler() http.Handler
+}
 
 var simulationPrompts = []string{
 	"Run anomaly analysis on recent telemetry spikes",
@@ -56,7 +73,7 @@ func WithSimulationDelays(readingDelay, loopDelay time.Duration) SimulationOptio
 
 // SimulationRunner manages background virtual attendees interacting with the conference gateway.
 type SimulationRunner struct {
-	gw           *Gateway
+	target       Target
 	mu           sync.RWMutex
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
@@ -66,10 +83,10 @@ type SimulationRunner struct {
 	loopDelay    time.Duration
 }
 
-// NewSimulationRunner constructs a SimulationRunner bound to the provided Gateway.
-func NewSimulationRunner(gw *Gateway, opts ...SimulationOption) *SimulationRunner {
+// NewRunner constructs a SimulationRunner bound to the provided Target.
+func NewRunner(t Target, opts ...SimulationOption) *SimulationRunner {
 	s := &SimulationRunner{
-		gw:           gw,
+		target:       t,
 		readingDelay: 2 * time.Second,
 		loopDelay:    3 * time.Second,
 	}
@@ -90,8 +107,8 @@ func (s *SimulationRunner) Start(count int) error {
 	defer s.mu.Unlock()
 
 	var baseCtx context.Context
-	if s.gw != nil {
-		baseCtx = s.gw.ctx
+	if s.target != nil {
+		baseCtx = s.target.Context()
 	}
 	if baseCtx != nil && baseCtx.Err() != nil {
 		return fmt.Errorf("cannot start simulation: gateway is closed: %w", baseCtx.Err())
@@ -194,7 +211,7 @@ func (s *SimulationRunner) calculateInterTurnDelay(lDelay time.Duration) time.Du
 func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, offset int, rDelay, lDelay time.Duration) {
 	defer s.wg.Done()
 
-	token := s.gw.MintToken(attendeeID)
+	token := s.target.MintToken(attendeeID)
 
 	// Stagger attendee startup slightly to distribute requests
 	if offset > 0 {
@@ -272,7 +289,7 @@ func (s *SimulationRunner) sendChat(ctx context.Context, attendeeID, token, prom
 	req.Header.Set("X-Attendee-ID", attendeeID)
 
 	rec := httptest.NewRecorder()
-	s.gw.Handler().ServeHTTP(rec, req)
+	s.target.Handler().ServeHTTP(rec, req)
 
 	res := rec.Result()
 	defer res.Body.Close()
@@ -311,7 +328,7 @@ func (s *SimulationRunner) sendApprove(ctx context.Context, attendeeID, token, a
 	req.Header.Set("X-Attendee-ID", attendeeID)
 
 	rec := httptest.NewRecorder()
-	s.gw.Handler().ServeHTTP(rec, req)
+	s.target.Handler().ServeHTTP(rec, req)
 
 	res := rec.Result()
 	defer res.Body.Close()

@@ -46,6 +46,7 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/feed"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/simulation"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -60,10 +61,26 @@ const (
 )
 
 // SimulationController defines the interface for managing background audience simulations.
-type SimulationController interface {
-	Start(count int) error
-	Stop()
-	Status() (bool, int)
+type SimulationController = simulation.SimulationController
+
+// SimulationRunner manages background virtual attendees interacting with the conference gateway.
+type SimulationRunner = simulation.SimulationRunner
+
+// SimulationOption configures SimulationRunner.
+type SimulationOption = simulation.SimulationOption
+
+// WithSimulationDelays sets the reading delay and loop delay for virtual attendees.
+func WithSimulationDelays(readingDelay, loopDelay time.Duration) SimulationOption {
+	return simulation.WithSimulationDelays(readingDelay, loopDelay)
+}
+
+// NewSimulationRunner constructs a SimulationRunner bound to the provided Gateway.
+func NewSimulationRunner(gw *Gateway, opts ...SimulationOption) *SimulationRunner {
+	var t simulation.Target
+	if gw != nil {
+		t = gw
+	}
+	return simulation.NewRunner(t, opts...)
 }
 
 // Claims represents the decoded JWT payload.
@@ -474,6 +491,11 @@ func (g *Gateway) suspendActor(attendee string) {
 		g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendee, err))
 		g.mu.Unlock()
 	}
+}
+
+// Context returns the gateway's context, which Close cancels.
+func (g *Gateway) Context() context.Context {
+	return g.ctx
 }
 
 // PresenterKey returns the key that unlocks presenter pages and APIs.
