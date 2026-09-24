@@ -61,7 +61,7 @@ metadata:
 rules:
 - apiGroups: ["certificates.k8s.io"]
   resources: ["clustertrustbundles"]
-  verbs: ["list", "get"]
+  verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -97,6 +97,8 @@ spec:
       serviceAccountName: conf-gateway
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -160,8 +162,8 @@ spec:
       - name: tmp
         emptyDir: {}
 ---
-# Presenter and attendee entry point. Plain HTTP unless DEMO_DOMAIN adds
-# the Ingress below; see the README before exposing it.
+# Presenter and attendee entry point. Plain HTTP unless the install script
+# also applies gateway-ingress.yaml.tmpl; see the README before exposing it.
 apiVersion: v1
 kind: Service
 metadata:

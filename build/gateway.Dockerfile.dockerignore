@@ -14,8 +14,12 @@
 
 .git
 .worktrees
+.ate-dev-env.sh
+.superpowers
 **/node_modules
 **/*.test
 demos/*/ui/ui-server
 benchmarking
 docs
+reports
+*.env

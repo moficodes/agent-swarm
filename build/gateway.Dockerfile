@@ -25,5 +25,8 @@ RUN go build -trimpath -o /out/kubectl-ate ./cmd/kubectl-ate \
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/kubectl-ate /usr/local/bin/kubectl-ate
 COPY --from=build /out/conf-gateway /usr/local/bin/conf-gateway
-USER nonroot:nonroot
+# Numeric UID:GID, not the nonroot alias: the pod's securityContext sets
+# runAsUser/runAsGroup, which requires the image user to resolve without
+# consulting /etc/passwd.
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/conf-gateway"]

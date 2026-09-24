@@ -15,7 +15,9 @@
 # limitations under the License.
 
 # Renders the conference demo manifests with placeholder values and checks
-# that no placeholder survives and that the YAML parses as Kubernetes objects.
+# that no placeholder survives and that the YAML parses as Kubernetes
+# objects. This is offline: it never contacts a cluster, so it cannot pick
+# up or depend on whatever kube context happens to be current.
 set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
@@ -26,8 +28,8 @@ ACTOR_TEMPLATE="demos/conference/conference-template.yaml.tmpl"
 
 # render substitutes every install-script placeholder in $1, using $2 for
 # ${DEMO_DOMAIN}. Callers exercise the ingress template with both an empty
-# and a non-empty domain, since Task 17 only applies it when DEMO_DOMAIN is
-# set.
+# and a non-empty domain, since the install script applies it only when
+# DEMO_DOMAIN is set.
 render() {
   sed -e "s|\${GATEWAY_IMAGE}|gcr.io/p/conf-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000|g" \
       -e "s|\${GATEWAY_GSA}|conf-gateway@p.iam.gserviceaccount.com|g" \
@@ -39,6 +41,14 @@ render() {
       "$1"
 }
 
+# check_objects pipes a rendered manifest through the checkmanifests helper,
+# which parses it with the module's vendored sigs.k8s.io/yaml and confirms
+# every document has an apiVersion, a kind and a metadata.name — all without
+# contacting a cluster.
+check_objects() {
+  go run ./hack/checkmanifests <<<"$1"
+}
+
 status=0
 for f in "${GATEWAY_MANIFEST}" "${INGRESS_MANIFEST}" "${ACTOR_TEMPLATE}"; do
   out="$(render "${f}" "demo.example.com")"
@@ -48,8 +58,9 @@ for f in "${GATEWAY_MANIFEST}" "${INGRESS_MANIFEST}" "${ACTOR_TEMPLATE}"; do
   fi
 done
 
-# The ingress template is also rendered with an empty domain, the value
-# Task 17 passes when DEMO_DOMAIN is unset and the Ingress is not applied.
+# The ingress template is also rendered with an empty domain, the value the
+# install script passes when DEMO_DOMAIN is unset and the Ingress is not
+# applied.
 out_empty_domain="$(render "${INGRESS_MANIFEST}" "")"
 if grep -n '\${' <<<"${out_empty_domain}"; then
   echo "error: ${INGRESS_MANIFEST} has unsubstituted placeholders (empty domain)" >&2
@@ -59,14 +70,15 @@ fi
 out="$(render "${GATEWAY_MANIFEST}" "demo.example.com")"
 for want in "kind: ServiceAccount" "iam.gke.io/gcp-service-account" "kind: Deployment" \
             "name: conf-gateway-internal" "resourceNames:" "- ate-client" "clustertrustbundles" \
-            "endpointslices" "readOnlyRootFilesystem: true" "runAsNonRoot: true"; do
+            "endpointslices" "readOnlyRootFilesystem: true" "runAsNonRoot: true" "runAsUser: 65532"; do
   if ! grep -qF -- "${want}" <<<"${out}"; then
     echo "error: gateway manifest lacks ${want}" >&2
     status=1
   fi
 done
-if command -v kubectl >/dev/null 2>&1; then
-  kubectl apply --dry-run=client --validate=false -f - <<<"${out}" >/dev/null || status=1
+if ! check_objects "${out}"; then
+  echo "error: ${GATEWAY_MANIFEST} failed offline object validation" >&2
+  status=1
 fi
 
 out_ingress="$(render "${INGRESS_MANIFEST}" "demo.example.com")"
@@ -76,9 +88,13 @@ for want in "kind: ManagedCertificate" "kind: Ingress" "networking.gke.io/manage
     status=1
   fi
 done
-if command -v kubectl >/dev/null 2>&1; then
-  kubectl apply --dry-run=client --validate=false -f - <<<"${out_ingress}" >/dev/null || status=1
-  kubectl apply --dry-run=client --validate=false -f - <<<"${out_empty_domain}" >/dev/null || status=1
+if ! check_objects "${out_ingress}"; then
+  echo "error: ${INGRESS_MANIFEST} failed offline object validation" >&2
+  status=1
+fi
+if ! check_objects "${out_empty_domain}"; then
+  echo "error: ${INGRESS_MANIFEST} failed offline object validation (empty domain)" >&2
+  status=1
 fi
 
 exit "${status}"
