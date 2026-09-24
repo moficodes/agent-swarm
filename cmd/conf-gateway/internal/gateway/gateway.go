@@ -415,14 +415,22 @@ func (g *Gateway) routes() {
 	pages := web.Pages{FS: g.staticFS, PresenterKey: g.presenterKey}
 	chat := pages.Page("chat.html", false, "/chat", "/chat/")
 	feedPage := pages.Page("feed.html", true, "/feed", "/feed/")
-	stage := pages.Page("stage.html", true, "/stage", "/stage/", "/")
+	stage := pages.Page("stage.html", true, "/stage", "/stage/")
 	g.mux.HandleFunc("/chat", chat)
 	g.mux.HandleFunc("/chat/", chat)
 	g.mux.HandleFunc("/feed", feedPage)
 	g.mux.HandleFunc("/feed/", feedPage)
 	g.mux.HandleFunc("/stage", stage)
 	g.mux.HandleFunc("/stage/", stage)
-	g.mux.HandleFunc("/", stage)
+	// Attendees who type the bare address land on the chat, not the
+	// presenter's key prompt.
+	g.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, "/chat", http.StatusFound)
+	})
 	if g.staticFS != nil {
 		g.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(g.staticFS))))
 	}

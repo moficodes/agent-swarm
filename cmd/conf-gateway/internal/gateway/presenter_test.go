@@ -42,7 +42,7 @@ func TestPresenterPages_RequireKey(t *testing.T) {
 	t.Cleanup(ts.Close)
 	client := noRedirectClient()
 
-	for _, page := range []string{"/stage", "/feed", "/"} {
+	for _, page := range []string{"/stage", "/feed"} {
 		t.Run(page, func(t *testing.T) {
 			resp, err := client.Get(ts.URL + page)
 			if err != nil {
