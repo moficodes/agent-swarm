@@ -29,7 +29,6 @@ import (
 	"maps"
 	"mime"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -41,16 +40,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorproxy"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/auth"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/feed"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/simulation"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
-
-type attendeeContextKey struct{}
 
 const (
 	// PresenterCookieName is the cookie a presenter page sets once the
@@ -232,20 +229,16 @@ type Gateway struct {
 	mockLLM      bool
 	statePollMs  atomic.Int64
 
-	mux              *http.ServeMux
-	proxy            *httputil.ReverseProxy
-	attendeeSeq      uint64
-	mu               sync.RWMutex
-	pendingApprovals map[string]*types.ApprovalRequest
-	// approvalsInFlight holds the approval ID each attendee is currently
-	// forwarding, so a second copy of the same decision cannot run concurrently.
-	approvalsInFlight map[string]string
-	chatHistories     map[string][]types.ChatMessage
-	lastResults       map[string]*types.ExecutionResult
-	currentActionID   map[string]string
-	recentEvents      []string
-	parking           atomic.Pointer[routerstatus.Snapshot]
-	simController     SimulationController
+	mux             *http.ServeMux
+	proxy           *actorproxy.Proxy
+	attendeeSeq     uint64
+	mu              sync.RWMutex
+	chatHistories   map[string][]types.ChatMessage
+	lastResults     map[string]*types.ExecutionResult
+	currentActionID map[string]string
+	recentEvents    []string
+	parking         atomic.Pointer[routerstatus.Snapshot]
+	simController   SimulationController
 	// suspendTimers holds each attendee's pending auto-suspend when
 	// suspendAfter is positive. Each pending timer holds one wg count.
 	suspendTimers map[string]*time.Timer
@@ -263,23 +256,21 @@ type Gateway struct {
 // NewGateway creates and initializes a new Gateway.
 func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw := &Gateway{
-		routerURL:         routerURL,
-		atespace:          "ate-demo-conf",
-		statusInterval:    500 * time.Millisecond,
-		pollInterval:      time.Second,
-		httpClient:        &http.Client{Timeout: 5 * time.Second},
-		broker:            feed.NewBroker(),
-		actions:           feed.NewLog(100),
-		mux:               http.NewServeMux(),
-		pendingApprovals:  make(map[string]*types.ApprovalRequest),
-		approvalsInFlight: make(map[string]string),
-		chatHistories:     make(map[string][]types.ChatMessage),
-		lastResults:       make(map[string]*types.ExecutionResult),
-		currentActionID:   make(map[string]string),
-		recentEvents:      make([]string, 0),
-		suspendTimers:     make(map[string]*time.Timer),
-		turnsInFlight:     make(map[string]int),
-		maxActors:         50,
+		routerURL:       routerURL,
+		atespace:        "ate-demo-conf",
+		statusInterval:  500 * time.Millisecond,
+		pollInterval:    time.Second,
+		httpClient:      &http.Client{Timeout: 5 * time.Second},
+		broker:          feed.NewBroker(),
+		actions:         feed.NewLog(100),
+		mux:             http.NewServeMux(),
+		chatHistories:   make(map[string][]types.ChatMessage),
+		lastResults:     make(map[string]*types.ExecutionResult),
+		currentActionID: make(map[string]string),
+		recentEvents:    make([]string, 0),
+		suspendTimers:   make(map[string]*time.Timer),
+		turnsInFlight:   make(map[string]int),
+		maxActors:       50,
 	}
 
 	for _, opt := range opts {
@@ -307,40 +298,15 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		log.Printf("Warning: failed to parse routerURL %q: %v", gw.routerURL, err)
 	}
 
-	proxy := &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			if targetURL != nil {
-				pr.SetURL(targetURL)
-				pr.Out.Host = targetURL.Host
-			}
-			attendeeID, _ := pr.In.Context().Value(attendeeContextKey{}).(string)
-			// Gateway credentials stay here; the actor gets only its own model key.
-			for _, h := range []string{"Authorization", "Cookie", PresenterHeaderName, types.ModelKeyHeader} {
-				pr.Out.Header.Del(h)
-			}
-			if attendeeID != "" {
-				pr.Out.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", gw.atespace, attendeeID))
-				pr.Out.Header.Set(types.ModelKeyHeader, modelproxy.Key([]byte(gw.secret), gw.atespace, attendeeID))
-			}
-		},
-		ModifyResponse: gw.modifyResponse,
-		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-			attendeeID, _ := req.Context().Value(attendeeContextKey{}).(string)
-			if attendeeID != "" {
-				gw.setActivity(attendeeID, types.ActivityIdle)
-			}
-			gw.mu.Lock()
-			if attendeeID != "" {
-				gw.addEventLocked(fmt.Sprintf("Router proxy error for %s: %v", attendeeID, err))
-			}
-			gw.mu.Unlock()
-			http.Error(w, fmt.Sprintf("Bad Gateway: %v", err), http.StatusBadGateway)
-		},
-	}
+	var transport http.RoundTripper
 	if gw.httpClient != nil && gw.httpClient.Transport != nil {
-		proxy.Transport = gw.httpClient.Transport
+		transport = gw.httpClient.Transport
 	}
-	gw.proxy = proxy
+	gw.proxy = actorproxy.New(targetURL, gw.atespace, []byte(gw.secret), transport, actorproxy.Hooks{
+		OnActorError: func(attendeeID string) { gw.setActivity(attendeeID, types.ActivityIdle) },
+		OnReply:      gw.onActorReply,
+		OnError:      gw.onProxyError,
+	})
 
 	gw.routes()
 
@@ -850,54 +816,6 @@ func jsonPOST(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// claimApproval binds an approval decision to the approval this attendee was
-// last shown. On success it rewrites r.Body to carry the proposed code, never
-// code supplied by the client, and marks the approval in flight until release
-// is called. The pending approval itself is cleared by modifyResponse once the
-// actor answers 200. On failure it writes the error response.
-func (g *Gateway) claimApproval(w http.ResponseWriter, r *http.Request, attendeeID string) (types.ApprovalResponse, func(), bool) {
-	var req types.ApprovalResponse
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json payload", http.StatusBadRequest)
-		return req, nil, false
-	}
-	if err := req.Validate(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return req, nil, false
-	}
-
-	g.mu.Lock()
-	pending, ok := g.pendingApprovals[attendeeID]
-	if !ok || pending == nil || pending.ApprovalID != req.ApprovalID {
-		g.mu.Unlock()
-		http.Error(w, "no matching pending approval", http.StatusConflict)
-		return req, nil, false
-	}
-	if g.approvalsInFlight[attendeeID] == req.ApprovalID {
-		g.mu.Unlock()
-		http.Error(w, "approval already in progress", http.StatusConflict)
-		return req, nil, false
-	}
-	g.approvalsInFlight[attendeeID] = req.ApprovalID
-	req.Code = pending.Code
-	req.Language = pending.Language
-	g.mu.Unlock()
-
-	release := func() {
-		g.mu.Lock()
-		if g.approvalsInFlight[attendeeID] == req.ApprovalID {
-			delete(g.approvalsInFlight, attendeeID)
-		}
-		g.mu.Unlock()
-	}
-
-	body, _ := json.Marshal(req)
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.ContentLength = int64(len(body))
-	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	return req, release, true
-}
-
 func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -937,7 +855,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if r.URL.Path == "/api/approve" {
-		apprReq, release, ok := g.claimApproval(w, r, attendeeID)
+		apprReq, release, ok := g.proxy.ClaimApproval(w, r, attendeeID)
 		if !ok {
 			return
 		}
@@ -974,10 +892,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
 	g.mu.Unlock()
 
-	ctx := context.WithValue(r.Context(), attendeeContextKey{}, attendeeID)
-	outReq := r.WithContext(ctx)
-
-	g.proxy.ServeHTTP(w, outReq)
+	g.proxy.ServeHTTP(w, actorproxy.WithAttendee(r, attendeeID))
 }
 
 // GetLastResult returns the most recent execution result for an actor.
@@ -1037,32 +952,22 @@ func (g *Gateway) GetFeedHistory() []types.ActionLogEntry {
 	return g.actions.History()
 }
 
-func (g *Gateway) modifyResponse(resp *http.Response) error {
-	resp.Header.Del(types.ModelKeyHeader)
-	attendeeID, _ := resp.Request.Context().Value(attendeeContextKey{}).(string)
-	if attendeeID == "" {
-		return nil
-	}
+// onProxyError records a router that could not be reached.
+func (g *Gateway) onProxyError(attendeeID string, err error) {
+	g.setActivity(attendeeID, types.ActivityIdle)
+	g.mu.Lock()
+	g.addEventLocked(fmt.Sprintf("Router proxy error for %s: %v", attendeeID, err))
+	g.mu.Unlock()
+}
 
-	if resp.StatusCode >= 400 {
-		g.setActivity(attendeeID, types.ActivityIdle)
-		return nil
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	_ = resp.Body.Close()
-	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	resp.ContentLength = int64(len(bodyBytes))
-	resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
-
+// onActorReply records an actor's answer to a turn: its activity, chat
+// history, pending approval, and the action feed entry.
+func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMessage) {
 	var isWaitingForApproval bool
 	var chatMsg types.ChatMessage
-	hasChatMsg := false
-	if err := json.Unmarshal(bodyBytes, &chatMsg); err == nil {
-		hasChatMsg = true
+	hasChatMsg := msg != nil
+	if hasChatMsg {
+		chatMsg = *msg
 		if chatMsg.Approval != nil {
 			isWaitingForApproval = true
 		}
@@ -1098,7 +1003,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 
 	if isWaitingForApproval {
 		g.mu.Lock()
-		g.pendingApprovals[attendeeID] = chatMsg.Approval
+		g.proxy.SetPending(attendeeID, chatMsg.Approval)
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
 			history := g.chatHistories[attendeeID]
 			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
@@ -1121,9 +1026,9 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 			Activity:      types.ActivityAwaitingApproval,
 			Source:        chatMsg.Source,
 		})
-	} else if resp.StatusCode == http.StatusOK {
+	} else if status == http.StatusOK {
 		g.mu.Lock()
-		delete(g.pendingApprovals, attendeeID)
+		g.proxy.ClearPending(attendeeID)
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
 			history := g.chatHistories[attendeeID]
 			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
@@ -1157,8 +1062,6 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 			})
 		}
 	}
-
-	return nil
 }
 
 func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
@@ -1185,11 +1088,7 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 		history = []types.ChatMessage{}
 	}
 
-	var pendingApproval *types.ApprovalRequest
-	if pa, ok := g.pendingApprovals[actorID]; ok && pa != nil {
-		copyPA := *pa
-		pendingApproval = &copyPA
-	}
+	pendingApproval := g.proxy.PendingApproval(actorID)
 
 	var lastResult *types.ExecutionResult
 	if lr, ok := g.lastResults[actorID]; ok && lr != nil {
@@ -1242,7 +1141,7 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	slices.Sort(toSuspend)
 
 	g.mu.Lock()
-	g.pendingApprovals = make(map[string]*types.ApprovalRequest)
+	g.proxy.ResetPending()
 	g.chatHistories = make(map[string][]types.ChatMessage)
 	g.lastResults = make(map[string]*types.ExecutionResult)
 	g.currentActionID = make(map[string]string)
