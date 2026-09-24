@@ -114,7 +114,7 @@ func (m *mockSimulationController) SetStatus(running bool, count int) {
 
 func TestSessionMinting(t *testing.T) {
 	secret := "test-secret-12345"
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+	gw := newTestGateway(t, "http://localhost:8000", "",
 		gateway.WithJWTSecret(secret),
 	)
 	defer gw.Close()
@@ -185,7 +185,7 @@ func TestSessionMinting(t *testing.T) {
 	}
 
 	// 4. Verify token signed with different secret fails
-	gwOther := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+	gwOther := newTestGateway(t, "http://localhost:8000", "",
 		gateway.WithJWTSecret("wrong-secret"),
 	)
 	defer gwOther.Close()
@@ -211,7 +211,7 @@ func TestStageTelemetry(t *testing.T) {
 	statusSrv := httptest.NewServer(statuszMux)
 	defer statusSrv.Close()
 
-	gw := gateway.NewGateway("http://localhost:8000", statusSrv.URL,
+	gw := newTestGateway(t, "http://localhost:8000", statusSrv.URL,
 		gateway.WithStatusInterval(20*time.Millisecond),
 	)
 	defer gw.Close()
@@ -258,7 +258,8 @@ func TestStageTelemetry(t *testing.T) {
 	// Update parking active and ensure polling reflects it
 	parkingActive.Store(23)
 	updated := false
-	for time.Now().Before(time.Now().Add(2 * time.Second)) {
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
 		resp, err := http.Get(ts.URL + "/api/stage/telemetry")
 		if err != nil {
 			t.Fatalf("failed to get telemetry: %v", err)
@@ -356,7 +357,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace(atespace),
 		gateway.WithGeminiAPIKey(secretKey),
 		gateway.WithSuspender(suspender),
@@ -474,7 +475,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 }
 
 func TestProxyRouting_Authentication(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+	gw := newTestGateway(t, "http://localhost:8000", "",
 		gateway.WithJWTSecret("secret-auth-test"),
 	)
 	defer gw.Close()
@@ -564,7 +565,7 @@ func TestGateway_ConcurrencySafety(t *testing.T) {
 	defer upstreamSrv.Close()
 
 	suspender := &mockSuspender{}
-	gw := gateway.NewGateway(upstreamSrv.URL, statusSrv.URL,
+	gw := newTestGateway(t, upstreamSrv.URL, statusSrv.URL,
 		gateway.WithStatusInterval(10*time.Millisecond),
 		gateway.WithSuspender(suspender),
 	)
@@ -610,7 +611,7 @@ func TestGateway_ConcurrencySafety(t *testing.T) {
 				_ = cResp.Body.Close()
 
 				// 3. Approve proxy
-				reqApp, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"app-1","decision":"APPROVE"}`))
+				reqApp, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"app-1","decision":"approve"}`))
 				reqApp.Header.Set("Content-Type", "application/json")
 				reqApp.Header.Set("Authorization", "Bearer "+sess.Token)
 				aResp, err := client.Do(reqApp)
@@ -637,7 +638,7 @@ func TestGateway_ConcurrencySafety(t *testing.T) {
 }
 
 func TestProxyRouting_ExpiredToken(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+	gw := newTestGateway(t, "http://localhost:8000", "",
 		gateway.WithJWTSecret("secret-expired-test"),
 	)
 	defer gw.Close()
@@ -666,7 +667,7 @@ func TestProxyRouting_ExpiredToken(t *testing.T) {
 }
 
 func TestHTTPMethodValidation(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -714,7 +715,7 @@ func TestHTTPMethodValidation(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -753,7 +754,7 @@ func TestSuspenderFailureTolerance(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithSuspender(failingSuspender),
 	)
 	defer gw.Close()
@@ -827,7 +828,7 @@ func TestProxyRouting_ApprovalDetection_SubstringIgnored(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithSuspender(suspender),
 	)
 	defer gw.Close()
@@ -883,7 +884,7 @@ func TestProxyRouting_RequireValidToken(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace("ate-demo-conf"),
 	)
 	defer gw.Close()
@@ -939,7 +940,7 @@ func TestProxyRouting_ProxyErrorResetsActorState(t *testing.T) {
 	deadURL := deadServer.URL
 	deadServer.Close()
 
-	gw := gateway.NewGateway(deadURL, "http://localhost:4040")
+	gw := newTestGateway(t, deadURL, "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -998,7 +999,7 @@ func TestProxyRouting_UpstreamErrorStatusResetsActorState(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040")
+	gw := newTestGateway(t, upstreamSrv.URL, "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -1067,7 +1068,7 @@ func TestProxyRouting_AsyncSuspensionNonBlocking(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithSuspender(suspender),
 	)
 	defer gw.Close()
@@ -1138,7 +1139,7 @@ func TestStageTelemetry_DeterministicWorkerSorting(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040")
+	gw := newTestGateway(t, upstreamSrv.URL, "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -1233,7 +1234,7 @@ func TestGateway_CloseWaitsForAsyncSuspension(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithSuspender(suspender),
 	)
 
@@ -1274,7 +1275,7 @@ func TestGateway_CloseWaitsForAsyncSuspension(t *testing.T) {
 }
 
 func TestChatRoute(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -1418,7 +1419,7 @@ func TestChatRoute(t *testing.T) {
 }
 
 func TestStageRoute(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -1585,7 +1586,7 @@ func TestStageRoute(t *testing.T) {
 }
 
 func TestSSEEventStreaming(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -1823,7 +1824,7 @@ func TestActorInspectorEndpoint(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace("ate-demo-conf"),
 	)
 	defer gw.Close()
@@ -2065,7 +2066,7 @@ func TestResetEndpoint(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace("ate-demo-conf"),
 		gateway.WithSuspender(suspender),
 	)
@@ -2391,7 +2392,7 @@ func TestSimulationEndpoint(t *testing.T) {
 	defer upstreamSrv.Close()
 
 	suspender := &mockSuspender{}
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace("ate-demo-conf"),
 		gateway.WithSuspender(suspender),
 	)
@@ -2658,7 +2659,7 @@ func TestSimulationEndpoint(t *testing.T) {
 	})
 
 	t.Run("ClosedGatewayGuard", func(t *testing.T) {
-		gwClosed := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+		gwClosed := newTestGateway(t, "http://localhost:8000", "")
 		runnerClosed := gateway.NewSimulationRunner(gwClosed)
 		gwClosed.Close()
 
@@ -2813,7 +2814,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 	defer upstreamSrv.Close()
 
 	suspender := &mockSuspender{}
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace("ate-demo-conf"),
 		gateway.WithSuspender(suspender),
 	)
@@ -3141,7 +3142,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 		}
 
 		// 2. Approval & Execution
-		apprReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"appr-flow-1","decision":"approve"}`))
+		apprReq, err := http.NewRequest(http.MethodPost, ts.URL+"/api/approve", strings.NewReader(`{"approval_id":"appr-flow-1","decision":"APPROVE"}`))
 		if err != nil {
 			t.Fatalf("failed to build approve request: %v", err)
 		}
@@ -3337,7 +3338,7 @@ func TestChatAndApprovalFlowActionStream_WithAIClient(t *testing.T) {
 
 	suspender := &mockSuspender{}
 	aiClient := ai.NewGeminiClient(ai.WithProject(""), ai.WithGeminiMockEngine(engine.NewMockEngine()))
-	gw := gateway.NewGateway(upstreamSrv.URL, "http://localhost:4040",
+	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace("ate-demo-conf"),
 		gateway.WithSuspender(suspender),
 		gateway.WithAIClient(aiClient),
@@ -3518,7 +3519,7 @@ drainLoop:
 }
 
 func TestFeedRoute(t *testing.T) {
-	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040")
+	gw := newTestGateway(t, "http://localhost:8000", "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(gw.Handler())
@@ -3682,7 +3683,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 	}
 
 	t.Run("NoSimulationRunning", func(t *testing.T) {
-		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gw := newTestGateway(t, "http://localhost:8000", "",
 			gateway.WithJWTSecret("secret"),
 		)
 		defer gw.Close()
@@ -3703,7 +3704,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 	})
 
 	t.Run("SimulationRunningCount25", func(t *testing.T) {
-		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gw := newTestGateway(t, "http://localhost:8000", "",
 			gateway.WithJWTSecret("secret"),
 		)
 		defer gw.Close()
@@ -3732,7 +3733,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 	})
 
 	t.Run("SimulationRunningCount50MaxActors100", func(t *testing.T) {
-		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gw := newTestGateway(t, "http://localhost:8000", "",
 			gateway.WithJWTSecret("secret"),
 			gateway.WithMaxActors(100),
 		)
@@ -3762,7 +3763,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 	})
 
 	t.Run("ExplicitAttendeeID", func(t *testing.T) {
-		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gw := newTestGateway(t, "http://localhost:8000", "",
 			gateway.WithJWTSecret("secret"),
 		)
 		defer gw.Close()
@@ -3789,7 +3790,7 @@ func TestSegmentedSessionAllocation(t *testing.T) {
 	})
 
 	t.Run("ConcurrencySafety", func(t *testing.T) {
-		gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
+		gw := newTestGateway(t, "http://localhost:8000", "",
 			gateway.WithJWTSecret("secret"),
 		)
 		defer gw.Close()
