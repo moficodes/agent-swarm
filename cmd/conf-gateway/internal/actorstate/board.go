@@ -28,9 +28,19 @@ type Board struct {
 
 	mu    sync.Mutex
 	views map[string]types.ActorView
+
+	// pubMu serializes publish calls in commit order. It is acquired while
+	// mu is still held, so the order in which updates commit their views is
+	// the order in which they publish them: two concurrent updates cannot
+	// have their publishes interleave out of commit order.
+	pubMu sync.Mutex
 }
 
 // NewBoard returns an empty Board that calls publish for each changed view.
+// publish must not call any Board mutator (SetStatuses, SetUnavailable,
+// SetActivity, SetSource, Reset): doing so deadlocks, because a mutator
+// call already in progress holds the lock that serializes publishing.
+// Reading the board back via View or Views from within publish is fine.
 func NewBoard(publish func(types.ActorView)) *Board {
 	return &Board{publish: publish, views: map[string]types.ActorView{}}
 }
@@ -51,10 +61,12 @@ func (b *Board) update(names []string, fn func(*types.ActorView)) {
 			changed = append(changed, v)
 		}
 	}
+	b.pubMu.Lock()
 	b.mu.Unlock()
 	for _, v := range changed {
 		b.publish(v)
 	}
+	b.pubMu.Unlock()
 }
 
 func (b *Board) names() []string {

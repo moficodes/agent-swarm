@@ -15,8 +15,10 @@
 package actorstate_test
 
 import (
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
@@ -127,5 +129,89 @@ func TestBoard_ViewsIsACopy(t *testing.T) {
 	views["a"] = types.ActorView{}
 	if v, _ := b.View("a"); v.Activity != types.ActivityThinking {
 		t.Error("mutating Views() changed the board")
+	}
+}
+
+// TestBoard_PublishOrderMatchesCommitOrder is a regression test for a race
+// where two concurrent updates to the same actor could publish out of
+// commit order: the first update commits, is preempted before publishing,
+// the second update commits and publishes, and only then does the first
+// update publish its now-stale view. It forces that interleaving by
+// blocking the first publish call on a channel until the second update has
+// committed (but not necessarily published), then releasing it.
+func TestBoard_PublishOrderMatchesCommitOrder(t *testing.T) {
+	const timeout = 5 * time.Second
+
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+
+	var mu sync.Mutex
+	var order []types.ActorView
+	first := true
+
+	b := actorstate.NewBoard(func(v types.ActorView) {
+		mu.Lock()
+		isFirst := first
+		first = false
+		mu.Unlock()
+		if isFirst {
+			close(started)
+			<-proceed
+		}
+		mu.Lock()
+		order = append(order, v)
+		mu.Unlock()
+	})
+
+	done1 := make(chan struct{})
+	go func() {
+		b.SetActivity("a", types.ActivityThinking)
+		close(done1)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for the first publish to start")
+	}
+
+	done2 := make(chan struct{})
+	go func() {
+		b.SetActivity("a", types.ActivityAwaitingApproval)
+		close(done2)
+	}()
+
+	// Give the second update a chance to reach the board: its critical
+	// section is lock operations and a map write only, so a handful of
+	// scheduler yields are enough for it to run (and, once fixed, block
+	// trying to acquire pubMu) before the first publish is released. This
+	// state isn't otherwise observable: with the fix, the second update
+	// holds b.mu until it acquires pubMu, so even View blocks until then.
+	for i := 0; i < 1000; i++ {
+		runtime.Gosched()
+	}
+
+	close(proceed)
+
+	select {
+	case <-done1:
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for the first update to finish publishing")
+	}
+	select {
+	case <-done2:
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for the second update to finish publishing")
+	}
+
+	mu.Lock()
+	got := append([]types.ActorView(nil), order...)
+	mu.Unlock()
+
+	if len(got) != 2 || got[0].Activity != types.ActivityThinking || got[1].Activity != types.ActivityAwaitingApproval {
+		t.Fatalf("publish order = %+v, want [Thinking, AwaitingApproval]", got)
+	}
+	if v, _ := b.View("a"); got[len(got)-1] != v {
+		t.Errorf("last published view %+v != current board view %+v", got[len(got)-1], v)
 	}
 }
