@@ -26,7 +26,7 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY"}
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY", "ACTOR_COUNT"}
 
 // clearConfigEnv clears every environment variable LoadConfig reads, so tests
 // start from a clean slate regardless of the host environment.
@@ -74,6 +74,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.RouterStatusDiscovery != "static" {
 		t.Errorf("expected default RouterStatusDiscovery 'static', got %q", cfg.RouterStatusDiscovery)
+	}
+	if cfg.ActorCount != 50 {
+		t.Errorf("expected default ActorCount 50, got %d", cfg.ActorCount)
 	}
 }
 
@@ -135,6 +138,24 @@ func TestLoadConfig_InvalidPollIntervalFallsBack(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "STATE_POLL_INTERVAL") {
 		t.Errorf("log = %q, want a line naming STATE_POLL_INTERVAL", buf.String())
+	}
+}
+
+func TestLoadConfig_ActorCount(t *testing.T) {
+	for _, c := range []struct {
+		env  string
+		want int
+	}{
+		{"12", 12},
+		{"0", 50},
+		{"-3", 50},
+		{"many", 50},
+	} {
+		clearConfigEnv(t)
+		t.Setenv("ACTOR_COUNT", c.env)
+		if got := LoadConfig().ActorCount; got != c.want {
+			t.Errorf("ACTOR_COUNT=%q: ActorCount = %d, want %d", c.env, got, c.want)
+		}
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -86,6 +87,8 @@ type Config struct {
 	VertexLocation string
 	// ModelAllowlist restricts which models actors may call.
 	ModelAllowlist []string
+	// ActorCount is how many attendee actors the install created.
+	ActorCount int
 }
 
 // LoadConfig loads the configuration from environment variables with defaults.
@@ -139,7 +142,23 @@ func LoadConfig() Config {
 		VertexProject:         os.Getenv("VERTEX_PROJECT"),
 		VertexLocation:        vertexLocation,
 		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
+		ActorCount:            envPositiveInt("ACTOR_COUNT", 50),
 	}
+}
+
+// envPositiveInt parses the named variable as a positive integer. It returns
+// def when the variable is unset, or, with a log line, when it is invalid.
+func envPositiveInt(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Printf("invalid %s %q; using %d", name, v, def)
+		return def
+	}
+	return n
 }
 
 // envDuration parses the named variable as a duration. It returns def when
@@ -258,6 +277,7 @@ func main() {
 		gateway.WithSecret(secret),
 		gateway.WithPresenterKey(cfg.PresenterKey),
 		gateway.WithPollInterval(cfg.StatePollInterval),
+		gateway.WithMaxActors(cfg.ActorCount),
 		gateway.WithSuspendAfter(cfg.SuspendAfter),
 		gateway.WithUsage(proxy),
 		gateway.WithModel(proxy),

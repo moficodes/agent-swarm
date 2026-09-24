@@ -36,6 +36,7 @@ render() {
       -e "s|\${VERTEX_PROJECT}|p|g" \
       -e "s|\${VERTEX_LOCATION}|us-central1|g" \
       -e "s|\${DEMO_MOCK_LLM}|false|g" \
+      -e "s|\${ACTOR_COUNT}|50|g" \
       -e "s|\${DEMO_DOMAIN}|$2|g" \
       -e "s|\${BUCKET_NAME}|b|g" \
       -e "s|\${TEMPLATE_REVISION}|1|g" \

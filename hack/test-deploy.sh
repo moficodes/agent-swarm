@@ -160,5 +160,10 @@ if ! demo-conference_render demos/conference/conference-template.yaml.tmpl | gre
   echo "FAIL: rendered conf-agent template lacks CONF_TEMPLATE_REVISION ${rev}" >&2
   fail=1
 fi
+# The gateway learns the actor count from the install.
+if ! DEMO_CONF_ACTORS=7 demo-conference_render demos/conference/manifests/gateway.yaml.tmpl | grep -A1 'name: ACTOR_COUNT' | grep -qF 'value: "7"'; then
+  echo "FAIL: rendered gateway manifest lacks ACTOR_COUNT from DEMO_CONF_ACTORS" >&2
+  fail=1
+fi
 
 exit "${fail}"

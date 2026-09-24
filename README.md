@@ -35,7 +35,9 @@ copy (`demos/conference/cmd/conf-gateway/static/stage.html`) states the
 default `WorkerPool` size and attendee count
 (`demos/conference/conference.yaml.tmpl`'s `replicas: 2`,
 `hack/install-demo-conference.sh`'s `DEMO_CONF_ACTORS=50`); it is fixed
-header copy, not a live count read from the cluster.
+header copy, not a live count read from the cluster. The gateway itself
+learns the attendee count from `ACTOR_COUNT`, which the install script sets
+from `DEMO_CONF_ACTORS`, and caps the audience simulation at it.
 
 ## Architecture
 
