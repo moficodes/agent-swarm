@@ -18,6 +18,7 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -41,6 +42,9 @@ type Config struct {
 	PresenterKey string
 	GeminiAPIKey string
 	Atespace     string
+	// SuspendMode selects how actors are suspended after a turn: empty for
+	// kubectl-ate, or "noop" for local runs with no cluster.
+	SuspendMode string
 }
 
 // LoadConfig loads the configuration from environment variables with defaults.
@@ -58,9 +62,6 @@ func LoadConfig() Config {
 		statusURL = "http://localhost:4040"
 	}
 	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
-		jwtSecret = "conf-demo-secret-key"
-	}
 	presenterKey := os.Getenv("PRESENTER_TOKEN")
 	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
 	atespace := os.Getenv("ATESPACE")
@@ -76,11 +77,31 @@ func LoadConfig() Config {
 		PresenterKey: presenterKey,
 		GeminiAPIKey: geminiAPIKey,
 		Atespace:     atespace,
+		SuspendMode:  os.Getenv("SUSPEND_MODE"),
+	}
+}
+
+// suspenderOptions returns the gateway options for a SUSPEND_MODE value.
+func suspenderOptions(mode string) ([]gateway.Option, error) {
+	switch mode {
+	case "":
+		return nil, nil
+	case "noop":
+		return []gateway.Option{gateway.WithSuspender(gateway.SuspendFunc(func(context.Context, string, string) error {
+			return nil
+		}))}, nil
+	default:
+		return nil, fmt.Errorf("unknown SUSPEND_MODE %q (want empty or \"noop\")", mode)
 	}
 }
 
 func main() {
 	cfg := LoadConfig()
+
+	suspendOpts, err := suspenderOptions(cfg.SuspendMode)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	opts := []gateway.Option{
 		gateway.WithAtespace(cfg.Atespace),
@@ -90,6 +111,7 @@ func main() {
 		gateway.WithStaticFS(staticFS),
 		gateway.WithAIClient(ai.NewGeminiClient()),
 	}
+	opts = append(opts, suspendOpts...)
 
 	gw := gateway.NewGateway(cfg.RouterURL, cfg.StatusURL, opts...)
 	defer gw.Close()

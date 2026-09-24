@@ -280,7 +280,6 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		routerURL:         routerURL,
 		statusURL:         statusURL,
 		atespace:          "ate-demo-conf",
-		jwtSecret:         "conf-demo-secret-key",
 		suspender:         &commandSuspender{},
 		statusInterval:    500 * time.Millisecond,
 		httpClient:        &http.Client{Timeout: 5 * time.Second},
@@ -302,6 +301,9 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		opt(gw)
 	}
 
+	if gw.jwtSecret == "" {
+		gw.jwtSecret = randomHex(32)
+	}
 	if gw.presenterKey == "" {
 		gw.presenterKey = randomHex(16)
 	}

@@ -20,7 +20,7 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "JWT_SECRET", "PRESENTER_TOKEN", "GEMINI_API_KEY", "ATESPACE"}
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "JWT_SECRET", "PRESENTER_TOKEN", "GEMINI_API_KEY", "ATESPACE", "SUSPEND_MODE"}
 
 func TestLoadConfig_Defaults(t *testing.T) {
 	for _, env := range configEnvVars {
@@ -38,8 +38,11 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.StatusURL != "http://localhost:4040" {
 		t.Errorf("expected default StatusURL 'http://localhost:4040', got %q", cfg.StatusURL)
 	}
-	if cfg.JWTSecret != "conf-demo-secret-key" {
-		t.Errorf("expected default JWTSecret 'conf-demo-secret-key', got %q", cfg.JWTSecret)
+	if cfg.JWTSecret != "" {
+		t.Errorf("expected empty default JWTSecret so the gateway generates one, got %q", cfg.JWTSecret)
+	}
+	if cfg.SuspendMode != "" {
+		t.Errorf("expected empty default SuspendMode, got %q", cfg.SuspendMode)
 	}
 	if cfg.PresenterKey != "" {
 		t.Errorf("expected empty default PresenterKey so the gateway generates one, got %q", cfg.PresenterKey)
@@ -60,6 +63,7 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	t.Setenv("PRESENTER_TOKEN", "custom-presenter")
 	t.Setenv("GEMINI_API_KEY", "custom-key")
 	t.Setenv("ATESPACE", "custom-ns")
+	t.Setenv("SUSPEND_MODE", "noop")
 
 	cfg := LoadConfig()
 
@@ -83,6 +87,21 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	}
 	if cfg.Atespace != "custom-ns" {
 		t.Errorf("expected Atespace 'custom-ns', got %q", cfg.Atespace)
+	}
+	if cfg.SuspendMode != "noop" {
+		t.Errorf("expected SuspendMode 'noop', got %q", cfg.SuspendMode)
+	}
+}
+
+func TestSuspenderOptions(t *testing.T) {
+	if opts, err := suspenderOptions(""); err != nil || len(opts) != 0 {
+		t.Errorf("default mode: got %d options, err %v; want the gateway's own suspender", len(opts), err)
+	}
+	if opts, err := suspenderOptions("noop"); err != nil || len(opts) != 1 {
+		t.Errorf("noop mode: got %d options, err %v; want one WithSuspender option", len(opts), err)
+	}
+	if _, err := suspenderOptions("bogus"); err == nil {
+		t.Errorf("unknown mode: want error")
 	}
 }
 

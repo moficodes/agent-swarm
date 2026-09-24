@@ -385,6 +385,7 @@ PYEOF
     fi
     PORT="${MOCK_GATEWAY_PORT}" \
     PRESENTER_TOKEN="${PRESENTER_TOKEN}" \
+    SUSPEND_MODE=noop \
     ROUTER_URL="${ROUTER_URL}" \
     STATUS_URL="${STATUS_URL}" \
     "${TMP_DIR}/conf-gateway" >/dev/null 2>&1 &
