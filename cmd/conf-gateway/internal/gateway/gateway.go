@@ -17,11 +17,8 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -45,6 +42,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/auth"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
@@ -55,9 +53,9 @@ type attendeeContextKey struct{}
 const (
 	// PresenterCookieName is the cookie a presenter page sets once the
 	// presenter key is supplied.
-	PresenterCookieName = "conf_presenter"
+	PresenterCookieName = auth.PresenterCookieName
 	// PresenterHeaderName carries the presenter key for scripts.
-	PresenterHeaderName = "X-Presenter-Key"
+	PresenterHeaderName = auth.PresenterHeaderName
 )
 
 // SimulationController defines the interface for managing background audience simulations.
@@ -68,11 +66,7 @@ type SimulationController interface {
 }
 
 // Claims represents the decoded JWT payload.
-type Claims struct {
-	Sub   string `json:"sub"`
-	Exp   int64  `json:"exp"`
-	Scope string `json:"scope,omitempty"`
-}
+type Claims = auth.Claims
 
 // Option configures Gateway.
 type Option func(*Gateway)
@@ -203,6 +197,7 @@ type Gateway struct {
 	routerStatus   *routerstatus.Aggregator
 	atespace       string
 	secret         string
+	signer         *auth.Signer
 	presenterKey   string
 	statusInterval time.Duration
 	httpClient     *http.Client
@@ -276,6 +271,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	if gw.secret == "" {
 		gw.secret = randomHex(32)
 	}
+	gw.signer = auth.NewSigner([]byte(gw.secret))
 	if gw.presenterKey == "" {
 		gw.presenterKey = randomHex(16)
 	}
@@ -516,13 +512,7 @@ func randomHex(n int) string {
 // isPresenter reports whether the request carries the presenter key, either in
 // the cookie set by a presenter page or in the PresenterHeaderName header.
 func (g *Gateway) isPresenter(r *http.Request) bool {
-	key := r.Header.Get(PresenterHeaderName)
-	if key == "" {
-		if c, err := r.Cookie(PresenterCookieName); err == nil {
-			key = c.Value
-		}
-	}
-	return key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(g.presenterKey)) == 1
+	return auth.PresenterOK(r, g.presenterKey)
 }
 
 func (g *Gateway) requirePresenter(next http.HandlerFunc) http.HandlerFunc {
@@ -683,7 +673,7 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	requestedID := strings.TrimSpace(r.URL.Query().Get("attendee_id"))
 	var attendeeID string
-	if requestedID != "" && g.isPresenter(r) && validAttendeeID(requestedID, maxActors) {
+	if requestedID != "" && g.isPresenter(r) && auth.ValidAttendeeID(requestedID, maxActors) {
 		attendeeID = requestedID
 	} else {
 
@@ -722,13 +712,6 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		"attendee_id": attendeeID,
 		"token":       token,
 	})
-}
-
-// validAttendeeID reports whether id is a canonical "attendee-NN" name for one
-// of the maxActors pre-provisioned actors.
-func validAttendeeID(id string, maxActors int) bool {
-	n, err := strconv.Atoi(strings.TrimPrefix(id, "attendee-"))
-	return err == nil && n >= 1 && n <= maxActors && id == fmt.Sprintf("attendee-%02d", n)
 }
 
 func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
@@ -1572,104 +1555,17 @@ func (g *Gateway) handleSimulation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) authenticateRequest(r *http.Request) (string, error) {
-	var tokenStr string
-	authHdr := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHdr, "Bearer ") {
-		tokenStr = strings.TrimPrefix(authHdr, "Bearer ")
-	} else if tok := r.Header.Get("X-Attendee-Token"); tok != "" {
-		tokenStr = tok
-	}
-
-	if tokenStr == "" {
-		return "", errors.New("missing authorization token")
-	}
-
-	claims, err := g.VerifyToken(tokenStr)
-	if err != nil {
-		return "", fmt.Errorf("invalid token: %w", err)
-	}
-
-	if claims.Sub == "" {
-		return "", errors.New("token missing subject")
-	}
-
-	if claims.Exp <= 0 || claims.Exp <= time.Now().Unix() {
-		return "", errors.New("token expired")
-	}
-
-	if reqAttendeeID := r.Header.Get("X-Attendee-ID"); reqAttendeeID != "" {
-		if reqAttendeeID != claims.Sub {
-			return "", fmt.Errorf("mismatched attendee ID: header=%s, token=%s", reqAttendeeID, claims.Sub)
-		}
-	}
-
-	return claims.Sub, nil
+	return g.signer.Authenticate(r)
 }
 
 // MintToken creates a signed HS256 JWT for the specified attendee ID.
 func (g *Gateway) MintToken(attendeeID string) string {
-	headerJSON := `{"alg":"HS256","typ":"JWT"}`
-	header := base64.RawURLEncoding.EncodeToString([]byte(headerJSON))
-
-	claims := Claims{
-		Sub:   attendeeID,
-		Exp:   time.Now().Add(2 * time.Hour).Unix(),
-		Scope: "agent:chat",
-	}
-	payloadBytes, _ := json.Marshal(claims)
-	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
-
-	signingInput := header + "." + payload
-	mac := hmac.New(sha256.New, []byte(g.secret))
-	mac.Write([]byte(signingInput))
-	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-
-	return signingInput + "." + signature
+	return g.signer.Mint(attendeeID)
 }
 
 // VerifyToken validates an HS256 JWT string and returns the decoded claims.
 func (g *Gateway) VerifyToken(tokenStr string) (*Claims, error) {
-	parts := strings.Split(tokenStr, ".")
-	if len(parts) != 3 {
-		return nil, errors.New("invalid token format: must contain 3 parts")
-	}
-
-	signingInput := parts[0] + "." + parts[1]
-	mac := hmac.New(sha256.New, []byte(g.secret))
-	mac.Write([]byte(signingInput))
-	expectedSig := mac.Sum(nil)
-
-	actualSig, err := decodeBase64URL(parts[2])
-	if err != nil {
-		return nil, fmt.Errorf("invalid token signature encoding: %w", err)
-	}
-
-	if !hmac.Equal(actualSig, expectedSig) {
-		return nil, errors.New("invalid token signature")
-	}
-
-	payloadBytes, err := decodeBase64URL(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid token payload encoding: %w", err)
-	}
-
-	var claims Claims
-	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
-		return nil, fmt.Errorf("invalid token claims: %w", err)
-	}
-
-	if claims.Exp <= 0 || claims.Exp <= time.Now().Unix() {
-		return nil, errors.New("token expired")
-	}
-
-	return &claims, nil
-}
-
-func decodeBase64URL(s string) ([]byte, error) {
-	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
-		return b, nil
-	}
-	return base64.URLEncoding.DecodeString(s)
+	return g.signer.Verify(tokenStr)
 }
 
 func (g *Gateway) pollStatus(ctx context.Context) {
