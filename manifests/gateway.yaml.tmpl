@@ -169,6 +169,10 @@ kind: Service
 metadata:
   name: conf-gateway
   namespace: ate-demo-conf
+  annotations:
+    # Used only by the GKE Ingress in gateway-ingress.yaml.tmpl, which
+    # defines this BackendConfig; harmless without it.
+    cloud.google.com/backend-config: '{"default":"conf-gateway"}'
 spec:
   type: LoadBalancer
   selector:

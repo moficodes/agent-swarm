@@ -70,7 +70,8 @@ fi
 out="$(render "${GATEWAY_MANIFEST}" "demo.example.com")"
 for want in "kind: ServiceAccount" "iam.gke.io/gcp-service-account" "kind: Deployment" \
             "name: conf-gateway-internal" "resourceNames:" "- ate-client" "clustertrustbundles" \
-            "endpointslices" "readOnlyRootFilesystem: true" "runAsNonRoot: true" "runAsUser: 65532"; do
+            "endpointslices" "readOnlyRootFilesystem: true" "runAsNonRoot: true" "runAsUser: 65532" \
+            "cloud.google.com/backend-config: '{\"default\":\"conf-gateway\"}'"; do
   if ! grep -qF -- "${want}" <<<"${out}"; then
     echo "error: gateway manifest lacks ${want}" >&2
     status=1
@@ -82,7 +83,8 @@ if ! check_objects "${out}"; then
 fi
 
 out_ingress="$(render "${INGRESS_MANIFEST}" "demo.example.com")"
-for want in "kind: ManagedCertificate" "kind: Ingress" "networking.gke.io/managed-certificates" "demo.example.com"; do
+for want in "kind: ManagedCertificate" "kind: Ingress" "networking.gke.io/managed-certificates" "demo.example.com" \
+            "apiVersion: cloud.google.com/v1" "kind: BackendConfig" "timeoutSec: 3600"; do
   if ! grep -qF -- "${want}" <<<"${out_ingress}"; then
     echo "error: ingress manifest lacks ${want}" >&2
     status=1

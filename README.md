@@ -62,6 +62,8 @@ conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
 - Browser to gateway: plain HTTP through the `conf-gateway` `LoadBalancer`
   Service, unless `DEMO_DOMAIN` is set, in which case
   `gateway-ingress.yaml.tmpl` fronts it with a GKE-managed TLS Ingress.
+  Its `BackendConfig` raises the load balancer's backend timeout to an hour
+  so long turns and SSE streams are not cut at the 30s default.
 - Gateway to actor: `conf-gateway` proxies `/api/chat` and `/api/approve`
   through `atenet-router` (`ROUTER_URL=http://atenet-router.ate-system.svc:80`
   in `demos/conference/manifests/gateway.yaml.tmpl`) with an
