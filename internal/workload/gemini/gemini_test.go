@@ -17,6 +17,7 @@ package gemini_test
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -183,5 +184,94 @@ func TestToolDeclarations_CodeIsLimitedToTheStandardLibrary(t *testing.T) {
 				t.Errorf("%s code description = %q, want it to limit scripts to the standard library", fn.Name, code.Description)
 			}
 		}
+	}
+}
+
+// fakeChecker reports a syntax error for the scripts in broken.
+func fakeChecker(broken ...string) gemini.SyntaxChecker {
+	return func(_ context.Context, _, code string) string {
+		for _, b := range broken {
+			if code == b {
+				return "SyntaxError: unterminated string literal (line 1)"
+			}
+		}
+		return ""
+	}
+}
+
+func TestGenerate_BrokenScriptGoesBackToTheModelForAFix(t *testing.T) {
+	fake := geminitest.New(t,
+		geminitest.ApprovalResponse("sum", "print('a\nb')", "python"),
+		geminitest.ApprovalResponse("sum", "print('a\\nb')", "python"),
+	)
+	c := newClient(fake, gemini.WithSyntaxChecker(fakeChecker("print('a\nb')")))
+
+	msg, err := c.Generate(context.Background(), nil, "sum it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Approval == nil || msg.Approval.Code != "print('a\\nb')" {
+		t.Fatalf("Approval = %+v, want the fixed script", msg.Approval)
+	}
+	reqs := fake.Requests()
+	if len(reqs) != 2 {
+		t.Fatalf("got %d requests, want 2", len(reqs))
+	}
+	if body := string(reqs[1].Body); !strings.Contains(body, `"functionResponse"`) || !strings.Contains(body, "unterminated string literal") {
+		t.Errorf("retry request should report the syntax error; body = %s", body)
+	}
+}
+
+func TestGenerate_BrokenScriptIsRetriedOnlyOnce(t *testing.T) {
+	fake := geminitest.New(t, geminitest.ApprovalResponse("sum", "print('a\nb')", "python"))
+	c := newClient(fake, gemini.WithSyntaxChecker(fakeChecker("print('a\nb')")))
+
+	msg, err := c.Generate(context.Background(), nil, "sum it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Approval == nil || msg.Approval.Code != "print('a\nb')" {
+		t.Fatalf("Approval = %+v, want the still-broken script", msg.Approval)
+	}
+	if n := len(fake.Requests()); n != 2 {
+		t.Errorf("got %d requests, want 2", n)
+	}
+}
+
+func TestGenerate_NoRetryOnTheLastTurn(t *testing.T) {
+	research := geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "cpu"})
+	fake := geminitest.New(t, research, research, geminitest.ApprovalResponse("sum", "print('a\nb')", "python"))
+	c := newClient(fake, gemini.WithSyntaxChecker(fakeChecker("print('a\nb')")))
+
+	msg, err := c.Generate(context.Background(), nil, "sum it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Approval == nil {
+		t.Fatal("Approval = nil, want the script from the last turn")
+	}
+	if n := len(fake.Requests()); n != 3 {
+		t.Errorf("got %d requests, want 3", n)
+	}
+}
+
+func TestPythonSyntaxError(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is not installed")
+	}
+	ctx := context.Background()
+	if got := gemini.PythonSyntaxError(ctx, "python", "print(1)\n"); got != "" {
+		t.Errorf("valid script: %q, want none", got)
+	}
+	// Checking only compiles; running this would exit nonzero.
+	if got := gemini.PythonSyntaxError(ctx, "python", "raise SystemExit(3)\n"); got != "" {
+		t.Errorf("script was run, not just compiled: %q", got)
+	}
+	got := gemini.PythonSyntaxError(ctx, "python", "x = 1\nprint('a\nb')\n")
+	if !strings.Contains(got, "SyntaxError") || !strings.Contains(got, "line 2") {
+		t.Errorf("broken script: %q, want a SyntaxError on line 2", got)
+	}
+	if got := gemini.PythonSyntaxError(ctx, "sh", "if then fi ((("); got != "" {
+		t.Errorf("shell script: %q, want no check", got)
 	}
 }

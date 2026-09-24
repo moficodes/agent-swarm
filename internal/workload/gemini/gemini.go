@@ -77,11 +77,18 @@ func WithResearchDataHandler(h ResearchDataHandler) Option {
 	return func(c *Client) { c.research = h }
 }
 
+// WithSyntaxChecker replaces the check a proposed script gets before it
+// goes to the attendee for approval.
+func WithSyntaxChecker(sc SyntaxChecker) Option {
+	return func(c *Client) { c.checkSyntax = sc }
+}
+
 // Client runs one Gemini turn, including tool calls.
 type Client struct {
-	cfg       Config
-	transport http.RoundTripper
-	research  ResearchDataHandler
+	cfg         Config
+	transport   http.RoundTripper
+	research    ResearchDataHandler
+	checkSyntax SyntaxChecker
 }
 
 // New returns a client whose model calls go through the relay, so Generate
@@ -91,9 +98,10 @@ func New(cfg Config, opts ...Option) *Client {
 		cfg.Model = defaultModel
 	}
 	c := &Client{
-		cfg:       cfg,
-		transport: relay.Transport{},
-		research:  cannedResearchData,
+		cfg:         cfg,
+		transport:   relay.Transport{},
+		research:    cannedResearchData,
+		checkSyntax: PythonSyntaxError,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -113,7 +121,9 @@ func cannedResearchData(string) map[string]any {
 const maxTurns = 3
 
 // Generate runs up to three model turns and returns the assistant message.
-// It returns an error rather than falling back to a mock reply.
+// It returns an error rather than falling back to a mock reply. A proposed
+// script that does not parse goes back to the model once for a fix, so the
+// attendee is not asked to approve code that cannot run.
 func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prompt string) (*types.ChatMessage, error) {
 	if !c.cfg.Enabled() {
 		return nil, ErrDisabled
@@ -131,7 +141,8 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 
 	contents := BuildContents(history, prompt)
 	genCfg := &genai.GenerateContentConfig{Tools: ToolDeclarations()}
-	for range maxTurns {
+	retried := false
+	for turn := range maxTurns {
 		resp, err := sdk.Models.GenerateContent(ctx, c.cfg.Model, contents, genCfg)
 		if err != nil {
 			return nil, fmt.Errorf("gemini: generateContent: %w", err)
@@ -143,6 +154,7 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 
 		var text strings.Builder
 		var approval *types.ApprovalRequest
+		var approvalCall *genai.FunctionCall
 		var research []*genai.FunctionCall
 		for _, part := range cand.Parts {
 			text.WriteString(part.Text)
@@ -152,11 +164,23 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 			switch part.FunctionCall.Name {
 			case "request_human_approval", "execute_sandbox_code":
 				approval = approvalFromCall(part.FunctionCall)
+				approvalCall = part.FunctionCall
 			case "fetch_research_data":
 				research = append(research, part.FunctionCall)
 			}
 		}
 
+		if approval != nil && !retried && turn < maxTurns-1 {
+			if msg := c.checkSyntax(ctx, approval.Language, approval.Code); msg != "" {
+				retried = true
+				contents = append(contents, cand, &genai.Content{Role: "user", Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{Name: approvalCall.Name, Response: map[string]any{
+						"error": "The script does not compile: " + msg + ". Fix it and call " + approvalCall.Name + " again.",
+					}},
+				}}})
+				continue
+			}
+		}
 		if approval != nil {
 			content := text.String()
 			if content == "" {
