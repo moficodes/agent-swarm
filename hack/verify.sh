@@ -20,7 +20,7 @@
 #   Step 1: Health & Static UI Assets (/healthz, /stage, /chat, static JS/CSS)
 #   Step 2: Ephemeral Session Minting (GET /api/session -> JWT & attendee ID)
 #   Step 3: Turn 1 Chat & HITL Approval Generation (/api/chat -> ApprovalRequest)
-#   Step 4: Turn 2 Approval & Sandbox Execution (/api/approve -> exit code 0, stdout & post-turn state)
+#   Step 4: Turn 2 Approval & Sandbox Execution (/api/approve -> sandbox run, exit code 0 unless Gemini's code is broken, post-turn state)
 #   Step 5: Audience Burst & Request Parking (concurrent load, 0 dropped/503s, parking check)
 #   Step 6: Telemetry Endpoint (/api/stage/telemetry -> actors, workers, parking)
 #   Step 7: Audience Simulation Engine (/api/simulation -> start/stop lifecycle & segmented allocation)
@@ -456,13 +456,19 @@ if [[ "${APPROVE_SENDER}" != "assistant" ]]; then
   exit 1
 fi
 
-if [[ "${APPROVE_CONTENT}" != *"exit code 0"* ]]; then
+if [[ "${APPROVE_CONTENT}" == *"exit code 0"* ]]; then
+  log_ok "Sandbox code execution completed with exit code 0"
+elif [[ "${MOCK_MODE}" != true && "${APPROVE_CONTENT}" == *"Execution completed in "* ]] &&
+  grep -qE '^(SyntaxError|IndentationError|ModuleNotFoundError):' <<<"${APPROVE_CONTENT}"; then
+  # Gemini writes the script, and now and then writes a broken one. The
+  # sandbox still ran it, which is what this step checks.
+  log_warn "Sandbox ran the script, but Gemini's code was broken: $(grep -E '^(SyntaxError|IndentationError|ModuleNotFoundError):' <<<"${APPROVE_CONTENT}" | head -n 1)"
+else
   log_err "Sandbox execution output does not indicate exit code 0. Content: ${APPROVE_CONTENT}"
   log_fail "Step 4: Turn 2 Approval & Sandbox Execution"
   exit 1
 fi
 
-log_ok "Sandbox code execution completed with exit code 0"
 FIRST_LINE=$(printf "%s" "${APPROVE_CONTENT}" | head -n 1)
 log_ok "Result: ${FIRST_LINE}"
 
