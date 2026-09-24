@@ -22,8 +22,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorproxy"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorproxy"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {

@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 )
 
 var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY", "ACTOR_COUNT"}

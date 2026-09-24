@@ -24,9 +24,9 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/geminitest"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/modelproxy"
+	"github.com/agent-substrate/agent-swarm/internal/workload/geminitest"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 const goodPath = "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-2.5-flash:generateContent"

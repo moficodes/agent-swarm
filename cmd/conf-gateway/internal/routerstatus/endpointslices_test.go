@@ -24,7 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/routerstatus"
 )
 
 func slice(name, service string, eps ...discoveryv1.Endpoint) *discoveryv1.EndpointSlice {

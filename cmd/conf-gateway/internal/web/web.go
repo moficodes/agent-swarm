@@ -31,7 +31,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/auth"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
 )
 
 const presenterKeyRequiredPage = `<!doctype html>
@@ -132,7 +132,6 @@ func ResolveStaticFS() fs.FS {
 		"static",
 		"../static",
 		"../../static",
-		"demos/conference/cmd/conf-gateway/static",
 		"cmd/conf-gateway/static",
 	}
 	for _, c := range candidates {

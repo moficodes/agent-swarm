@@ -35,7 +35,7 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 const (

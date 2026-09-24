@@ -28,7 +28,7 @@ import (
 // can neither hand the workspace to nobody, manage files in it, nor run
 // scripts as nobody.
 func TestActorTemplateGrantsPrivilegeDrop(t *testing.T) {
-	raw, err := os.ReadFile("../../../conference-template.yaml.tmpl")
+	raw, err := os.ReadFile("../../../manifests/actortemplate.yaml.tmpl")
 	if err != nil {
 		t.Fatal(err)
 	}

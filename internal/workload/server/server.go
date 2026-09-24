@@ -26,10 +26,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/engine"
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/gemini"
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/relay"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/internal/workload/engine"
+	"github.com/agent-substrate/agent-swarm/internal/workload/gemini"
+	"github.com/agent-substrate/agent-swarm/internal/workload/relay"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // ServerOption configures WorkloadServer.

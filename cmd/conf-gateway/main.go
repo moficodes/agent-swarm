@@ -34,10 +34,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/modelproxy"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/routerstatus"
 )
 
 // routerStatusNamespace and routerStatusService identify the atenet-router

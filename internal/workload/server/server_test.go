@@ -26,10 +26,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/gemini"
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/geminitest"
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/server"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/internal/workload/gemini"
+	"github.com/agent-substrate/agent-swarm/internal/workload/geminitest"
+	"github.com/agent-substrate/agent-swarm/internal/workload/server"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 var geminiConfig = gemini.Config{Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}

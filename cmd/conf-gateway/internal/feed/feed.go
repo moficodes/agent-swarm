@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // Log is the action feed: the most recent entries, each updated in place

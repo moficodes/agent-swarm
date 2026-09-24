@@ -21,8 +21,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/auth"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // Claims represents the decoded JWT payload.

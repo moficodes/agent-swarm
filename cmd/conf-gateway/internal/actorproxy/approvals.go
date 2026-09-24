@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // approvals tracks the approval each attendee was last shown and the

@@ -21,9 +21,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/routerstatus"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // fakeStatuszTarget returns a statusz server URL that reports zero parked

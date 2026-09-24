@@ -18,7 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {

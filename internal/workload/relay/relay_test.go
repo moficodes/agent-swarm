@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/relay"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/internal/workload/relay"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // modelTurn runs a turn that makes one model call and replies with the

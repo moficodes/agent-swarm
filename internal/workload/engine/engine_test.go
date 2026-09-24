@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/engine"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/internal/workload/engine"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 func TestSandboxExecutor_Python(t *testing.T) {

@@ -19,7 +19,7 @@ package actorstate
 import (
 	"context"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // Status is one actor as ateapi reports it.

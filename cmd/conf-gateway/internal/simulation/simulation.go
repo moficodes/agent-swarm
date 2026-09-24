@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // SimulationController defines the interface for managing background audience simulations.

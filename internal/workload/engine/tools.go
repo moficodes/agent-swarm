@@ -26,7 +26,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // waitDelay bounds how long Execute waits for output pipes after the child is killed.

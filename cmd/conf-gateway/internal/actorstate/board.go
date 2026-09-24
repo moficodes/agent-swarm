@@ -19,7 +19,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // Board holds the latest view of every actor and publishes each change.

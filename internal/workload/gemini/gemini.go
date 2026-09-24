@@ -27,8 +27,8 @@ import (
 
 	"google.golang.org/genai"
 
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/relay"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/internal/workload/relay"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 const defaultModel = "gemini-2.5-flash"

@@ -29,8 +29,8 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/auth"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 type attendeeContextKey struct{}

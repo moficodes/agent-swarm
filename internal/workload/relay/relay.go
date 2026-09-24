@@ -28,7 +28,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // BaseURL is the base the genai SDK builds request URLs on. Only the path

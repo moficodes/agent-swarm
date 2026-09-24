@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 )
 
 const testPresenterKey = "test-presenter-key"

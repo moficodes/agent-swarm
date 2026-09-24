@@ -26,7 +26,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // Request is one request the fake received.

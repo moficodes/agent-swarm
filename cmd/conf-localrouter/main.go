@@ -24,8 +24,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/internal/localactors"
-	"github.com/agent-substrate/substrate/demos/conference/internal/workload/server"
+	"github.com/agent-substrate/agent-swarm/internal/localactors"
+	"github.com/agent-substrate/agent-swarm/internal/workload/server"
 )
 
 func main() {

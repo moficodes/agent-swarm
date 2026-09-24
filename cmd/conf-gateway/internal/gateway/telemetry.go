@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {

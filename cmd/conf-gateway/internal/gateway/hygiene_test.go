@@ -22,9 +22,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorproxy"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorproxy"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 func TestProxy_DoesNotForwardSecretsToActor(t *testing.T) {

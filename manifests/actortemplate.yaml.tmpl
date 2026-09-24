@@ -20,7 +20,7 @@ workerSelector:
     workload: conference
 containers:
 - name: conf-workload
-  image: ko://github.com/agent-substrate/substrate/demos/conference/cmd/conf-workload
+  image: ko://github.com/agent-substrate/agent-swarm/cmd/conf-workload
   command: ["/ko-app/conf-workload"]
   # The executor runs model-generated code as nobody; handing it the
   # workspace, managing files nobody owns, and switching user need these

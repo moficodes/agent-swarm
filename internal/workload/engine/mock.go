@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // MockEngine provides deterministic offline agent turns for demonstrations without external LLM dependencies.

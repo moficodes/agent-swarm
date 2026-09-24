@@ -20,8 +20,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/simulation"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/simulation"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // SimulationController defines the interface for managing background audience simulations.

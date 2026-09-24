@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // Event is one server-sent event: its name and its JSON body.

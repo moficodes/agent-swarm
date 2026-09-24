@@ -23,7 +23,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // clearRouter holds each history clear until open is called, answering

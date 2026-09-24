@@ -24,7 +24,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // fakeModel answers every call with status 200 and "r-<call ID>".

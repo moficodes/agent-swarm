@@ -21,7 +21,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/routerstatus"
 )
 
 func statusz(t *testing.T, parked int) string {

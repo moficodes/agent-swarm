@@ -23,7 +23,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agent-substrate/substrate/demos/conference/internal/localactors"
+	"github.com/agent-substrate/agent-swarm/internal/localactors"
 )
 
 func echoActor(name string) http.Handler {

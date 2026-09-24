@@ -23,7 +23,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/auth"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
 )
 
 func TestResolveStaticFS_FindsStaticDir(t *testing.T) {

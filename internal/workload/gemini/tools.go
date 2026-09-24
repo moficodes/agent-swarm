@@ -17,7 +17,7 @@ package gemini
 import (
 	"google.golang.org/genai"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // ToolDeclarations returns the tools offered to the model.
