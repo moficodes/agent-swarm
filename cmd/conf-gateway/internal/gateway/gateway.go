@@ -29,22 +29,22 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"mime"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
@@ -59,75 +59,11 @@ const (
 	PresenterHeaderName = "X-Presenter-Key"
 )
 
-// Suspender defines the interface for suspending actors.
-type Suspender interface {
-	SuspendActor(ctx context.Context, atespace, actorID string) error
-}
-
 // SimulationController defines the interface for managing background audience simulations.
 type SimulationController interface {
 	Start(count int) error
 	Stop()
 	Status() (bool, int)
-}
-
-// SuspendFunc adapts a function to the Suspender interface.
-type SuspendFunc func(ctx context.Context, atespace, actorID string) error
-
-// SuspendActor calls the underlying function.
-func (f SuspendFunc) SuspendActor(ctx context.Context, atespace, actorID string) error {
-	return f(ctx, atespace, actorID)
-}
-
-// commandSuspender invokes kubectl-ate to suspend the actor process and snapshot to GCS.
-type commandSuspender struct{}
-
-func (c *commandSuspender) SuspendActor(ctx context.Context, atespace, actorID string) error {
-	var cmd *exec.Cmd
-	if _, err := exec.LookPath("kubectl-ate"); err == nil {
-		cmd = exec.CommandContext(ctx, "kubectl-ate", "suspend", "actor", actorID, "-a", atespace)
-	} else {
-		cmd = exec.CommandContext(ctx, "kubectl", "ate", "suspend", "actor", actorID, "-a", atespace)
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[gateway] suspend actor %s/%s failed: %v (output: %s)", atespace, actorID, err, string(out))
-		return err
-	}
-	return nil
-}
-
-func (c *commandSuspender) getClusterRunningActors(ctx context.Context, atespace string) []string {
-	var cmd *exec.Cmd
-	if _, err := exec.LookPath("kubectl-ate"); err == nil {
-		cmd = exec.CommandContext(ctx, "kubectl-ate", "get", "actors", "-a", atespace, "-o", "json")
-	} else {
-		cmd = exec.CommandContext(ctx, "kubectl", "ate", "get", "actors", "-a", atespace, "-o", "json")
-	}
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	var data struct {
-		Actors []struct {
-			Metadata struct {
-				Name string `json:"name"`
-			} `json:"metadata"`
-			Status struct {
-				State string `json:"state"`
-			} `json:"status"`
-		} `json:"actors"`
-	}
-	if err := json.Unmarshal(out, &data); err != nil {
-		return nil
-	}
-	var res []string
-	for _, a := range data.Actors {
-		if a.Status.State == "ACTOR_STATE_RUNNING" || a.Status.State == "ACTOR_STATE_PAUSED" {
-			res = append(res, a.Metadata.Name)
-		}
-	}
-	return res
 }
 
 // Claims represents the decoded JWT payload.
@@ -158,13 +94,42 @@ func WithSecret(secret string) Option {
 	}
 }
 
-// WithSuspender sets the actor suspender implementation.
-func WithSuspender(s Suspender) Option {
+// WithActorControl reads actor state from, and suspends actors through, c.
+func WithActorControl(c actorstate.ActorControl) Option {
+	return func(g *Gateway) { g.control = c }
+}
+
+// WithPollInterval sets how often actor state is read from ateapi.
+func WithPollInterval(d time.Duration) Option {
 	return func(g *Gateway) {
-		if s != nil {
-			g.suspender = s
+		if d > 0 {
+			g.pollInterval = d
 		}
 	}
+}
+
+// WithSuspendAfter sets how long after a completed turn the gateway suspends
+// the actor. Zero suspends it as soon as the turn completes. Without an
+// ActorControl the gateway never suspends actors.
+func WithSuspendAfter(d time.Duration) Option {
+	return func(g *Gateway) { g.suspendAfter = d }
+}
+
+// UsageSource reports model usage per actor.
+type UsageSource interface {
+	Usage(actor string) types.ModelUsage
+	TotalUsage() types.ModelUsage
+	ResetUsage()
+}
+
+// WithUsage reports model usage from u in telemetry and actor details.
+func WithUsage(u UsageSource) Option {
+	return func(g *Gateway) { g.usage = u }
+}
+
+// WithMockLLM tells the UI that actors are replying without a model.
+func WithMockLLM(on bool) Option {
+	return func(g *Gateway) { g.mockLLM = on }
 }
 
 // WithStatusInterval sets the polling interval for the statusz endpoint.
@@ -227,18 +192,24 @@ type Gateway struct {
 	atespace       string
 	secret         string
 	presenterKey   string
-	suspender      Suspender
 	statusInterval time.Duration
 	httpClient     *http.Client
 	staticFS       fs.FS
 	maxActors      int
 	broker         *EventBroker
 
+	control      actorstate.ActorControl
+	board        *actorstate.Board
+	pollInterval time.Duration
+	suspendAfter time.Duration
+	usage        UsageSource
+	mockLLM      bool
+	statePollMs  atomic.Int64
+
 	mux              *http.ServeMux
 	proxy            *httputil.ReverseProxy
 	attendeeSeq      uint64
 	mu               sync.RWMutex
-	activeActors     map[string]types.ActorLifecycleState
 	pendingApprovals map[string]*types.ApprovalRequest
 	// approvalsInFlight holds the approval ID each attendee is currently
 	// forwarding, so a second copy of the same decision cannot run concurrently.
@@ -249,7 +220,13 @@ type Gateway struct {
 	recentEvents      []string
 	actionFeed        []types.ActionLogEntry
 	parkedCount       int
+	parkingOK         bool
 	simController     SimulationController
+	// suspendTimers holds each attendee's pending auto-suspend when
+	// suspendAfter is positive. Each pending timer holds one wg count.
+	suspendTimers map[string]*time.Timer
+	// closed is set by Close; no background work starts after it.
+	closed bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -262,12 +239,11 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		routerURL:         routerURL,
 		statusURL:         statusURL,
 		atespace:          "ate-demo-conf",
-		suspender:         &commandSuspender{},
 		statusInterval:    500 * time.Millisecond,
+		pollInterval:      time.Second,
 		httpClient:        &http.Client{Timeout: 5 * time.Second},
 		broker:            NewEventBroker(),
 		mux:               http.NewServeMux(),
-		activeActors:      make(map[string]types.ActorLifecycleState),
 		pendingApprovals:  make(map[string]*types.ApprovalRequest),
 		approvalsInFlight: make(map[string]string),
 		chatHistories:     make(map[string][]types.ChatMessage),
@@ -275,6 +251,7 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		currentActionID:   make(map[string]string),
 		recentEvents:      make([]string, 0),
 		actionFeed:        make([]types.ActionLogEntry, 0),
+		suspendTimers:     make(map[string]*time.Timer),
 		maxActors:         50,
 	}
 
@@ -321,9 +298,8 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		ModifyResponse: gw.modifyResponse,
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			attendeeID, _ := req.Context().Value(attendeeContextKey{}).(string)
-			gw.setActorState(attendeeID, types.LifecycleSuspended)
 			if attendeeID != "" {
-				gw.BroadcastStateChange(attendeeID, types.LifecycleSuspended, "Suspended", "Proxy error - suspended to GCS")
+				gw.setActivity(attendeeID, types.ActivityIdle)
 			}
 			gw.mu.Lock()
 			if attendeeID != "" {
@@ -340,16 +316,28 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 
 	gw.routes()
 
+	gw.board = actorstate.NewBoard(gw.publishView)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	gw.ctx = ctx
 	gw.cancel = cancel
 	gw.wg.Add(1)
 	go gw.pollStatus(ctx)
+	if gw.control != nil {
+		gw.wg.Add(1)
+		go func() {
+			defer gw.wg.Done()
+			actorstate.Poll(ctx, gw.control, gw.pollInterval, gw.board, func(d time.Duration, _ error) {
+				gw.statePollMs.Store(d.Milliseconds())
+			})
+		}()
+	}
 
 	return gw
 }
 
-// Close gracefully stops the background polling routine.
+// Close stops background work, including pending auto-suspends, and waits
+// for any suspend already running to finish.
 func (g *Gateway) Close() {
 	g.mu.Lock()
 	sc := g.simController
@@ -358,9 +346,111 @@ func (g *Gateway) Close() {
 		sc.Stop()
 	}
 
-	if g.cancel != nil {
-		g.cancel()
-		g.wg.Wait()
+	g.mu.Lock()
+	g.closed = true
+	for name, t := range g.suspendTimers {
+		if t.Stop() {
+			g.wg.Done()
+		}
+		delete(g.suspendTimers, name)
+	}
+	g.mu.Unlock()
+
+	g.cancel()
+	g.wg.Wait()
+}
+
+const localModeReason = "local mode: no ateapi"
+
+// setActivity records activity; in local mode it also marks the state
+// unavailable, since there is no ateapi to read it from.
+func (g *Gateway) setActivity(attendee string, a types.Activity) {
+	g.board.SetActivity(attendee, a)
+	if g.control == nil {
+		g.board.SetUnavailable(localModeReason)
+	}
+}
+
+// publishView sends a changed view to that attendee's SSE subscribers. It
+// runs inside Board updates, so it must not read the Board.
+func (g *Gateway) publishView(v types.ActorView) {
+	g.sendToAttendee(v.ActorID, "actor_view", v)
+}
+
+// sendToAttendee sends one SSE event to every subscriber of an attendee.
+func (g *Gateway) sendToAttendee(attendee, event string, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[gateway] encoding %s event: %v", event, err)
+		return
+	}
+	g.broker.Publish(attendee, sseEvent{event: event, data: data})
+}
+
+// broadcastAll sends one SSE event to every attendee subscriber and signals
+// every action stream subscriber.
+func (g *Gateway) broadcastAll(event string, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[gateway] encoding %s event: %v", event, err)
+		return
+	}
+	g.broker.PublishAll(sseEvent{event: event, data: data})
+}
+
+// ActorView returns the current view of one attendee's actor.
+func (g *Gateway) ActorView(attendee string) (types.ActorView, bool) {
+	return g.board.View(attendee)
+}
+
+// currentView returns the attendee's view, or a placeholder for an actor
+// the gateway has not seen yet.
+func (g *Gateway) currentView(attendee string) types.ActorView {
+	if v, ok := g.board.View(attendee); ok {
+		return v
+	}
+	if g.control == nil {
+		return types.ActorView{ActorID: attendee, State: types.StateUnavailable, StateDetail: localModeReason}
+	}
+	return types.ActorView{ActorID: attendee, State: types.StateUnknown}
+}
+
+// suspendAfterTurn suspends the attendee's actor once its turn completes:
+// right away when suspendAfter is zero, or after suspendAfter of idleness.
+func (g *Gateway) suspendAfterTurn(attendee string) {
+	if g.control == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return
+	}
+	g.wg.Add(1)
+	if g.suspendAfter <= 0 {
+		go func() {
+			defer g.wg.Done()
+			g.suspendActor(attendee)
+		}()
+		return
+	}
+	if t, ok := g.suspendTimers[attendee]; ok && t.Stop() {
+		g.wg.Done()
+	}
+	g.suspendTimers[attendee] = time.AfterFunc(g.suspendAfter, func() {
+		defer g.wg.Done()
+		g.suspendActor(attendee)
+	})
+}
+
+func (g *Gateway) suspendActor(attendee string) {
+	ctx, cancel := context.WithTimeout(g.ctx, 30*time.Second)
+	defer cancel()
+	if err := g.control.Suspend(ctx, attendee); err != nil {
+		log.Printf("[gateway] auto-suspend %s: %v", attendee, err)
+		g.mu.Lock()
+		g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendee, err))
+		g.mu.Unlock()
 	}
 }
 
@@ -574,12 +664,12 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	token := g.MintToken(attendeeID)
 
-	g.mu.Lock()
-	if _, exists := g.activeActors[attendeeID]; !exists {
-		g.activeActors[attendeeID] = types.LifecycleSuspended
+	if _, exists := g.board.View(attendeeID); !exists {
+		g.setActivity(attendeeID, types.ActivityIdle)
+		g.mu.Lock()
 		g.addEventLocked(fmt.Sprintf("Provisioned session for %s", attendeeID))
+		g.mu.Unlock()
 	}
-	g.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
@@ -601,53 +691,36 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.mu.RLock()
-	actorsCopy := make(map[string]types.ActorLifecycleState, len(g.activeActors))
-	var runningActors []string
-	var parkedActorsCount int
-	for k, v := range g.activeActors {
-		actorsCopy[k] = v
-		if v == types.LifecycleRunning || v == types.LifecycleRunningGVisor {
-			runningActors = append(runningActors, k)
-		} else if v == types.LifecycleParked || v == types.LifecycleParkedEnvoy {
-			parkedActorsCount++
+	views := g.board.Views()
+	names := slices.Sorted(maps.Keys(views))
+	var workers []types.WorkerStatus
+	seenPods := make(map[string]bool)
+	for _, name := range names {
+		v := views[name]
+		if v.WorkerPod == "" || seenPods[v.WorkerPod] {
+			continue
 		}
+		seenPods[v.WorkerPod] = true
+		workers = append(workers, types.WorkerStatus{PodName: v.WorkerPod, ActiveActor: v.ActorID, State: v.State})
 	}
-	eventsCopy := make([]string, len(g.recentEvents))
-	copy(eventsCopy, g.recentEvents)
-	parked := g.parkedCount
-	if parkedActorsCount > parked {
-		parked = parkedActorsCount
-	}
+	slices.SortFunc(workers, func(a, b types.WorkerStatus) int { return strings.Compare(a.PodName, b.PodName) })
+
+	g.mu.RLock()
+	eventsCopy := slices.Clone(g.recentEvents)
+	parked, parkingOK := g.parkedCount, g.parkingOK
 	g.mu.RUnlock()
 
-	sort.Strings(runningActors)
-
-	workers := make([]types.WorkerStatus, 2)
-	for i := 0; i < 2; i++ {
-		podName := fmt.Sprintf("conf-workers-%d", i)
-		if i < len(runningActors) {
-			workers[i] = types.WorkerStatus{
-				PodName:     podName,
-				ActiveActor: runningActors[i],
-				CurrentTask: "gVisor execution",
-				ElapsedMs:   120,
-			}
-		} else {
-			workers[i] = types.WorkerStatus{
-				PodName:     podName,
-				ActiveActor: "idle",
-				CurrentTask: "Waiting for actor dispatch",
-				ElapsedMs:   0,
-			}
-		}
-	}
-
 	telem := types.StageTelemetry{
-		ParkedRequests: parked,
-		Workers:        workers,
-		Actors:         actorsCopy,
-		RecentEvents:   eventsCopy,
+		ParkedRequests:   parked,
+		ParkingAvailable: parkingOK,
+		Workers:          workers,
+		Actors:           views,
+		RecentEvents:     eventsCopy,
+		MockLLM:          g.mockLLM,
+		StatePollMs:      g.statePollMs.Load(),
+	}
+	if g.usage != nil {
+		telem.ModelUsage = g.usage.TotalUsage()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -681,6 +754,11 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribe before the client sees 200 so no view published after that
+	// is missed.
+	ch := g.broker.Subscribe(attendeeID)
+	defer g.broker.Unsubscribe(attendeeID, ch)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -688,22 +766,8 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ch := g.broker.Subscribe(attendeeID)
-	defer g.broker.Unsubscribe(attendeeID, ch)
-
-	currentState, exists := g.GetActorState(attendeeID)
-	if !exists {
-		currentState = types.LifecycleSuspended
-	}
-	initialEvent := types.StateChangeEvent{
-		AttendeeID: attendeeID,
-		State:      currentState,
-		Label:      stateToLabel(currentState),
-		Subtext:    stateToSubtext(currentState),
-		Timestamp:  time.Now().Unix(),
-	}
-	if initData, err := json.Marshal(initialEvent); err == nil {
-		if _, err := fmt.Fprintf(w, "event: state_change\ndata: %s\n\n", initData); err != nil {
+	if initData, err := json.Marshal(g.currentView(attendeeID)); err == nil {
+		if _, err := fmt.Fprintf(w, "event: actor_view\ndata: %s\n\n", initData); err != nil {
 			return
 		}
 		flusher.Flush()
@@ -718,11 +782,7 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			data, err := json.Marshal(event)
-			if err != nil {
-				continue
-			}
-			if _, err := fmt.Fprintf(w, "event: state_change\ndata: %s\n\n", data); err != nil {
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.event, event.data); err != nil {
 				return
 			}
 			flusher.Flush()
@@ -804,36 +864,6 @@ func (g *Gateway) handleActionStream(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		}
-	}
-}
-
-func stateToLabel(state types.ActorLifecycleState) string {
-	switch state {
-	case types.LifecycleThinkingVertexAI:
-		return "🧠 Reasoning on Vertex AI..."
-	case types.LifecycleAwaitingApproval:
-		return "⏸️ Awaiting Approval"
-	case types.LifecycleParked, types.LifecycleParkedEnvoy:
-		return "⏳ Parked in Envoy Buffer"
-	case types.LifecycleRunning, types.LifecycleRunningGVisor:
-		return "🚀 Running in Sandbox"
-	default:
-		return "⚡ Suspended in GCS"
-	}
-}
-
-func stateToSubtext(state types.ActorLifecycleState) string {
-	switch state {
-	case types.LifecycleThinkingVertexAI:
-		return "Gemini 2.5 Flash generating analysis script"
-	case types.LifecycleAwaitingApproval:
-		return "Process frozen in GCS (0 MB RAM used)"
-	case types.LifecycleParked, types.LifecycleParkedEnvoy:
-		return "Queued in Envoy L7 buffer — waiting for worker slot..."
-	case types.LifecycleRunning, types.LifecycleRunningGVisor:
-		return "Executing script inside gVisor container"
-	default:
-		return "Process snapshot written to GCS — 0 vCPU, 0 RAM"
 	}
 }
 
@@ -950,7 +980,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 					AttendeeID: attendeeID,
 					Timestamp:  time.Now().Unix(),
 					Prompt:     chatReq.Message,
-					State:      types.LifecycleRunning,
+					Activity:   types.ActivityThinking,
 				})
 			}
 		}
@@ -966,7 +996,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		if actionID == "" {
 			actionID = fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano())
 		}
-		g.RecordActionEntry(types.ActionLogEntry{
+		entry := types.ActionLogEntry{
 			ID:         actionID,
 			AttendeeID: attendeeID,
 			Timestamp:  time.Now().Unix(),
@@ -974,44 +1004,26 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 			Decision:   apprReq.Decision,
 			Code:       apprReq.Code,
 			Language:   apprReq.Language,
-			State:      types.LifecycleRunningGVisor,
-			WorkerPod:  "conf-workers-0",
-		})
+			WorkerPod:  g.currentView(attendeeID).WorkerPod,
+		}
+		if apprReq.Decision == types.DecisionApprove {
+			entry.Activity = types.ActivityExecuting
+			g.setActivity(attendeeID, types.ActivityExecuting)
+		}
+		g.RecordActionEntry(entry)
+	}
+	if r.URL.Path != "/api/approve" {
+		g.setActivity(attendeeID, types.ActivityThinking)
 	}
 
 	g.mu.Lock()
-	if r.URL.Path == "/api/approve" {
-		g.activeActors[attendeeID] = types.LifecycleRunningGVisor
-	} else {
-		g.activeActors[attendeeID] = types.LifecycleRunning
-	}
 	g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
 	g.mu.Unlock()
-
-	if r.URL.Path == "/api/approve" {
-		g.BroadcastStateChange(attendeeID, types.LifecycleRunningGVisor, "Running in Sandbox", "Executing in gVisor sandbox")
-	} else {
-		g.BroadcastStateChange(attendeeID, types.LifecycleRunning, "Running", "Executing request")
-	}
 
 	ctx := context.WithValue(r.Context(), attendeeContextKey{}, attendeeID)
 	outReq := r.WithContext(ctx)
 
 	g.proxy.ServeHTTP(w, outReq)
-}
-
-// SetActorState sets the lifecycle state of an actor.
-func (g *Gateway) SetActorState(attendeeID string, state types.ActorLifecycleState) {
-	if attendeeID == "" {
-		return
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.activeActors[attendeeID] = state
-}
-
-func (g *Gateway) setActorState(attendeeID string, state types.ActorLifecycleState) {
-	g.SetActorState(attendeeID, state)
 }
 
 // GetLastResult returns the most recent execution result for an actor.
@@ -1039,34 +1051,6 @@ func (g *Gateway) SetLastResult(attendeeID string, res *types.ExecutionResult) {
 	}
 	copyRes := *res
 	g.lastResults[attendeeID] = &copyRes
-}
-
-// GetActorState returns the lifecycle state of an actor.
-func (g *Gateway) GetActorState(attendeeID string) (types.ActorLifecycleState, bool) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	st, ok := g.activeActors[attendeeID]
-	return st, ok
-}
-
-// BroadcastStateChange publishes an actor lifecycle transition to subscribers and updates active state.
-func (g *Gateway) BroadcastStateChange(attendeeID string, state types.ActorLifecycleState, label, subtext string) {
-	if attendeeID == "" {
-		return
-	}
-	g.mu.Lock()
-	g.activeActors[attendeeID] = state
-	g.mu.Unlock()
-
-	if g.broker != nil {
-		g.broker.Publish(types.StateChangeEvent{
-			AttendeeID: attendeeID,
-			State:      state,
-			Label:      label,
-			Subtext:    subtext,
-			Timestamp:  time.Now().Unix(),
-		})
-	}
 }
 
 // SubscriberCount returns the current number of active SSE subscribers for an attendee.
@@ -1132,8 +1116,10 @@ func (g *Gateway) RecordActionEntry(entry types.ActionLogEntry) {
 			if entry.WorkerPod != "" {
 				merged.WorkerPod = entry.WorkerPod
 			}
-			if entry.State != "" {
-				merged.State = entry.State
+			// Each entry records the activity the actor moved to, idle included.
+			merged.Activity = entry.Activity
+			if entry.Source != "" {
+				merged.Source = entry.Source
 			}
 			g.actionFeed[i] = merged
 			entry = merged
@@ -1171,8 +1157,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	}
 
 	if resp.StatusCode >= 400 {
-		g.setActorState(attendeeID, types.LifecycleSuspended)
-		g.BroadcastStateChange(attendeeID, types.LifecycleSuspended, "Suspended", "Error response - suspended to GCS")
+		g.setActivity(attendeeID, types.ActivityIdle)
 		return nil
 	}
 
@@ -1195,6 +1180,16 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		}
 	}
 
+	if hasChatMsg {
+		g.board.SetSource(attendeeID, chatMsg.Source)
+		if isWaitingForApproval {
+			g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+		} else {
+			g.setActivity(attendeeID, types.ActivityIdle)
+		}
+	}
+	workerPod := g.currentView(attendeeID).WorkerPod
+
 	var newExec types.ExecutionResult
 	hasNewExec := hasChatMsg && chatMsg.Execution != nil
 	if hasNewExec {
@@ -1213,7 +1208,6 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 
 	if isWaitingForApproval {
 		g.mu.Lock()
-		g.activeActors[attendeeID] = types.LifecycleAwaitingApproval
 		g.pendingApprovals[attendeeID] = chatMsg.Approval
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
 			history := g.chatHistories[attendeeID]
@@ -1224,7 +1218,6 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.addEventLocked(fmt.Sprintf("Actor %s awaiting human approval", attendeeID))
 		g.mu.Unlock()
 
-		g.BroadcastStateChange(attendeeID, types.LifecycleAwaitingApproval, "Awaiting Approval", "Awaiting human approval")
 		g.RecordActionEntry(types.ActionLogEntry{
 			ID:            actionID,
 			AttendeeID:    attendeeID,
@@ -1234,12 +1227,13 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 			Language:      chatMsg.Approval.Language,
 			RiskLevel:     chatMsg.Approval.RiskLevel,
 			ApprovalID:    chatMsg.Approval.ApprovalID,
-			State:         types.LifecycleAwaitingApproval,
+			WorkerPod:     workerPod,
+			Activity:      types.ActivityAwaitingApproval,
+			Source:        chatMsg.Source,
 		})
-		g.asyncSuspendActor(attendeeID)
+		g.suspendAfterTurn(attendeeID)
 	} else if resp.StatusCode == http.StatusOK {
 		g.mu.Lock()
-		g.activeActors[attendeeID] = types.LifecycleSuspended
 		delete(g.pendingApprovals, attendeeID)
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
 			history := g.chatHistories[attendeeID]
@@ -1247,18 +1241,17 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 				g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], chatMsg)
 			}
 		}
-		g.addEventLocked(fmt.Sprintf("Actor %s completed turn - suspended to GCS", attendeeID))
+		g.addEventLocked(fmt.Sprintf("Actor %s completed turn", attendeeID))
 		g.mu.Unlock()
 
-		g.BroadcastStateChange(attendeeID, types.LifecycleSuspended, "Suspended", "Turn completed - suspended to GCS")
 		if hasNewExec {
 			entry := types.ActionLogEntry{
 				ID:         actionID,
 				AttendeeID: attendeeID,
 				Timestamp:  time.Now().Unix(),
 				Execution:  &newExec,
-				WorkerPod:  "conf-workers-0",
-				State:      types.LifecycleSuspended,
+				WorkerPod:  workerPod,
+				Source:     chatMsg.Source,
 			}
 			if hasChatMsg && chatMsg.Content != "" {
 				entry.ModelResponse = chatMsg.Content
@@ -1270,10 +1263,11 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 				AttendeeID:    attendeeID,
 				Timestamp:     time.Now().Unix(),
 				ModelResponse: chatMsg.Content,
-				State:         types.LifecycleSuspended,
+				WorkerPod:     workerPod,
+				Source:        chatMsg.Source,
 			})
 		}
-		g.asyncSuspendActor(attendeeID)
+		g.suspendAfterTurn(attendeeID)
 	}
 
 	return nil
@@ -1292,12 +1286,9 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.mu.RLock()
-	state, exists := g.activeActors[actorID]
-	if !exists {
-		state = types.LifecycleSuspended
-	}
+	view := g.currentView(actorID)
 
+	g.mu.RLock()
 	var history []types.ChatMessage
 	if h, ok := g.chatHistories[actorID]; ok && len(h) > 0 {
 		history = make([]types.ChatMessage, len(h))
@@ -1317,28 +1308,16 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 		copyLR := *lr
 		lastResult = &copyLR
 	}
-
-	var workerPod string
-	var snapshotLoc string
-	var snapshotSize int64
-
-	if state == types.LifecycleRunning || state == types.LifecycleRunningGVisor || state == types.LifecycleThinkingVertexAI {
-		workerPod = "conf-workers-0"
-	} else {
-		snapshotLoc = fmt.Sprintf("gs://conf-demo-bucket/%s/actors/%s.snap", g.atespace, actorID)
-		snapshotSize = 384000
-	}
 	g.mu.RUnlock()
 
 	details := types.ActorDetails{
-		ActorID:           actorID,
-		State:             state,
-		WorkerPod:         workerPod,
-		SnapshotLocation:  snapshotLoc,
-		SnapshotSizeBytes: snapshotSize,
-		ChatHistory:       history,
-		PendingApproval:   pendingApproval,
-		LastResult:        lastResult,
+		ActorView:       view,
+		ChatHistory:     history,
+		PendingApproval: pendingApproval,
+		LastResult:      lastResult,
+	}
+	if g.usage != nil {
+		details.Usage = g.usage.Usage(actorID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1366,81 +1345,57 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 		sc.Stop()
 	}
 
-	g.mu.Lock()
-	var actorsToSuspend []string
-	for id, st := range g.activeActors {
-		if st != types.LifecycleSuspended {
-			actorsToSuspend = append(actorsToSuspend, id)
+	var toSuspend []string
+	for name, v := range g.board.Views() {
+		if v.State == types.StateRunning || v.State == types.StateResuming {
+			toSuspend = append(toSuspend, name)
 		}
-		g.activeActors[id] = types.LifecycleSuspended
 	}
-	sort.Strings(actorsToSuspend)
+	slices.Sort(toSuspend)
 
+	g.mu.Lock()
 	g.pendingApprovals = make(map[string]*types.ApprovalRequest)
 	g.chatHistories = make(map[string][]types.ChatMessage)
 	g.lastResults = make(map[string]*types.ExecutionResult)
 	g.currentActionID = make(map[string]string)
 	g.actionFeed = make([]types.ActionLogEntry, 0)
-	g.addEventLocked("Cluster reset: all actors suspended to GCS, worker pods freed")
+	g.addEventLocked("Stage reset: chats cleared, running actors suspended")
 	g.mu.Unlock()
 
-	if g.broker != nil {
-		g.broker.PublishReset()
+	g.board.Reset()
+	if g.usage != nil {
+		g.usage.ResetUsage()
 	}
+	g.broadcastAll("reset", struct{}{})
 
-	// Also sweep cluster for any running actors if commandSuspender is used
-	if cmdSusp, ok := g.suspender.(*commandSuspender); ok {
-		sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		clusterRunning := cmdSusp.getClusterRunningActors(sweepCtx, g.atespace)
-		sweepCancel()
-		for _, name := range clusterRunning {
-			found := false
-			for _, id := range actorsToSuspend {
-				if id == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				actorsToSuspend = append(actorsToSuspend, name)
-			}
-		}
-		sort.Strings(actorsToSuspend)
-	}
-
-	if g.suspender != nil && len(actorsToSuspend) > 0 {
-		baseCtx := g.ctx
-		if baseCtx == nil {
-			baseCtx = context.Background()
-		}
-		ctx, cancel := context.WithTimeout(baseCtx, 5*time.Second)
+	var failed atomic.Int64
+	if g.control != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-
+		sem := make(chan struct{}, 8)
 		var wg sync.WaitGroup
-		for _, id := range actorsToSuspend {
+		for _, name := range toSuspend {
 			wg.Add(1)
-			go func(actorID string) {
-				defer wg.Done()
-				if err := g.suspender.SuspendActor(ctx, g.atespace, actorID); err != nil {
+			sem <- struct{}{}
+			go func() {
+				defer func() { <-sem; wg.Done() }()
+				if err := g.control.Suspend(ctx, name); err != nil {
+					log.Printf("[gateway] reset: suspend %s: %v", name, err)
+					failed.Add(1)
 					g.mu.Lock()
-					g.addEventLocked(fmt.Sprintf("Warning: reset suspend actor %s failed: %v", actorID, err))
+					g.addEventLocked(fmt.Sprintf("Warning: reset suspend actor %s failed: %v", name, err))
 					g.mu.Unlock()
 				}
-			}(id)
+			}()
 		}
 		wg.Wait()
 	}
 
-	for _, id := range actorsToSuspend {
-		g.BroadcastStateChange(id, types.LifecycleSuspended, "Suspended", "Cluster reset - suspended to GCS")
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":       "ok",
-		"message":      "Cluster reset: all actors suspended and memory cleared",
-		"actors_reset": len(actorsToSuspend),
+		"status":         "ok",
+		"actors_reset":   len(toSuspend),
+		"suspend_errors": failed.Load(),
 	})
 }
 
@@ -1561,27 +1516,6 @@ func (g *Gateway) handleSimulation(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-func (g *Gateway) asyncSuspendActor(attendeeID string) {
-	if g.suspender == nil || attendeeID == "" {
-		return
-	}
-	g.wg.Add(1)
-	go func() {
-		defer g.wg.Done()
-		baseCtx := g.ctx
-		if baseCtx == nil {
-			baseCtx = context.Background()
-		}
-		ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
-		defer cancel()
-		if err := g.suspender.SuspendActor(ctx, g.atespace, attendeeID); err != nil {
-			g.mu.Lock()
-			g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendeeID, err))
-			g.mu.Unlock()
-		}
-	}()
 }
 
 func (g *Gateway) authenticateRequest(r *http.Request) (string, error) {
@@ -1732,6 +1666,7 @@ func (g *Gateway) fetchStatus(ctx context.Context) {
 	if err := json.NewDecoder(resp.Body).Decode(&sz); err == nil {
 		g.mu.Lock()
 		g.parkedCount = sz.Parking.Active
+		g.parkingOK = true
 		g.mu.Unlock()
 	}
 }

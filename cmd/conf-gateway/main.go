@@ -32,6 +32,7 @@ import (
 
 	"golang.org/x/oauth2/google"
 
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 )
@@ -47,9 +48,21 @@ type Config struct {
 	HMACSecret   string
 	PresenterKey string
 	Atespace     string
-	// SuspendMode selects how actors are suspended after a turn: empty for
-	// kubectl-ate, or "noop" for local runs with no cluster.
-	SuspendMode string
+
+	// ATEAPIEndpoint is passed to kubectl-ate; empty uses its own default.
+	ATEAPIEndpoint string
+	// KubectlATE is the kubectl-ate binary used to read and suspend actors.
+	KubectlATE string
+	// StatePollInterval is how often actor state is read from ateapi.
+	StatePollInterval time.Duration
+	// SuspendAfter is how long after a turn an actor is suspended; zero
+	// suspends it as soon as the turn completes.
+	SuspendAfter time.Duration
+	// MockLLM tells the UI that actors reply without a model.
+	MockLLM bool
+	// LocalMode runs without ateapi: actor state shows as unavailable and
+	// nothing is suspended.
+	LocalMode bool
 
 	// ModelProxyAddr is the listen address for actor model calls.
 	ModelProxyAddr string
@@ -91,19 +104,44 @@ func LoadConfig() Config {
 		vertexLocation = "us-central1"
 	}
 
-	return Config{
-		Port:           port,
-		RouterURL:      routerURL,
-		StatusURL:      statusURL,
-		HMACSecret:     hmacSecret,
-		PresenterKey:   presenterKey,
-		Atespace:       atespace,
-		SuspendMode:    os.Getenv("SUSPEND_MODE"),
-		ModelProxyAddr: modelProxyAddr,
-		VertexProject:  os.Getenv("VERTEX_PROJECT"),
-		VertexLocation: vertexLocation,
-		ModelAllowlist: splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
+	kubectlATE := os.Getenv("KUBECTL_ATE")
+	if kubectlATE == "" {
+		kubectlATE = "kubectl-ate"
 	}
+
+	return Config{
+		Port:              port,
+		RouterURL:         routerURL,
+		StatusURL:         statusURL,
+		HMACSecret:        hmacSecret,
+		PresenterKey:      presenterKey,
+		Atespace:          atespace,
+		ATEAPIEndpoint:    os.Getenv("ATEAPI_ENDPOINT"),
+		KubectlATE:        kubectlATE,
+		StatePollInterval: envDuration("STATE_POLL_INTERVAL", time.Second),
+		SuspendAfter:      envDuration("SUSPEND_AFTER", 0),
+		MockLLM:           os.Getenv("DEMO_MOCK_LLM") == "true",
+		LocalMode:         os.Getenv("LOCAL_MODE") == "true",
+		ModelProxyAddr:    modelProxyAddr,
+		VertexProject:     os.Getenv("VERTEX_PROJECT"),
+		VertexLocation:    vertexLocation,
+		ModelAllowlist:    splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
+	}
+}
+
+// envDuration parses the named variable as a duration. It returns def when
+// the variable is unset, or, with a log line, when it is invalid or negative.
+func envDuration(name string, def time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		log.Printf("invalid %s %q; using %s", name, v, def)
+		return def
+	}
+	return d
 }
 
 // splitList splits a comma-separated list, trimming whitespace and dropping
@@ -122,20 +160,6 @@ func splitList(s, def string) []string {
 		return []string{def}
 	}
 	return out
-}
-
-// suspenderOptions returns the gateway options for a SUSPEND_MODE value.
-func suspenderOptions(mode string) ([]gateway.Option, error) {
-	switch mode {
-	case "":
-		return nil, nil
-	case "noop":
-		return []gateway.Option{gateway.WithSuspender(gateway.SuspendFunc(func(context.Context, string, string) error {
-			return nil
-		}))}, nil
-	default:
-		return nil, fmt.Errorf("unknown SUSPEND_MODE %q (want empty or \"noop\")", mode)
-	}
 }
 
 // resolveSecret returns s, or a random secret when s is empty.
@@ -174,11 +198,6 @@ func newModelProxy(ctx context.Context, cfg Config, secret []byte) (*modelproxy.
 func main() {
 	cfg := LoadConfig()
 
-	suspendOpts, err := suspenderOptions(cfg.SuspendMode)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -199,9 +218,17 @@ func main() {
 		gateway.WithAtespace(cfg.Atespace),
 		gateway.WithSecret(secret),
 		gateway.WithPresenterKey(cfg.PresenterKey),
+		gateway.WithPollInterval(cfg.StatePollInterval),
+		gateway.WithSuspendAfter(cfg.SuspendAfter),
+		gateway.WithUsage(proxy),
+		gateway.WithMockLLM(cfg.MockLLM || !proxy.Enabled()),
 		gateway.WithStaticFS(staticFS),
 	}
-	opts = append(opts, suspendOpts...)
+	if cfg.LocalMode {
+		log.Printf("LOCAL_MODE=true; actor state is not read from ateapi and actors are never suspended.")
+	} else {
+		opts = append(opts, gateway.WithActorControl(actorstate.NewKubectlATE(cfg.KubectlATE, cfg.ATEAPIEndpoint, cfg.Atespace)))
+	}
 
 	gw := gateway.NewGateway(cfg.RouterURL, cfg.StatusURL, opts...)
 	defer gw.Close()

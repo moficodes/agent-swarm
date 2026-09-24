@@ -109,27 +109,6 @@ type ActorView struct {
 	Source       ReplySource    `json:"source,omitempty"`
 }
 
-// ActorLifecycleState represents the lifecycle phase of an interactive agent actor.
-type ActorLifecycleState string
-
-const (
-	// LifecycleSuspended indicates the actor process is frozen to storage consuming 0 compute.
-	LifecycleSuspended ActorLifecycleState = "SUSPENDED"
-	// LifecycleParked indicates the request is waiting in Envoy's L7 request parking queue.
-	LifecycleParked ActorLifecycleState = "PARKED"
-	// LifecycleRunning indicates the actor is currently scheduled and running on a worker pod.
-	LifecycleRunning ActorLifecycleState = "RUNNING"
-	// LifecycleAwaitingApproval indicates the actor is paused awaiting human operator signoff.
-	LifecycleAwaitingApproval ActorLifecycleState = "AWAITING_APPROVAL"
-
-	// LifecycleThinkingVertexAI indicates Gemini on Vertex AI is actively reasoning on the prompt.
-	LifecycleThinkingVertexAI ActorLifecycleState = "THINKING_VERTEX_AI"
-	// LifecycleParkedEnvoy indicates the request is explicitly held in Envoy ext_proc buffer.
-	LifecycleParkedEnvoy ActorLifecycleState = "PARKED_ENVOY"
-	// LifecycleRunningGVisor indicates the code is executing inside the gVisor sandbox container.
-	LifecycleRunningGVisor ActorLifecycleState = "RUNNING_GVISOR"
-)
-
 // ApprovalRequest contains the details and security context of an execution requiring approval.
 type ApprovalRequest struct {
 	ApprovalID string    `json:"approval_id"`
@@ -185,32 +164,32 @@ type ExecutionResult struct {
 	DurationMs int64  `json:"duration_ms"`
 }
 
-// StageTelemetry represents the operational status of the cluster and running actors.
+// StageTelemetry is the stage view of the router, workers and actors.
 type StageTelemetry struct {
-	ParkedRequests int                            `json:"parked_requests"`
-	Workers        []WorkerStatus                 `json:"workers"`
-	Actors         map[string]ActorLifecycleState `json:"actors"`
-	RecentEvents   []string                       `json:"recent_events"`
+	ParkedRequests   int                  `json:"parked_requests"`
+	ParkingAvailable bool                 `json:"parking_available"`
+	Workers          []WorkerStatus       `json:"workers"`
+	Actors           map[string]ActorView `json:"actors"`
+	RecentEvents     []string             `json:"recent_events"`
+	MockLLM          bool                 `json:"mock_llm"`
+	ModelUsage       ModelUsage           `json:"model_usage"`
+	StatePollMs      int64                `json:"state_poll_ms"`
 }
 
-// WorkerStatus represents the real-time execution state of a worker pod.
+// WorkerStatus is one worker pod and the actor ateapi reports running on it.
 type WorkerStatus struct {
-	PodName     string `json:"pod_name"`
-	ActiveActor string `json:"active_actor"`
-	CurrentTask string `json:"current_task"`
-	ElapsedMs   int64  `json:"elapsed_ms"`
+	PodName     string         `json:"pod_name"`
+	ActiveActor string         `json:"active_actor"`
+	State       SubstrateState `json:"state"`
 }
 
-// ActorDetails provides a full snapshot of an actor's current state and telemetry for the inspector drawer.
+// ActorDetails is everything the inspector drawer shows about one actor.
 type ActorDetails struct {
-	ActorID           string              `json:"actor_id"`
-	State             ActorLifecycleState `json:"state"`
-	WorkerPod         string              `json:"worker_pod"`
-	SnapshotLocation  string              `json:"snapshot_location"`
-	SnapshotSizeBytes int64               `json:"snapshot_size_bytes"`
-	ChatHistory       []ChatMessage       `json:"chat_history"`
-	PendingApproval   *ApprovalRequest    `json:"pending_approval,omitempty"`
-	LastResult        *ExecutionResult    `json:"last_result,omitempty"`
+	ActorView
+	ChatHistory     []ChatMessage    `json:"chat_history"`
+	PendingApproval *ApprovalRequest `json:"pending_approval,omitempty"`
+	LastResult      *ExecutionResult `json:"last_result,omitempty"`
+	Usage           ModelUsage       `json:"usage"`
 }
 
 // SimulationRequest specifies actions to control the virtual attendee swarm.
@@ -233,15 +212,6 @@ func (s *SimulationRequest) Validate() error {
 	return nil
 }
 
-// StateChangeEvent represents a real-time actor state transition streamed over SSE.
-type StateChangeEvent struct {
-	AttendeeID string              `json:"attendee_id"`
-	State      ActorLifecycleState `json:"state"`
-	Label      string              `json:"label"`
-	Subtext    string              `json:"subtext"`
-	Timestamp  int64               `json:"timestamp"`
-}
-
 // ModelUsage summarizes one actor's (or the fleet's) Gemini calls through the model proxy.
 type ModelUsage struct {
 	Calls           int64 `json:"calls"`
@@ -253,17 +223,18 @@ type ModelUsage struct {
 
 // ActionLogEntry represents a full conversational or execution event streamed across the fleet.
 type ActionLogEntry struct {
-	ID            string              `json:"id"`
-	AttendeeID    string              `json:"attendee_id"`
-	Timestamp     int64               `json:"timestamp"`
-	Prompt        string              `json:"prompt"`
-	ModelResponse string              `json:"model_response,omitempty"`
-	Code          string              `json:"code,omitempty"`
-	Language      string              `json:"language,omitempty"`
-	RiskLevel     RiskLevel           `json:"risk_level,omitempty"`
-	ApprovalID    string              `json:"approval_id,omitempty"`
-	Decision      DecisionType        `json:"decision,omitempty"`
-	Execution     *ExecutionResult    `json:"execution,omitempty"`
-	WorkerPod     string              `json:"worker_pod,omitempty"`
-	State         ActorLifecycleState `json:"state"`
+	ID            string           `json:"id"`
+	AttendeeID    string           `json:"attendee_id"`
+	Timestamp     int64            `json:"timestamp"`
+	Prompt        string           `json:"prompt"`
+	ModelResponse string           `json:"model_response,omitempty"`
+	Code          string           `json:"code,omitempty"`
+	Language      string           `json:"language,omitempty"`
+	RiskLevel     RiskLevel        `json:"risk_level,omitempty"`
+	ApprovalID    string           `json:"approval_id,omitempty"`
+	Decision      DecisionType     `json:"decision,omitempty"`
+	Execution     *ExecutionResult `json:"execution,omitempty"`
+	WorkerPod     string           `json:"worker_pod,omitempty"`
+	Activity      Activity         `json:"activity,omitempty"`
+	Source        ReplySource      `json:"source,omitempty"`
 }

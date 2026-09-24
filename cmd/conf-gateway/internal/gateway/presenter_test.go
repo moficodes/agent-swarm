@@ -258,9 +258,9 @@ func TestDefaultSecretIsRandom(t *testing.T) {
 }
 
 func TestDefaultPresenterKeyIsRandom(t *testing.T) {
-	a := gateway.NewGateway("http://localhost:8000", "http://127.0.0.1:1", gateway.WithSuspender(&mockSuspender{}))
+	a := gateway.NewGateway("http://localhost:8000", "http://127.0.0.1:1")
 	t.Cleanup(a.Close)
-	b := gateway.NewGateway("http://localhost:8000", "http://127.0.0.1:1", gateway.WithSuspender(&mockSuspender{}))
+	b := gateway.NewGateway("http://localhost:8000", "http://127.0.0.1:1")
 	t.Cleanup(b.Close)
 	if len(a.PresenterKey()) < 32 || a.PresenterKey() == b.PresenterKey() {
 		t.Errorf("presenter keys %q and %q are not long random values", a.PresenterKey(), b.PresenterKey())

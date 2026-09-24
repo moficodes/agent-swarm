@@ -20,10 +20,16 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
-// EventBroker maintains active SSE subscribers and dispatches lifecycle events.
+// sseEvent is one server-sent event: its name and its JSON body.
+type sseEvent struct {
+	event string
+	data  []byte
+}
+
+// EventBroker maintains active SSE subscribers and dispatches events to them.
 type EventBroker struct {
 	mu                sync.RWMutex
-	subscribers       map[string][]chan types.StateChangeEvent
+	subscribers       map[string][]chan sseEvent
 	actionSubscribers []chan types.ActionLogEntry
 	resetSubscribers  []chan struct{}
 }
@@ -31,23 +37,23 @@ type EventBroker struct {
 // NewEventBroker initializes and returns a new EventBroker.
 func NewEventBroker() *EventBroker {
 	return &EventBroker{
-		subscribers:       make(map[string][]chan types.StateChangeEvent),
+		subscribers:       make(map[string][]chan sseEvent),
 		actionSubscribers: make([]chan types.ActionLogEntry, 0),
 		resetSubscribers:  make([]chan struct{}, 0),
 	}
 }
 
 // Subscribe creates and registers an event channel for the given attendee.
-func (b *EventBroker) Subscribe(attendeeID string) chan types.StateChangeEvent {
+func (b *EventBroker) Subscribe(attendeeID string) chan sseEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	ch := make(chan types.StateChangeEvent, 16)
+	ch := make(chan sseEvent, 16)
 	b.subscribers[attendeeID] = append(b.subscribers[attendeeID], ch)
 	return ch
 }
 
 // Unsubscribe deregisters and closes the event channel for the given attendee.
-func (b *EventBroker) Unsubscribe(attendeeID string, ch chan types.StateChangeEvent) {
+func (b *EventBroker) Unsubscribe(attendeeID string, ch chan sseEvent) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	subs := b.subscribers[attendeeID]
@@ -65,13 +71,35 @@ func (b *EventBroker) Unsubscribe(attendeeID string, ch chan types.StateChangeEv
 	}
 }
 
-// Publish broadcasts an event to all subscribers listening for the event's attendee.
-func (b *EventBroker) Publish(event types.StateChangeEvent) {
+// Publish sends an event to every subscriber of one attendee. A subscriber
+// whose buffer is full misses the event.
+func (b *EventBroker) Publish(attendeeID string, e sseEvent) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	for _, ch := range b.subscribers[event.AttendeeID] {
+	for _, ch := range b.subscribers[attendeeID] {
 		select {
-		case ch <- event:
+		case ch <- e:
+		default:
+		}
+	}
+}
+
+// PublishAll sends an event to every attendee subscriber and signals every
+// action stream subscriber that the stage was reset.
+func (b *EventBroker) PublishAll(e sseEvent) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, subs := range b.subscribers {
+		for _, ch := range subs {
+			select {
+			case ch <- e:
+			default:
+			}
+		}
+	}
+	for _, ch := range b.resetSubscribers {
+		select {
+		case ch <- struct{}{}:
 		default:
 		}
 	}
@@ -147,18 +175,6 @@ func (b *EventBroker) UnsubscribeReset(ch chan struct{}) {
 			b.resetSubscribers = b.resetSubscribers[:len(b.resetSubscribers)-1]
 			close(ch)
 			break
-		}
-	}
-}
-
-// PublishReset broadcasts a reset signal to all reset subscribers.
-func (b *EventBroker) PublishReset() {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for _, ch := range b.resetSubscribers {
-		select {
-		case ch <- struct{}{}:
-		default:
 		}
 	}
 }

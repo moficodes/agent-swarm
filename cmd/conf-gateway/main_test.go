@@ -15,14 +15,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "SUSPEND_MODE", "MODEL_PROXY_ADDR", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST"}
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "MODEL_PROXY_ADDR", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST"}
 
 // clearConfigEnv clears every environment variable LoadConfig reads, so tests
 // start from a clean slate regardless of the host environment.
@@ -50,8 +54,17 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.HMACSecret != "" {
 		t.Errorf("expected empty default HMACSecret so the gateway generates one, got %q", cfg.HMACSecret)
 	}
-	if cfg.SuspendMode != "" {
-		t.Errorf("expected empty default SuspendMode, got %q", cfg.SuspendMode)
+	if cfg.StatePollInterval != time.Second {
+		t.Errorf("expected default StatePollInterval 1s, got %s", cfg.StatePollInterval)
+	}
+	if cfg.SuspendAfter != 0 {
+		t.Errorf("expected default SuspendAfter 0, got %s", cfg.SuspendAfter)
+	}
+	if cfg.KubectlATE != "kubectl-ate" || cfg.ATEAPIEndpoint != "" {
+		t.Errorf("expected kubectl-ate with its default endpoint, got %q %q", cfg.KubectlATE, cfg.ATEAPIEndpoint)
+	}
+	if cfg.LocalMode || cfg.MockLLM {
+		t.Errorf("expected LocalMode and MockLLM off by default, got %v %v", cfg.LocalMode, cfg.MockLLM)
 	}
 	if cfg.PresenterKey != "" {
 		t.Errorf("expected empty default PresenterKey so the gateway generates one, got %q", cfg.PresenterKey)
@@ -62,13 +75,18 @@ func TestLoadConfig_Defaults(t *testing.T) {
 }
 
 func TestLoadConfig_CustomEnv(t *testing.T) {
+	clearConfigEnv(t)
 	t.Setenv("PORT", "9099")
 	t.Setenv("ROUTER_URL", "http://router.example.com")
 	t.Setenv("STATUS_URL", "http://status.example.com")
 	t.Setenv("HMAC_SECRET", "custom-secret")
 	t.Setenv("PRESENTER_TOKEN", "custom-presenter")
 	t.Setenv("ATESPACE", "custom-ns")
-	t.Setenv("SUSPEND_MODE", "noop")
+	t.Setenv("ATEAPI_ENDPOINT", "ateapi.example:443")
+	t.Setenv("KUBECTL_ATE", "/bin/kubectl-ate")
+	t.Setenv("STATE_POLL_INTERVAL", "250ms")
+	t.Setenv("SUSPEND_AFTER", "30s")
+	t.Setenv("DEMO_MOCK_LLM", "true")
 
 	cfg := LoadConfig()
 
@@ -90,20 +108,38 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	if cfg.Atespace != "custom-ns" {
 		t.Errorf("expected Atespace 'custom-ns', got %q", cfg.Atespace)
 	}
-	if cfg.SuspendMode != "noop" {
-		t.Errorf("expected SuspendMode 'noop', got %q", cfg.SuspendMode)
+	if cfg.ATEAPIEndpoint != "ateapi.example:443" || cfg.KubectlATE != "/bin/kubectl-ate" {
+		t.Errorf("kubectl-ate config = %q %q", cfg.ATEAPIEndpoint, cfg.KubectlATE)
+	}
+	if cfg.StatePollInterval != 250*time.Millisecond || cfg.SuspendAfter != 30*time.Second {
+		t.Errorf("durations = %s %s", cfg.StatePollInterval, cfg.SuspendAfter)
+	}
+	if !cfg.MockLLM {
+		t.Errorf("expected MockLLM with DEMO_MOCK_LLM=true")
 	}
 }
 
-func TestSuspenderOptions(t *testing.T) {
-	if opts, err := suspenderOptions(""); err != nil || len(opts) != 0 {
-		t.Errorf("default mode: got %d options, err %v; want the gateway's own suspender", len(opts), err)
+func TestLoadConfig_InvalidPollIntervalFallsBack(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("STATE_POLL_INTERVAL", "soon")
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	if got := LoadConfig().StatePollInterval; got != time.Second {
+		t.Errorf("StatePollInterval = %s, want 1s", got)
 	}
-	if opts, err := suspenderOptions("noop"); err != nil || len(opts) != 1 {
-		t.Errorf("noop mode: got %d options, err %v; want one WithSuspender option", len(opts), err)
+	if !strings.Contains(buf.String(), "STATE_POLL_INTERVAL") {
+		t.Errorf("log = %q, want a line naming STATE_POLL_INTERVAL", buf.String())
 	}
-	if _, err := suspenderOptions("bogus"); err == nil {
-		t.Errorf("unknown mode: want error")
+}
+
+func TestLoadConfig_LocalMode(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("LOCAL_MODE", "true")
+	if !LoadConfig().LocalMode {
+		t.Error("LOCAL_MODE=true did not set LocalMode")
 	}
 }
 

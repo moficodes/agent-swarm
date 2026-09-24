@@ -260,8 +260,7 @@ func TestAuxiliaryTypesSerialization(t *testing.T) {
 		status := types.WorkerStatus{
 			PodName:     "worker-pod-42",
 			ActiveActor: "actor-analysis-1",
-			CurrentTask: "running simulation",
-			ElapsedMs:   350,
+			State:       types.StateRunning,
 		}
 
 		data, err := json.Marshal(status)
@@ -281,20 +280,22 @@ func TestAuxiliaryTypesSerialization(t *testing.T) {
 
 	t.Run("StageTelemetry", func(t *testing.T) {
 		telemetry := types.StageTelemetry{
-			ParkedRequests: 3,
+			ParkedRequests:   3,
+			ParkingAvailable: true,
 			Workers: []types.WorkerStatus{
 				{
 					PodName:     "worker-pod-1",
 					ActiveActor: "actor-planner",
-					CurrentTask: "dispatching subagent",
-					ElapsedMs:   120,
+					State:       types.StateRunning,
 				},
 			},
-			Actors: map[string]types.ActorLifecycleState{
-				"actor-planner":  types.LifecycleRunning,
-				"actor-executor": types.LifecycleAwaitingApproval,
-				"actor-reviewer": types.LifecycleParked,
+			Actors: map[string]types.ActorView{
+				"actor-planner":  {ActorID: "actor-planner", State: types.StateRunning, WorkerPod: "worker-pod-1"},
+				"actor-executor": {ActorID: "actor-executor", State: types.StateSuspended, Activity: types.ActivityAwaitingApproval},
 			},
+			MockLLM:     true,
+			ModelUsage:  types.ModelUsage{Calls: 2, PromptTokens: 10},
+			StatePollMs: 40,
 			RecentEvents: []string{
 				"Actor actor-planner resumed",
 				"Approval requested for actor-executor",
@@ -320,11 +321,13 @@ func TestAuxiliaryTypesSerialization(t *testing.T) {
 func TestEnhancementTypesSerialization(t *testing.T) {
 	t.Run("ActorDetails", func(t *testing.T) {
 		details := types.ActorDetails{
-			ActorID:           "attendee-07",
-			State:             types.LifecycleAwaitingApproval,
-			WorkerPod:         "conf-workers-0",
-			SnapshotLocation:  "gs://test-bucket/ate-demo-conf/actors/attendee-07.snap",
-			SnapshotSizeBytes: 384000,
+			ActorView: types.ActorView{
+				ActorID:     "attendee-07",
+				State:       types.StateSuspended,
+				Activity:    types.ActivityAwaitingApproval,
+				SnapshotURI: "gs://test-bucket/ate-demo-conf/actors/attendee-07.snap",
+			},
+			Usage: types.ModelUsage{Calls: 1},
 			ChatHistory: []types.ChatMessage{
 				{
 					ID:        "msg-1",
@@ -363,12 +366,8 @@ func TestEnhancementTypesSerialization(t *testing.T) {
 		}
 
 		detailsOmit := types.ActorDetails{
-			ActorID:           "attendee-08",
-			State:             types.LifecycleRunning,
-			WorkerPod:         "conf-workers-1",
-			SnapshotLocation:  "",
-			SnapshotSizeBytes: 0,
-			ChatHistory:       []types.ChatMessage{},
+			ActorView:   types.ActorView{ActorID: "attendee-08", State: types.StateRunning, WorkerPod: "pool-abc"},
+			ChatHistory: []types.ChatMessage{},
 		}
 		dataOmit, err := json.Marshal(detailsOmit)
 		if err != nil {
@@ -495,30 +494,6 @@ func TestEnhancementTypesSerialization(t *testing.T) {
 			t.Fatalf("ModelUsage mismatch (-want +got):\n%s", diff)
 		}
 	})
-
-	t.Run("StateChangeEvent", func(t *testing.T) {
-		event := types.StateChangeEvent{
-			AttendeeID: "attendee-12",
-			State:      types.LifecycleRunning,
-			Label:      "Running Analysis",
-			Subtext:    "Executing sandbox code",
-			Timestamp:  1789910200,
-		}
-
-		data, err := json.Marshal(event)
-		if err != nil {
-			t.Fatalf("failed to marshal StateChangeEvent: %v", err)
-		}
-
-		var decoded types.StateChangeEvent
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("failed to unmarshal StateChangeEvent: %v", err)
-		}
-
-		if diff := cmp.Diff(event, decoded); diff != "" {
-			t.Fatalf("StateChangeEvent mismatch (-want +got):\n%s", diff)
-		}
-	})
 }
 
 func TestActionLogEntrySerialization(t *testing.T) {
@@ -541,7 +516,8 @@ func TestActionLogEntrySerialization(t *testing.T) {
 				DurationMs: 45,
 			},
 			WorkerPod: "conf-workers-2",
-			State:     types.LifecycleRunningGVisor,
+			Activity:  types.ActivityExecuting,
+			Source:    types.SourceGemini,
 		}
 
 		data, err := json.Marshal(entry)
@@ -565,7 +541,6 @@ func TestActionLogEntrySerialization(t *testing.T) {
 			AttendeeID: "attendee-43",
 			Timestamp:  1789910400,
 			Prompt:     "Hello agent",
-			State:      types.LifecycleThinkingVertexAI,
 		}
 
 		data, err := json.Marshal(minimal)
@@ -583,6 +558,8 @@ func TestActionLogEntrySerialization(t *testing.T) {
 			`"decision"`,
 			`"execution"`,
 			`"worker_pod"`,
+			`"activity"`,
+			`"source"`,
 		}
 		for _, field := range omittedFields {
 			if strings.Contains(jsonStr, field) {

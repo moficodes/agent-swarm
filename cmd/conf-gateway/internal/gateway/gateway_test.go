@@ -35,51 +35,6 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
-// mockSuspender records suspension invocations for assertions.
-type mockSuspender struct {
-	mu           sync.Mutex
-	invocations  []suspendCall
-	suspendDelay time.Duration
-}
-
-type suspendCall struct {
-	Atespace string
-	ActorID  string
-}
-
-func (m *mockSuspender) SuspendActor(ctx context.Context, atespace, actorID string) error {
-	if m.suspendDelay > 0 {
-		time.Sleep(m.suspendDelay)
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.invocations = append(m.invocations, suspendCall{
-		Atespace: atespace,
-		ActorID:  actorID,
-	})
-	return nil
-}
-
-func (m *mockSuspender) getCalls() []suspendCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	res := make([]suspendCall, len(m.invocations))
-	copy(res, m.invocations)
-	return res
-}
-
-func (m *mockSuspender) waitForCalls(n int, timeout time.Duration) []suspendCall {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		calls := m.getCalls()
-		if len(calls) >= n {
-			return calls
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	return m.getCalls()
-}
-
 type mockSimulationController struct {
 	stopped atomic.Bool
 	running atomic.Bool
@@ -244,8 +199,11 @@ func TestStageTelemetry(t *testing.T) {
 		t.Fatalf("expected parked_requests=7, got %d", telem.ParkedRequests)
 	}
 
-	if len(telem.Workers) == 0 {
-		t.Errorf("expected worker status entries in telemetry")
+	if !telem.ParkingAvailable {
+		t.Errorf("expected parking_available after a successful statusz fetch")
+	}
+	if len(telem.Workers) != 0 {
+		t.Errorf("expected no workers without ateapi state, got %+v", telem.Workers)
 	}
 	if telem.Actors == nil {
 		t.Errorf("expected non-nil actors map")
@@ -281,7 +239,7 @@ func TestStageTelemetry(t *testing.T) {
 }
 
 func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
-	suspender := &mockSuspender{}
+	ctrl := newFakeControl()
 	secret := "gateway-secret-gateway-secret-000"
 	atespace := "ate-demo-conf"
 
@@ -360,7 +318,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace(atespace),
 		gateway.WithSecret(secret),
-		gateway.WithSuspender(suspender),
+		gateway.WithActorControl(ctrl),
 	)
 	defer gw.Close()
 
@@ -411,17 +369,12 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 		t.Errorf("expected actor model key %q, got %v", want, receivedModelKey.Load())
 	}
 
-	// Verify suspension hook was called for attendee-01
-	calls := suspender.waitForCalls(1, 2*time.Second)
-	if len(calls) == 0 {
-		t.Fatalf("expected suspension hook to be called on WAITING_FOR_APPROVAL")
-	}
-	lastCall := calls[len(calls)-1]
-	if lastCall.Atespace != atespace || lastCall.ActorID != "attendee-01" {
-		t.Errorf("expected suspendCall{%q, 'attendee-01'}, got %+v", atespace, lastCall)
+	// The actor is suspended while it waits for approval.
+	if got := waitSuspended(t, ctrl); got != "attendee-01" {
+		t.Errorf("expected suspend of attendee-01, got %q", got)
 	}
 
-	// Verify actor state is LifecycleAwaitingApproval
+	// Verify the actor is awaiting approval
 	telemResp, err := http.Get(ts.URL + "/api/stage/telemetry")
 	if err != nil {
 		t.Fatalf("failed to get telemetry: %v", err)
@@ -430,8 +383,8 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	_ = json.NewDecoder(telemResp.Body).Decode(&telem)
 	_ = telemResp.Body.Close()
 
-	if state, ok := telem.Actors["attendee-01"]; !ok || state != types.LifecycleAwaitingApproval {
-		t.Errorf("expected actor attendee-01 state %s, got %s (present: %v)", types.LifecycleAwaitingApproval, state, ok)
+	if view, ok := telem.Actors["attendee-01"]; !ok || view.Activity != types.ActivityAwaitingApproval {
+		t.Errorf("expected actor attendee-01 activity %s, got %+v (present: %v)", types.ActivityAwaitingApproval, view, ok)
 	}
 
 	// Case 2: Approve request completion
@@ -450,17 +403,12 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", resp2.StatusCode)
 	}
 
-	// Verify suspension called upon completion
-	callsAfterApprove := suspender.waitForCalls(2, 2*time.Second)
-	if len(callsAfterApprove) < 2 {
-		t.Fatalf("expected suspension hook to be called after approval completion")
-	}
-	lastApproveCall := callsAfterApprove[len(callsAfterApprove)-1]
-	if lastApproveCall.ActorID != "attendee-01" {
-		t.Errorf("expected suspend call for attendee-01, got %+v", lastApproveCall)
+	// The actor is suspended again once the approved turn completes.
+	if got := waitSuspended(t, ctrl); got != "attendee-01" {
+		t.Errorf("expected suspend of attendee-01 after approval, got %q", got)
 	}
 
-	// Verify actor state transitioned to LifecycleSuspended
+	// Verify the actor is idle again
 	telemResp2, err := http.Get(ts.URL + "/api/stage/telemetry")
 	if err != nil {
 		t.Fatalf("failed to get telemetry after approve: %v", err)
@@ -469,8 +417,8 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	_ = json.NewDecoder(telemResp2.Body).Decode(&telem2)
 	_ = telemResp2.Body.Close()
 
-	if state, ok := telem2.Actors["attendee-01"]; !ok || state != types.LifecycleSuspended {
-		t.Errorf("expected actor attendee-01 state %s, got %s", types.LifecycleSuspended, state)
+	if view, ok := telem2.Actors["attendee-01"]; !ok || view.Activity != types.ActivityIdle {
+		t.Errorf("expected actor attendee-01 idle, got %+v (present: %v)", view, ok)
 	}
 }
 
@@ -564,10 +512,8 @@ func TestGateway_ConcurrencySafety(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	suspender := &mockSuspender{}
 	gw := newTestGateway(t, upstreamSrv.URL, statusSrv.URL,
 		gateway.WithStatusInterval(10*time.Millisecond),
-		gateway.WithSuspender(suspender),
 	)
 	defer gw.Close()
 
@@ -736,10 +682,9 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestSuspenderFailureTolerance(t *testing.T) {
-	failingSuspender := gateway.SuspendFunc(func(ctx context.Context, atespace, actorID string) error {
-		return errors.New("simulated kubectl-ate network failure")
-	})
+func TestSuspendFailureTolerance(t *testing.T) {
+	ctrl := newFakeControl()
+	ctrl.suspendErr = errors.New("simulated kubectl-ate network failure")
 
 	upstreamMux := http.NewServeMux()
 	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
@@ -755,7 +700,7 @@ func TestSuspenderFailureTolerance(t *testing.T) {
 	defer upstreamSrv.Close()
 
 	gw := newTestGateway(t, upstreamSrv.URL, "",
-		gateway.WithSuspender(failingSuspender),
+		gateway.WithActorControl(ctrl),
 	)
 	defer gw.Close()
 
@@ -811,8 +756,6 @@ func TestSuspenderFailureTolerance(t *testing.T) {
 }
 
 func TestProxyRouting_ApprovalDetection_SubstringIgnored(t *testing.T) {
-	suspender := &mockSuspender{}
-
 	// Upstream returns WAITING_FOR_APPROVAL substring in content, but Approval field is nil
 	upstreamMux := http.NewServeMux()
 	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
@@ -834,9 +777,7 @@ func TestProxyRouting_ApprovalDetection_SubstringIgnored(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	gw := newTestGateway(t, upstreamSrv.URL, "",
-		gateway.WithSuspender(suspender),
-	)
+	gw := newTestGateway(t, upstreamSrv.URL, "")
 	defer gw.Close()
 
 	ts := httptest.NewServer(asPresenter(gw))
@@ -867,12 +808,12 @@ func TestProxyRouting_ApprovalDetection_SubstringIgnored(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", resp.StatusCode)
 	}
 
-	state, ok := gw.GetActorState(sess.AttendeeID)
+	view, ok := gw.ActorView(sess.AttendeeID)
 	if !ok {
-		t.Fatalf("actor %s not found in activeActors", sess.AttendeeID)
+		t.Fatalf("actor %s has no view", sess.AttendeeID)
 	}
-	if state != types.LifecycleSuspended {
-		t.Errorf("expected actor %s state %s (normal completed turn), but got %s", sess.AttendeeID, types.LifecycleSuspended, state)
+	if view.Activity != types.ActivityIdle {
+		t.Errorf("expected actor %s idle after a normal turn, got activity %q", sess.AttendeeID, view.Activity)
 	}
 
 	// A reply that merely mentions an approval must not create one.
@@ -957,7 +898,7 @@ func TestProxyRouting_RequireValidToken(t *testing.T) {
 	}
 }
 
-func TestProxyRouting_ProxyErrorResetsActorState(t *testing.T) {
+func TestProxyRouting_ProxyErrorResetsActivity(t *testing.T) {
 	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	deadURL := deadServer.URL
 	deadServer.Close()
@@ -1007,13 +948,12 @@ func TestProxyRouting_ProxyErrorResetsActorState(t *testing.T) {
 		t.Fatalf("failed to decode telemetry: %v", err)
 	}
 
-	if state, ok := telem.Actors[sess.AttendeeID]; !ok || state != types.LifecycleSuspended {
-		t.Errorf("expected actor %s state %s after proxy error, got %s (present: %v)",
-			sess.AttendeeID, types.LifecycleSuspended, state, ok)
+	if view, ok := telem.Actors[sess.AttendeeID]; !ok || view.Activity != types.ActivityIdle {
+		t.Errorf("expected actor %s idle after proxy error, got %+v (present: %v)", sess.AttendeeID, view, ok)
 	}
 }
 
-func TestProxyRouting_UpstreamErrorStatusResetsActorState(t *testing.T) {
+func TestProxyRouting_UpstreamErrorStatusResetsActivity(t *testing.T) {
 	upstreamMux := http.NewServeMux()
 	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal Worker Crash", http.StatusInternalServerError)
@@ -1066,16 +1006,16 @@ func TestProxyRouting_UpstreamErrorStatusResetsActorState(t *testing.T) {
 		t.Fatalf("failed to decode telemetry: %v", err)
 	}
 
-	if state, ok := telem.Actors[sess.AttendeeID]; !ok || state != types.LifecycleSuspended {
-		t.Errorf("expected actor %s state %s after upstream 500 error, got %s (present: %v)",
-			sess.AttendeeID, types.LifecycleSuspended, state, ok)
+	if view, ok := telem.Actors[sess.AttendeeID]; !ok || view.Activity != types.ActivityIdle {
+		t.Errorf("expected actor %s idle after upstream 500 error, got %+v (present: %v)", sess.AttendeeID, view, ok)
 	}
 }
 
 func TestProxyRouting_AsyncSuspensionNonBlocking(t *testing.T) {
-	suspender := &mockSuspender{
-		suspendDelay: 150 * time.Millisecond,
-	}
+	// Suspend blocks until Close, so the chat can only complete if the
+	// suspend runs in the background.
+	ctrl := newFakeControl()
+	ctrl.holdSuspend = true
 
 	upstreamMux := http.NewServeMux()
 	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
@@ -1091,9 +1031,8 @@ func TestProxyRouting_AsyncSuspensionNonBlocking(t *testing.T) {
 	defer upstreamSrv.Close()
 
 	gw := newTestGateway(t, upstreamSrv.URL, "",
-		gateway.WithSuspender(suspender),
+		gateway.WithActorControl(ctrl),
 	)
-	defer gw.Close()
 
 	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
@@ -1116,10 +1055,7 @@ func TestProxyRouting_AsyncSuspensionNonBlocking(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+sess.Token)
 
-	start := time.Now()
 	resp, err := http.DefaultClient.Do(req)
-	duration := time.Since(start)
-
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -1129,119 +1065,17 @@ func TestProxyRouting_AsyncSuspensionNonBlocking(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
 	}
 
-	if duration >= 140*time.Millisecond {
-		t.Errorf("expected async suspension not to block HTTP response, but request took %v", duration)
+	gw.Close()
+	if got := waitSuspended(t, ctrl); got != sess.AttendeeID {
+		t.Errorf("expected suspend of %q, got %q", sess.AttendeeID, got)
 	}
-
-	calls := suspender.waitForCalls(1, 1*time.Second)
-	if len(calls) == 0 {
-		t.Fatalf("expected async suspension call to complete in background")
-	}
-	if calls[0].ActorID != sess.AttendeeID {
-		t.Errorf("expected actor ID %q, got %+v", sess.AttendeeID, calls[0])
-	}
-}
-
-func TestStageTelemetry_DeterministicWorkerSorting(t *testing.T) {
-	hold := make(chan struct{})
-	var enteredCount atomic.Int32
-
-	upstreamMux := http.NewServeMux()
-	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
-		enteredCount.Add(1)
-		<-hold
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.ChatMessage{
-			ID:        "msg-sort",
-			Sender:    types.SenderAssistant,
-			Content:   "done",
-			Timestamp: time.Now().Unix(),
-		})
-	})
-	upstreamSrv := httptest.NewServer(upstreamMux)
-	defer upstreamSrv.Close()
-
-	gw := newTestGateway(t, upstreamSrv.URL, "")
-	defer gw.Close()
-
-	ts := httptest.NewServer(asPresenter(gw))
-	defer ts.Close()
-
-	// Provision sessions for 3 attendees
-	tokens := make(map[string]string)
-	for i := 0; i < 3; i++ {
-		resp, err := http.Get(ts.URL + "/api/session")
-		if err != nil {
-			t.Fatalf("failed to get session: %v", err)
-		}
-		var sess struct {
-			AttendeeID string `json:"attendee_id"`
-			Token      string `json:"token"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&sess)
-		_ = resp.Body.Close()
-		tokens[sess.AttendeeID] = sess.Token
-	}
-
-	var reqWg sync.WaitGroup
-	for _, id := range []string{"attendee-03", "attendee-01", "attendee-02"} {
-		reqWg.Add(1)
-		go func(attID, tok string) {
-			defer reqWg.Done()
-			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hi"}`))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Authorization", "Bearer "+tok)
-			resp, err := http.DefaultClient.Do(req)
-			if err == nil {
-				_ = resp.Body.Close()
-			}
-		}(id, tokens[id])
-	}
-
-	// Wait until all 3 requests are actively being processed upstream
-	deadline := time.Now().Add(2 * time.Second)
-	for enteredCount.Load() < 3 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if enteredCount.Load() < 3 {
-		close(hold)
-		reqWg.Wait()
-		t.Fatalf("timed out waiting for 3 requests to enter upstream, got %d", enteredCount.Load())
-	}
-
-	// Check telemetry multiple times: runningActors must be sorted, so Workers[0] is attendee-01 and Workers[1] is attendee-02
-	for i := 0; i < 15; i++ {
-		resp, err := http.Get(ts.URL + "/api/stage/telemetry")
-		if err != nil {
-			close(hold)
-			reqWg.Wait()
-			t.Fatalf("failed to get telemetry: %v", err)
-		}
-		var telem types.StageTelemetry
-		_ = json.NewDecoder(resp.Body).Decode(&telem)
-		_ = resp.Body.Close()
-
-		if len(telem.Workers) < 2 {
-			close(hold)
-			reqWg.Wait()
-			t.Fatalf("expected 2 workers")
-		}
-		if telem.Workers[0].ActiveActor != "attendee-01" || telem.Workers[1].ActiveActor != "attendee-02" {
-			close(hold)
-			reqWg.Wait()
-			t.Fatalf("telemetry not deterministically sorted: worker0=%s, worker1=%s",
-				telem.Workers[0].ActiveActor, telem.Workers[1].ActiveActor)
-		}
-	}
-
-	close(hold)
-	reqWg.Wait()
 }
 
 func TestGateway_CloseWaitsForAsyncSuspension(t *testing.T) {
-	suspender := &mockSuspender{
-		suspendDelay: 60 * time.Millisecond,
-	}
+	// Suspend records only after Close cancels its context, so the record
+	// is there when Close returns only if Close waited for it.
+	ctrl := newFakeControl()
+	ctrl.holdSuspend = true
 
 	upstreamMux := http.NewServeMux()
 	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
@@ -1257,7 +1091,7 @@ func TestGateway_CloseWaitsForAsyncSuspension(t *testing.T) {
 	defer upstreamSrv.Close()
 
 	gw := newTestGateway(t, upstreamSrv.URL, "",
-		gateway.WithSuspender(suspender),
+		gateway.WithActorControl(ctrl),
 	)
 
 	ts := httptest.NewServer(asPresenter(gw))
@@ -1284,15 +1118,15 @@ func TestGateway_CloseWaitsForAsyncSuspension(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	// Immediately close the gateway. Close() should block until asyncSuspendActor finishes!
 	gw.Close()
 
-	calls := suspender.getCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected Close() to wait for async suspension to complete, but got %d calls", len(calls))
-	}
-	if calls[0].ActorID != sess.AttendeeID {
-		t.Errorf("expected suspend call for %s, got %s", sess.AttendeeID, calls[0].ActorID)
+	select {
+	case got := <-ctrl.suspended:
+		if got != sess.AttendeeID {
+			t.Errorf("expected suspend call for %s, got %s", sess.AttendeeID, got)
+		}
+	default:
+		t.Fatal("Close returned before the background suspend finished")
 	}
 }
 
@@ -1662,14 +1496,14 @@ func TestSSEEventStreaming(t *testing.T) {
 
 		reader := bufio.NewReader(resp.Body)
 
-		// Broadcast event for attendee-01
-		gw.BroadcastStateChange("attendee-01", types.LifecycleThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
+		// A chat marks attendee-01 as thinking before it is proxied.
+		postJSON(gw, "attendee-01", "/api/chat", types.ChatRequest{Message: "hi"})
 
-		// Read event line
-		eventChan := make(chan types.StateChangeEvent, 1)
+		eventChan := make(chan types.ActorView, 1)
 		errChan := make(chan error, 1)
 
 		go func() {
+			event := ""
 			for {
 				line, err := reader.ReadString('\n')
 				if err != nil {
@@ -1677,14 +1511,17 @@ func TestSSEEventStreaming(t *testing.T) {
 					return
 				}
 				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "data:") {
+				if strings.HasPrefix(line, "event:") {
+					event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				}
+				if strings.HasPrefix(line, "data:") && event == "actor_view" {
 					dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-					var ev types.StateChangeEvent
+					var ev types.ActorView
 					if err := json.Unmarshal([]byte(dataStr), &ev); err != nil {
 						errChan <- err
 						return
 					}
-					if ev.State == types.LifecycleThinkingVertexAI {
+					if ev.Activity == types.ActivityThinking && ev.State == types.StateUnavailable {
 						eventChan <- ev
 						return
 					}
@@ -1694,20 +1531,11 @@ func TestSSEEventStreaming(t *testing.T) {
 
 		select {
 		case ev := <-eventChan:
-			if ev.AttendeeID != "attendee-01" {
-				t.Errorf("expected attendee_id attendee-01, got %q", ev.AttendeeID)
+			if ev.ActorID != "attendee-01" {
+				t.Errorf("expected actor_id attendee-01, got %q", ev.ActorID)
 			}
-			if ev.State != types.LifecycleThinkingVertexAI {
-				t.Errorf("expected state %s, got %s", types.LifecycleThinkingVertexAI, ev.State)
-			}
-			if ev.Label != "Thinking..." {
-				t.Errorf("expected label 'Thinking...', got %q", ev.Label)
-			}
-			if ev.Subtext != "Reasoning on Vertex AI" {
-				t.Errorf("expected subtext 'Reasoning on Vertex AI', got %q", ev.Subtext)
-			}
-			if ev.Timestamp <= 0 {
-				t.Errorf("expected positive timestamp, got %d", ev.Timestamp)
+			if ev.State != types.StateUnavailable {
+				t.Errorf("expected state %s in local mode, got %s", types.StateUnavailable, ev.State)
 			}
 		case err := <-errChan:
 			t.Fatalf("error reading SSE stream: %v", err)
@@ -1793,7 +1621,7 @@ func TestSSEEventStreaming(t *testing.T) {
 		// Concurrently broadcast
 		for b := 0; b < numBroadcasts; b++ {
 			attID := fmt.Sprintf("attendee-conc-%d", b%3)
-			gw.BroadcastStateChange(attID, types.LifecycleRunningGVisor, "Running", "Executing")
+			postJSON(gw, attID, "/api/chat", types.ChatRequest{Message: "hi"})
 			time.Sleep(5 * time.Millisecond)
 		}
 
@@ -1855,7 +1683,7 @@ func TestActorInspectorEndpoint(t *testing.T) {
 	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
 
-	t.Run("DefaultSuspendedActorInspection", func(t *testing.T) {
+	t.Run("UnknownActorInLocalModeIsUnavailable", func(t *testing.T) {
 		resp, err := http.Get(ts.URL + "/api/actor/attendee-05")
 		if err != nil {
 			t.Fatalf("failed to request /api/actor/attendee-05: %v", err)
@@ -1874,14 +1702,11 @@ func TestActorInspectorEndpoint(t *testing.T) {
 		if details.ActorID != "attendee-05" {
 			t.Errorf("expected actor_id attendee-05, got %q", details.ActorID)
 		}
-		if details.State != types.LifecycleSuspended {
-			t.Errorf("expected state %s, got %s", types.LifecycleSuspended, details.State)
+		if details.State != types.StateUnavailable {
+			t.Errorf("expected state %s, got %s", types.StateUnavailable, details.State)
 		}
-		if !strings.Contains(details.SnapshotLocation, "bucket") || !strings.Contains(details.SnapshotLocation, "ate-demo-conf") {
-			t.Errorf("expected snapshot_location to contain bucket and atespace path, got %q", details.SnapshotLocation)
-		}
-		if details.SnapshotSizeBytes == 0 {
-			t.Errorf("expected non-zero snapshot_size_bytes, got %d", details.SnapshotSizeBytes)
+		if details.SnapshotURI != "" {
+			t.Errorf("expected no snapshot_uri in local mode, got %q", details.SnapshotURI)
 		}
 	})
 
@@ -1916,8 +1741,8 @@ func TestActorInspectorEndpoint(t *testing.T) {
 		if details.ActorID != "attendee-02" {
 			t.Errorf("expected actor_id attendee-02, got %q", details.ActorID)
 		}
-		if details.State != types.LifecycleAwaitingApproval {
-			t.Errorf("expected state %s, got %s", types.LifecycleAwaitingApproval, details.State)
+		if details.Activity != types.ActivityAwaitingApproval {
+			t.Errorf("expected activity %s, got %s", types.ActivityAwaitingApproval, details.Activity)
 		}
 		if details.PendingApproval == nil {
 			t.Fatalf("expected populated pending_approval, got nil")
@@ -2067,313 +1892,6 @@ func TestActorInspectorEndpoint(t *testing.T) {
 	})
 }
 
-func TestResetEndpoint(t *testing.T) {
-	suspender := &mockSuspender{}
-	upstreamMux := http.NewServeMux()
-	upstreamMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.ChatMessage{
-			ID:        "msg-chat-1",
-			Sender:    types.SenderAssistant,
-			Content:   "WAITING_FOR_APPROVAL: review",
-			Timestamp: time.Now().Unix(),
-			Approval: &types.ApprovalRequest{
-				ApprovalID: "app-reset-1",
-				Summary:    "Scale cluster",
-				Code:       "print('scaling')",
-				Language:   "python",
-				RiskLevel:  types.RiskHigh,
-			},
-		})
-	})
-	upstreamSrv := httptest.NewServer(upstreamMux)
-	defer upstreamSrv.Close()
-
-	gw := newTestGateway(t, upstreamSrv.URL, "",
-		gateway.WithAtespace("ate-demo-conf"),
-		gateway.WithSuspender(suspender),
-	)
-	defer gw.Close()
-
-	ts := httptest.NewServer(asPresenter(gw))
-	defer ts.Close()
-
-	t.Run("ResetSuccess", func(t *testing.T) {
-		// Populate attendee-02 with pending approval and chat history via chat call
-		token2 := gw.MintToken("attendee-02")
-		req2, err := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"need-approval"}`))
-		if err != nil {
-			t.Fatalf("failed to create chat request: %v", err)
-		}
-		req2.Header.Set("Content-Type", "application/json")
-		req2.Header.Set("Authorization", "Bearer "+token2)
-		resp2, err := http.DefaultClient.Do(req2)
-		if err != nil {
-			t.Fatalf("failed chat request: %v", err)
-		}
-		_ = resp2.Body.Close()
-
-		// Set attendee-01 to Running with last result
-		gw.SetActorState("attendee-01", types.LifecycleRunning)
-		gw.SetLastResult("attendee-01", &types.ExecutionResult{
-			Stdout:     "simulation report",
-			ExitCode:   0,
-			DurationMs: 42,
-		})
-
-		// Set attendee-03 to Suspended (already suspended)
-		gw.SetActorState("attendee-03", types.LifecycleSuspended)
-
-		// Subscribe to SSE for attendee-01 to verify LifecycleSuspended broadcast
-		sseCtx, sseCancel := context.WithCancel(context.Background())
-		defer sseCancel()
-
-		sseReq, err := http.NewRequestWithContext(sseCtx, http.MethodGet, ts.URL+"/api/events?attendee_id=attendee-01&token="+gw.MintToken("attendee-01"), nil)
-		if err != nil {
-			t.Fatalf("failed to create SSE request: %v", err)
-		}
-		sseResp, err := http.DefaultClient.Do(sseReq)
-		if err != nil {
-			t.Fatalf("failed to connect SSE stream: %v", err)
-		}
-		defer sseResp.Body.Close()
-
-		sseReader := bufio.NewReader(sseResp.Body)
-		sseEvents := make(chan types.StateChangeEvent, 10)
-		go func() {
-			for {
-				line, err := sseReader.ReadString('\n')
-				if err != nil {
-					return
-				}
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "data:") {
-					dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-					var ev types.StateChangeEvent
-					if err := json.Unmarshal([]byte(dataStr), &ev); err == nil {
-						sseEvents <- ev
-					}
-				}
-			}
-		}()
-
-		// Drain initial SSE event
-		select {
-		case <-sseEvents:
-		case <-time.After(1 * time.Second):
-			t.Fatalf("timed out waiting for initial SSE event")
-		}
-
-		// Clear prior mock suspender calls from the setup chat call
-		suspender.mu.Lock()
-		suspender.invocations = nil
-		suspender.mu.Unlock()
-
-		// Call POST /api/reset
-		resetResp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
-		if err != nil {
-			t.Fatalf("failed to call /api/reset: %v", err)
-		}
-		defer resetResp.Body.Close()
-
-		if resetResp.StatusCode != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", resetResp.StatusCode)
-		}
-
-		var resetBody struct {
-			Status      string `json:"status"`
-			Message     string `json:"message"`
-			ActorsReset int    `json:"actors_reset"`
-		}
-		if err := json.NewDecoder(resetResp.Body).Decode(&resetBody); err != nil {
-			t.Fatalf("failed to decode reset response: %v", err)
-		}
-
-		if resetBody.Status != "ok" {
-			t.Errorf("expected status 'ok', got %q", resetBody.Status)
-		}
-		if !strings.Contains(resetBody.Message, "Cluster reset") {
-			t.Errorf("expected message to contain 'Cluster reset', got %q", resetBody.Message)
-		}
-		if resetBody.ActorsReset != 2 {
-			t.Errorf("expected actors_reset 2, got %d", resetBody.ActorsReset)
-		}
-
-		// Verify all actor states reset to LifecycleSuspended
-		st1, _ := gw.GetActorState("attendee-01")
-		st2, _ := gw.GetActorState("attendee-02")
-		st3, _ := gw.GetActorState("attendee-03")
-		if st1 != types.LifecycleSuspended {
-			t.Errorf("expected attendee-01 state %s, got %s", types.LifecycleSuspended, st1)
-		}
-		if st2 != types.LifecycleSuspended {
-			t.Errorf("expected attendee-02 state %s, got %s", types.LifecycleSuspended, st2)
-		}
-		if st3 != types.LifecycleSuspended {
-			t.Errorf("expected attendee-03 state %s, got %s", types.LifecycleSuspended, st3)
-		}
-
-		// Verify suspender was called for previously active actors (attendee-01 and attendee-02), but not attendee-03
-		calls := suspender.getCalls()
-		suspendedActors := make(map[string]bool)
-		for _, c := range calls {
-			if c.Atespace == "ate-demo-conf" {
-				suspendedActors[c.ActorID] = true
-			}
-		}
-		if !suspendedActors["attendee-01"] {
-			t.Errorf("expected suspender called for attendee-01, calls: %+v", calls)
-		}
-		if !suspendedActors["attendee-02"] {
-			t.Errorf("expected suspender called for attendee-02, calls: %+v", calls)
-		}
-		if suspendedActors["attendee-03"] {
-			t.Errorf("expected suspender NOT called for already suspended attendee-03, calls: %+v", calls)
-		}
-
-		// Verify last results cleared
-		if res, ok := gw.GetLastResult("attendee-01"); ok && res != nil {
-			t.Errorf("expected last result for attendee-01 to be cleared, got %+v", res)
-		}
-
-		// Verify pending approval and chat history cleared via actor inspector
-		detResp, err := http.Get(ts.URL + "/api/actor/attendee-02")
-		if err != nil {
-			t.Fatalf("failed to get actor details: %v", err)
-		}
-		var details types.ActorDetails
-		if err := json.NewDecoder(detResp.Body).Decode(&details); err != nil {
-			t.Fatalf("failed to decode actor details: %v", err)
-		}
-		_ = detResp.Body.Close()
-
-		if details.PendingApproval != nil {
-			t.Errorf("expected pending approval to be cleared, got %+v", details.PendingApproval)
-		}
-		if len(details.ChatHistory) != 0 {
-			t.Errorf("expected chat history to be cleared, got %d items", len(details.ChatHistory))
-		}
-		if details.LastResult != nil {
-			t.Errorf("expected last result to be nil, got %+v", details.LastResult)
-		}
-
-		// Verify reset event logged in recentEvents
-		telemResp, err := http.Get(ts.URL + "/api/stage/telemetry")
-		if err != nil {
-			t.Fatalf("failed to get telemetry: %v", err)
-		}
-		var telem types.StageTelemetry
-		if err := json.NewDecoder(telemResp.Body).Decode(&telem); err != nil {
-			t.Fatalf("failed to decode telemetry: %v", err)
-		}
-		_ = telemResp.Body.Close()
-
-		foundResetEvent := false
-		for _, ev := range telem.RecentEvents {
-			if strings.Contains(ev, "Cluster reset: all actors suspended to GCS, worker pods freed") {
-				foundResetEvent = true
-				break
-			}
-		}
-		if !foundResetEvent {
-			t.Errorf("expected reset event in recentEvents, got %+v", telem.RecentEvents)
-		}
-
-		// Verify SSE broadcasted LifecycleSuspended event
-		select {
-		case sseEv := <-sseEvents:
-			if sseEv.AttendeeID != "attendee-01" {
-				t.Errorf("expected SSE event attendee_id 'attendee-01', got %q", sseEv.AttendeeID)
-			}
-			if sseEv.State != types.LifecycleSuspended {
-				t.Errorf("expected SSE event state %s, got %s", types.LifecycleSuspended, sseEv.State)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for LifecycleSuspended SSE broadcast")
-		}
-	})
-
-	t.Run("MethodValidation", func(t *testing.T) {
-		methods := []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch}
-		for _, m := range methods {
-			req, err := http.NewRequest(m, ts.URL+"/api/reset", nil)
-			if err != nil {
-				t.Fatalf("failed to create %s request: %v", m, err)
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("failed %s /api/reset: %v", m, err)
-			}
-			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusMethodNotAllowed {
-				t.Errorf("expected 405 Method Not Allowed for %s /api/reset, got %d", m, resp.StatusCode)
-			}
-		}
-	})
-
-	t.Run("HaltsSimulationRunner", func(t *testing.T) {
-		runner := &mockSimulationController{}
-		gw.SetSimulationController(runner)
-
-		resp, err := http.Post(ts.URL+"/api/reset", "application/json", nil)
-		if err != nil {
-			t.Fatalf("failed to call /api/reset: %v", err)
-		}
-		_ = resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", resp.StatusCode)
-		}
-		if !runner.stopped.Load() {
-			t.Errorf("expected active simulation runner to be halted upon reset")
-		}
-	})
-
-	t.Run("ConcurrencySafety", func(t *testing.T) {
-		const numWorkers = 8
-		const numIterations = 15
-
-		var wg sync.WaitGroup
-		wg.Add(numWorkers)
-
-		for i := 0; i < numWorkers; i++ {
-			go func(workerID int) {
-				defer wg.Done()
-				client := &http.Client{Timeout: 5 * time.Second}
-
-				for j := 0; j < numIterations; j++ {
-					switch (workerID + j) % 4 {
-					case 0:
-						resp, err := client.Post(ts.URL+"/api/reset", "application/json", nil)
-						if err == nil {
-							_ = resp.Body.Close()
-						}
-					case 1:
-						resp, err := client.Get(ts.URL + "/api/stage/telemetry")
-						if err == nil {
-							var telem types.StageTelemetry
-							_ = json.NewDecoder(resp.Body).Decode(&telem)
-							_ = resp.Body.Close()
-						}
-					case 2:
-						resp, err := client.Get(ts.URL + "/api/actor/attendee-01")
-						if err == nil {
-							_ = resp.Body.Close()
-						}
-					case 3:
-						resp, err := client.Get(ts.URL + "/api/session")
-						if err == nil {
-							_ = resp.Body.Close()
-						}
-					}
-				}
-			}(i)
-		}
-
-		wg.Wait()
-	})
-}
-
 func TestSimulationEndpoint(t *testing.T) {
 	var chatCalls atomic.Int64
 	var approveCalls atomic.Int64
@@ -2415,10 +1933,8 @@ func TestSimulationEndpoint(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	suspender := &mockSuspender{}
 	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace("ate-demo-conf"),
-		gateway.WithSuspender(suspender),
 	)
 	defer gw.Close()
 
@@ -2837,10 +2353,8 @@ func TestActionStreamEndpoints(t *testing.T) {
 	upstreamSrv := httptest.NewServer(upstreamMux)
 	defer upstreamSrv.Close()
 
-	suspender := &mockSuspender{}
 	gw := newTestGateway(t, upstreamSrv.URL, "",
 		gateway.WithAtespace("ate-demo-conf"),
-		gateway.WithSuspender(suspender),
 	)
 	defer gw.Close()
 
@@ -2919,7 +2433,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 			RiskLevel:     types.RiskLow,
 			ApprovalID:    "app-test-1",
 			Decision:      types.DecisionApprove,
-			State:         types.LifecycleRunningGVisor,
+			Activity:      types.ActivityExecuting,
 		}
 		gw.RecordActionEntry(singleEntry)
 
@@ -2947,7 +2461,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 				AttendeeID: fmt.Sprintf("attendee-%02d", i%10),
 				Timestamp:  time.Now().Unix(),
 				Prompt:     fmt.Sprintf("Prompt %d", i),
-				State:      types.LifecycleThinkingVertexAI,
+				Activity:   types.ActivityThinking,
 			})
 		}
 
@@ -3045,7 +2559,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 			AttendeeID: "attendee-77",
 			Timestamp:  time.Now().Unix(),
 			Prompt:     "Stream test prompt",
-			State:      types.LifecycleThinkingVertexAI,
+			Activity:   types.ActivityThinking,
 		}
 		gw.RecordActionEntry(broadcastEntry)
 
@@ -3191,7 +2705,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 			case ev := <-streamEvents:
 				if ev.AttendeeID == "attendee-99" {
 					events = append(events, ev)
-					if ev.Execution != nil && (ev.State == types.LifecycleSuspended || ev.State == types.LifecycleRunningGVisor) {
+					if ev.Execution != nil {
 						break drainLoop
 					}
 				}
@@ -3209,13 +2723,13 @@ func TestActionStreamEndpoints(t *testing.T) {
 
 		for i := range events {
 			ev := &events[i]
-			if chatEvent == nil && (ev.State == types.LifecycleThinkingVertexAI || ev.State == types.LifecycleRunning) {
+			if chatEvent == nil && ev.Activity == types.ActivityThinking {
 				chatEvent = ev
 			}
-			if approvalEvent == nil && ev.State == types.LifecycleAwaitingApproval {
+			if approvalEvent == nil && ev.Activity == types.ActivityAwaitingApproval {
 				approvalEvent = ev
 			}
-			if executionEvent == nil && (ev.State == types.LifecycleRunningGVisor || ev.State == types.LifecycleSuspended) {
+			if executionEvent == nil && ev.Activity == types.ActivityExecuting {
 				executionEvent = ev
 			}
 			if completedEntry == nil && ev.Execution != nil {
@@ -3224,13 +2738,13 @@ func TestActionStreamEndpoints(t *testing.T) {
 		}
 
 		if chatEvent == nil {
-			t.Fatalf("expected chat event with state LifecycleThinkingVertexAI or LifecycleRunning, none found in %d events", len(events))
+			t.Fatalf("expected chat event with activity thinking, none found in %d events", len(events))
 		}
 		if approvalEvent == nil {
-			t.Fatalf("expected approval event with state LifecycleAwaitingApproval, none found in %d events", len(events))
+			t.Fatalf("expected approval event with activity awaiting approval, none found in %d events", len(events))
 		}
 		if executionEvent == nil {
-			t.Fatalf("expected execution event with state LifecycleRunningGVisor or LifecycleSuspended, none found in %d events", len(events))
+			t.Fatalf("expected execution event with activity executing, none found in %d events", len(events))
 		}
 		if completedEntry == nil {
 			t.Fatalf("expected completed entry with Execution result, none found in %d events", len(events))
@@ -3318,7 +2832,7 @@ func TestActionStreamEndpoints(t *testing.T) {
 							AttendeeID: fmt.Sprintf("attendee-%d", gid),
 							Timestamp:  time.Now().Unix(),
 							Prompt:     "Concurrent test prompt",
-							State:      types.LifecycleThinkingVertexAI,
+							Activity:   types.ActivityThinking,
 						})
 					case 1:
 						_ = gw.GetFeedHistory()
