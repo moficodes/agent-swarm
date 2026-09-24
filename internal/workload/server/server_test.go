@@ -32,19 +32,22 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
-func proxyConfig(url string) gemini.Config {
-	return gemini.Config{ProxyURL: url, Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}
-}
+var geminiConfig = gemini.Config{Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}
 
-func postChat(t *testing.T, h http.Handler, key, msg string) types.ChatMessage {
-	t.Helper()
+func chatRequest(key, msg string) *http.Request {
 	body, _ := json.Marshal(types.ChatRequest{Message: msg})
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewReader(body))
 	if key != "" {
 		req.Header.Set(types.ModelKeyHeader, key)
 	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	return req
+}
+
+// postChat runs one chat turn, relaying its model calls to the Vertex fake at
+// upstream the way the gateway would.
+func postChat(t *testing.T, h http.Handler, upstream, key, msg string) types.ChatMessage {
+	t.Helper()
+	rec := geminitest.Drive(t, h, upstream, chatRequest(key, msg))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("chat status = %d, body %s", rec.Code, rec.Body)
 	}
@@ -135,9 +138,9 @@ func TestChat_MockedGeminiHTTPTransport(t *testing.T) {
 		"print('executing gemini generated python script')",
 		"python",
 	))
-	srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)), server.WithWorkspaceDir(t.TempDir()))
+	srv := server.NewWorkloadServer(server.WithGeminiConfig(geminiConfig), server.WithWorkspaceDir(t.TempDir()))
 
-	chatMsg := postChat(t, srv.Handler(), "test-gemini-key", "Check cluster metrics")
+	chatMsg := postChat(t, srv.Handler(), fake.URL, "test-gemini-key", "Check cluster metrics")
 
 	if chatMsg.Approval == nil {
 		t.Fatal("expected approval request parsed from gemini functionCall, got nil")
@@ -474,13 +477,13 @@ func TestApprove_IncludeStderr(t *testing.T) {
 	))
 
 	srv := server.NewWorkloadServer(
-		server.WithGeminiConfig(proxyConfig(fake.URL)),
+		server.WithGeminiConfig(geminiConfig),
 		server.WithWorkspaceDir(workspace),
 	)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	chatMsg := postChat(t, srv.Handler(), "test-key", "Run analysis with warnings")
+	chatMsg := postChat(t, srv.Handler(), fake.URL, "test-key", "Run analysis with warnings")
 	if chatMsg.Approval == nil {
 		t.Fatal("expected approval request")
 	}
@@ -521,9 +524,9 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 			geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "cluster_telemetry"}),
 			geminitest.ApprovalResponse("Apply telemetry mitigation script", "print('mitigation executed')", "python"),
 		)
-		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)), server.WithWorkspaceDir(t.TempDir()))
+		srv := server.NewWorkloadServer(server.WithGeminiConfig(geminiConfig), server.WithWorkspaceDir(t.TempDir()))
 
-		msg := postChat(t, srv.Handler(), "k.mac", "Analyze metrics and mitigate anomalies")
+		msg := postChat(t, srv.Handler(), fake.URL, "k.mac", "Analyze metrics and mitigate anomalies")
 
 		reqs := fake.Requests()
 		if len(reqs) != 2 {
@@ -552,9 +555,9 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 			geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "system_telemetry"}),
 			geminitest.TextResponse("All 7 telemetry samples are within nominal parameters."),
 		)
-		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)), server.WithWorkspaceDir(t.TempDir()))
+		srv := server.NewWorkloadServer(server.WithGeminiConfig(geminiConfig), server.WithWorkspaceDir(t.TempDir()))
 
-		msg := postChat(t, srv.Handler(), "k.mac", "Check cluster telemetry status")
+		msg := postChat(t, srv.Handler(), fake.URL, "k.mac", "Check cluster telemetry status")
 
 		if n := len(fake.Requests()); n != 2 {
 			t.Fatalf("expected 2 turns in tool execution loop, got %d", n)
@@ -577,25 +580,14 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 		fake := geminitest.New(t, geminitest.ApprovalResponse("Slow background job", "sleep 0.4", "sh"))
 
 		srv := server.NewWorkloadServer(
-			server.WithGeminiConfig(proxyConfig(fake.URL)),
+			server.WithGeminiConfig(geminiConfig),
 			server.WithWorkspaceDir(workspace),
 		)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 
 		// Step 1: Create approval request
-		chatReq, _ := json.Marshal(types.ChatRequest{Message: "Run slow job"})
-		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(chatReq))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set(types.ModelKeyHeader, "k.mac")
-		chatResp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("chat request failed: %v", err)
-		}
-		defer chatResp.Body.Close()
-
-		var chatMsg types.ChatMessage
-		_ = json.NewDecoder(chatResp.Body).Decode(&chatMsg)
+		chatMsg := postChat(t, srv.Handler(), fake.URL, "k.mac", "Run slow job")
 		if chatMsg.Approval == nil {
 			t.Fatal("expected approval request")
 		}
@@ -650,21 +642,14 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 		}))
 		defer fake.Close()
 
-		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)))
+		srv := server.NewWorkloadServer(server.WithGeminiConfig(geminiConfig))
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 
 		chatDone := make(chan struct{})
 		go func() {
 			defer close(chatDone)
-			reqBody, _ := json.Marshal(types.ChatRequest{Message: "Check latency"})
-			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(reqBody))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set(types.ModelKeyHeader, "k.mac")
-			resp, chatErr := http.DefaultClient.Do(req)
-			if chatErr == nil {
-				_ = resp.Body.Close()
-			}
+			geminitest.Drive(t, srv.Handler(), fake.URL, chatRequest("k.mac", "Check latency"))
 		}()
 
 		// Wait briefly so handleChat has entered Generate
@@ -693,28 +678,122 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 	})
 }
 
-func TestChat_UsesModelKeyFromGatewayHeader(t *testing.T) {
+func TestChat_StoresGatewayKeyAndSendsNoCredentials(t *testing.T) {
 	fake := geminitest.New(t, geminitest.TextResponse("from gemini"))
-	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(proxyConfig(fake.URL)))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
 
-	msg := postChat(t, s.Handler(), "attendee-01.mac", "hi")
+	msg := postChat(t, s.Handler(), fake.URL, "attendee-01.mac", "hi")
 
 	if msg.Content != "from gemini" || msg.Source != types.SourceGemini {
 		t.Errorf("reply = %q source %q, want gemini reply", msg.Content, msg.Source)
 	}
-	if got := fake.Requests()[0].Authorization; got != "Bearer attendee-01.mac" {
-		t.Errorf("proxy Authorization = %q", got)
+	if body := string(fake.Requests()[0].Body); strings.Contains(body, "attendee-01.mac") {
+		t.Errorf("model call carries the gateway key: %s", body)
 	}
 	if s.ModelKey() != "attendee-01.mac" {
 		t.Errorf("ModelKey() = %q", s.ModelKey())
 	}
 }
 
+func serve(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func modelResult(res types.ModelResult) *http.Request {
+	b, _ := json.Marshal(res)
+	return httptest.NewRequest(http.MethodPost, types.ModelResultPath, bytes.NewReader(b))
+}
+
+func modelCall(t *testing.T, rec *httptest.ResponseRecorder) *types.ModelCall {
+	t.Helper()
+	var step types.ModelCallStep
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &step) != nil || step.ModelCall == nil {
+		t.Fatalf("response = %d %s, want a model call", rec.Code, rec.Body)
+	}
+	return step.ModelCall
+}
+
+func TestChat_HandsModelCallToGatewayAndRepliesAfterResult(t *testing.T) {
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
+
+	call := modelCall(t, serve(s.Handler(), chatRequest("k.mac", "hi")))
+	want := "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-2.5-flash:generateContent"
+	if call.Path != want || !strings.Contains(string(call.Body), "hi") {
+		t.Errorf("call = %s %s, want %s carrying the prompt", call.Path, call.Body, want)
+	}
+
+	rec := serve(s.Handler(), modelResult(types.ModelResult{
+		CallID: call.CallID, Status: http.StatusOK, Body: []byte(geminitest.TextResponse("relayed answer")),
+	}))
+	var msg types.ChatMessage
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &msg) != nil {
+		t.Fatalf("result response = %d %s", rec.Code, rec.Body)
+	}
+	if msg.Content != "relayed answer" || msg.Source != types.SourceGemini {
+		t.Errorf("reply = %q source %q, want the relayed Gemini answer", msg.Content, msg.Source)
+	}
+	if h := s.History(); len(h) != 2 || h[1].Content != "relayed answer" {
+		t.Errorf("History = %+v", h)
+	}
+}
+
+func TestModelResult_UnknownCallIsConflictAndTurnKeepsWaiting(t *testing.T) {
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
+	call := modelCall(t, serve(s.Handler(), chatRequest("k.mac", "hi")))
+
+	if rec := serve(s.Handler(), modelResult(types.ModelResult{CallID: "forged", Status: http.StatusOK})); rec.Code != http.StatusConflict {
+		t.Errorf("forged call ID: status = %d, want 409", rec.Code)
+	}
+	rec := serve(s.Handler(), modelResult(types.ModelResult{
+		CallID: call.CallID, Status: http.StatusOK, Body: []byte(geminitest.TextResponse("ok")),
+	}))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok"`) {
+		t.Errorf("real result after a forged one = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestModelResult_WithoutATurnIsConflict(t *testing.T) {
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
+	if rec := serve(s.Handler(), modelResult(types.ModelResult{CallID: "x", Status: http.StatusOK})); rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rec.Code)
+	}
+	if rec := serve(s.Handler(), httptest.NewRequest(http.MethodGet, types.ModelResultPath, nil)); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET status = %d, want 405", rec.Code)
+	}
+}
+
+func TestChat_SecondChatWaitsForTheRunningTurn(t *testing.T) {
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
+	first := modelCall(t, serve(s.Handler(), chatRequest("k.mac", "one")))
+
+	second := make(chan *httptest.ResponseRecorder, 1)
+	go func() { second <- serve(s.Handler(), chatRequest("k.mac", "two")) }()
+	select {
+	case rec := <-second:
+		t.Fatalf("second chat answered %d %s while the first turn was running", rec.Code, rec.Body)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	serve(s.Handler(), modelResult(types.ModelResult{
+		CallID: first.CallID, Status: http.StatusOK, Body: []byte(geminitest.TextResponse("first")),
+	}))
+	select {
+	case rec := <-second:
+		if call := modelCall(t, rec); !strings.Contains(string(call.Body), "first") {
+			t.Errorf("second turn's call lacks the first turn's reply: %s", call.Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second chat never started")
+	}
+}
+
 func TestChat_ModelFailureFallsBackToLabeledMock(t *testing.T) {
 	fake := geminitest.NewStatus(t, http.StatusInternalServerError)
-	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(proxyConfig(fake.URL)))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
 
-	msg := postChat(t, s.Handler(), "k.mac", "hi")
+	msg := postChat(t, s.Handler(), fake.URL, "k.mac", "hi")
 
 	if msg.Source != types.SourceMockFallback {
 		t.Errorf("Source = %q, want mock-fallback", msg.Source)
@@ -723,7 +802,7 @@ func TestChat_ModelFailureFallsBackToLabeledMock(t *testing.T) {
 
 func TestChat_NoProxyConfiguredUsesLabeledMock(t *testing.T) {
 	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(gemini.Config{}))
-	if msg := postChat(t, s.Handler(), "", "hi"); msg.Source != types.SourceMock {
+	if msg := postChat(t, s.Handler(), "", "", "hi"); msg.Source != types.SourceMock {
 		t.Errorf("Source = %q, want mock", msg.Source)
 	}
 }
@@ -731,9 +810,9 @@ func TestChat_NoProxyConfiguredUsesLabeledMock(t *testing.T) {
 func TestChat_ForceMockSkipsProxy(t *testing.T) {
 	fake := geminitest.New(t, geminitest.TextResponse("unused"))
 	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()),
-		server.WithGeminiConfig(proxyConfig(fake.URL)), server.WithForceMock(true))
+		server.WithGeminiConfig(geminiConfig), server.WithForceMock(true))
 
-	if msg := postChat(t, s.Handler(), "k.mac", "hi"); msg.Source != types.SourceMock {
+	if msg := postChat(t, s.Handler(), fake.URL, "k.mac", "hi"); msg.Source != types.SourceMock {
 		t.Errorf("Source = %q, want mock", msg.Source)
 	}
 	if n := len(fake.Requests()); n != 0 {
@@ -743,10 +822,10 @@ func TestChat_ForceMockSkipsProxy(t *testing.T) {
 
 func TestChat_HistoryIsSentOnFollowingTurn(t *testing.T) {
 	fake := geminitest.New(t, geminitest.TextResponse("first answer"), geminitest.TextResponse("second answer"))
-	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(proxyConfig(fake.URL)))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
 
-	postChat(t, s.Handler(), "k.mac", "remember the word pelican")
-	postChat(t, s.Handler(), "k.mac", "what word?")
+	postChat(t, s.Handler(), fake.URL, "k.mac", "remember the word pelican")
+	postChat(t, s.Handler(), fake.URL, "k.mac", "what word?")
 
 	first := string(fake.Requests()[0].Body)
 	second := string(fake.Requests()[1].Body)
@@ -767,8 +846,8 @@ func TestChat_HistoryIsSentOnFollowingTurn(t *testing.T) {
 func approvalServer(t *testing.T, code, lang string) (*server.WorkloadServer, string) {
 	t.Helper()
 	fake := geminitest.New(t, geminitest.ApprovalResponse("run it", code, lang))
-	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(proxyConfig(fake.URL)))
-	msg := postChat(t, s.Handler(), "k.mac", "do the thing")
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
+	msg := postChat(t, s.Handler(), fake.URL, "k.mac", "do the thing")
 	if msg.Approval == nil {
 		t.Fatal("expected an approval request")
 	}

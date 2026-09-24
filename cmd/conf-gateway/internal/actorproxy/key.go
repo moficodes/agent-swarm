@@ -12,32 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package modelproxy forwards actors' Gemini calls to Vertex AI with the
-// gateway's own credentials, so no model credential lives in an actor.
-package modelproxy
+package actorproxy
 
 import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"strings"
 )
 
-// Key returns the model proxy key for one actor: "<actor>.<mac>". The MAC
-// input is prefixed so the key never matches another use of the secret, such
-// as the HMAC that signs attendee JWTs.
-func Key(secret []byte, atespace, actor string) string {
+// ModelKey returns one actor's key: "<actor>.<mac>". The gateway sends it on
+// every request so the actor can check that later calls, such as
+// ClearHistory, come from the same gateway. The MAC input is prefixed so the
+// key never matches another use of the secret, such as the HMAC that signs
+// attendee JWTs.
+func ModelKey(secret []byte, atespace, actor string) string {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte("model-key/" + atespace + "/" + actor))
 	return actor + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-// actorFromKey returns the actor a key was issued to, if the MAC is valid.
-func actorFromKey(secret []byte, atespace, key string) (string, bool) {
-	i := strings.LastIndexByte(key, '.')
-	if i <= 0 {
-		return "", false
-	}
-	actor := key[:i]
-	return actor, hmac.Equal([]byte(Key(secret, atespace, actor)), []byte(key))
 }

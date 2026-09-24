@@ -514,7 +514,7 @@ func TestSandboxExecutor_SerializesExecutions(t *testing.T) {
 
 func TestExecute_ChildSeesOnlyMinimalEnvironment(t *testing.T) {
 	t.Setenv("HMAC_SECRET", "must-not-leak")
-	t.Setenv("MODEL_PROXY_URL", "http://proxy")
+	t.Setenv("VERTEX_PROJECT", "proj")
 	t.Setenv("GEMINI_CREDENTIALS", "leaked-gemini-key")
 	t.Setenv("GOOGLE_API_KEY", "leaked-google-key")
 
@@ -555,8 +555,8 @@ func TestExecute_ChildSeesOnlyMinimalEnvironment(t *testing.T) {
 	if v, ok := env["HMAC_SECRET"]; ok {
 		t.Errorf("child env leaked HMAC_SECRET=%q", v)
 	}
-	if v, ok := env["MODEL_PROXY_URL"]; ok {
-		t.Errorf("child env leaked MODEL_PROXY_URL=%q", v)
+	if v, ok := env["VERTEX_PROJECT"]; ok {
+		t.Errorf("child env leaked VERTEX_PROJECT=%q", v)
 	}
 	// /bin/sh injects PWD, SHLVL, _ and (on some platforms) OLDPWD itself;
 	// they are not part of what the executor controls, so they're ignored.

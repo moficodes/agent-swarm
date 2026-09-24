@@ -30,8 +30,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorproxy"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
@@ -414,7 +414,7 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	if receivedTargetActor.Load() == nil || *receivedTargetActor.Load() != "ate-demo-conf/attendee-01" {
 		t.Errorf("expected ate-target-actor 'ate-demo-conf/attendee-01', got %v", receivedTargetActor.Load())
 	}
-	if want := modelproxy.Key([]byte(secret), atespace, "attendee-01"); receivedModelKey.Load() == nil || *receivedModelKey.Load() != want {
+	if want := actorproxy.ModelKey([]byte(secret), atespace, "attendee-01"); receivedModelKey.Load() == nil || *receivedModelKey.Load() != want {
 		t.Errorf("expected actor model key %q, got %v", want, receivedModelKey.Load())
 	}
 

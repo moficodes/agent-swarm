@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/auth"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -40,7 +39,7 @@ func TestProxy_RewritesHeadersAndReportsReply(t *testing.T) {
 
 	var reply *types.ChatMessage
 	var replyStatus int
-	p := New(u, "space", []byte("secret"), nil, Hooks{
+	p := New(u, "space", []byte("secret"), nil, nil, Hooks{
 		OnReply: func(attendee string, status int, msg *types.ChatMessage) {
 			if attendee == "attendee-01" {
 				reply, replyStatus = msg, status
@@ -67,7 +66,7 @@ func TestProxy_RewritesHeadersAndReportsReply(t *testing.T) {
 	if v := got.Values("ate-target-actor"); len(v) != 1 || v[0] != "space/attendee-01" {
 		t.Errorf("ate-target-actor = %q, want only space/attendee-01", v)
 	}
-	if want := modelproxy.Key([]byte("secret"), "space", "attendee-01"); got.Get(types.ModelKeyHeader) != want {
+	if want := ModelKey([]byte("secret"), "space", "attendee-01"); got.Get(types.ModelKeyHeader) != want {
 		t.Errorf("model key = %q, want %q", got.Get(types.ModelKeyHeader), want)
 	}
 	if rec.Header().Get(types.ModelKeyHeader) != "" {
@@ -88,7 +87,7 @@ func TestProxy_ReportsActorAndRouterErrors(t *testing.T) {
 	u, _ := url.Parse(router.URL)
 	actorErr := make(chan string, 1)
 	routerErr := make(chan error, 1)
-	p := New(u, "space", []byte("s"), nil, Hooks{
+	p := New(u, "space", []byte("s"), nil, nil, Hooks{
 		OnActorError: func(a string) { actorErr <- a },
 		OnError:      func(_ string, err error) { routerErr <- err },
 	})
@@ -115,7 +114,7 @@ func claim(p *Proxy, attendee, body string) (*httptest.ResponseRecorder, *http.R
 }
 
 func TestClaimApproval_BindsToPendingApproval(t *testing.T) {
-	p := New(nil, "space", []byte("s"), nil, Hooks{})
+	p := New(nil, "space", []byte("s"), nil, nil, Hooks{})
 	p.SetPending("attendee-01", &types.ApprovalRequest{ApprovalID: "a1", Code: "print(1)", Language: "python"})
 
 	if rec, _, _, _, ok := claim(p, "attendee-01", `{"approval_id":"other","decision":"APPROVE"}`); ok || rec.Code != http.StatusConflict {
@@ -162,7 +161,7 @@ func TestClaimApproval_BindsToPendingApproval(t *testing.T) {
 }
 
 func TestClaimApproval_RejectsBadPayload(t *testing.T) {
-	p := New(nil, "space", []byte("s"), nil, Hooks{})
+	p := New(nil, "space", []byte("s"), nil, nil, Hooks{})
 	if rec, _, _, _, ok := claim(p, "attendee-01", `not json`); ok || rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad json: ok=%v status=%d", ok, rec.Code)
 	}
@@ -175,7 +174,7 @@ func TestProxy_StripsModelKeyFromErrorResponse(t *testing.T) {
 	}))
 	defer router.Close()
 	u, _ := url.Parse(router.URL)
-	p := New(u, "space", []byte("s"), nil, Hooks{})
+	p := New(u, "space", []byte("s"), nil, nil, Hooks{})
 
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, WithAttendee(httptest.NewRequest(http.MethodPost, "/api/chat", nil), "attendee-01"))
@@ -196,7 +195,7 @@ func TestClearHistory_PostsToTheAttendeesActor(t *testing.T) {
 	}))
 	defer router.Close()
 	u, _ := url.Parse(router.URL)
-	p := New(u, "space", []byte("secret"), nil, Hooks{})
+	p := New(u, "space", []byte("secret"), nil, nil, Hooks{})
 
 	if err := p.ClearHistory(context.Background(), "attendee-04"); err != nil {
 		t.Fatalf("ClearHistory = %v", err)
@@ -207,7 +206,7 @@ func TestClearHistory_PostsToTheAttendeesActor(t *testing.T) {
 	if got.Header.Get("ate-target-actor") != "space/attendee-04" {
 		t.Errorf("ate-target-actor = %q", got.Header.Get("ate-target-actor"))
 	}
-	if want := modelproxy.Key([]byte("secret"), "space", "attendee-04"); got.Header.Get(types.ModelKeyHeader) != want {
+	if want := ModelKey([]byte("secret"), "space", "attendee-04"); got.Header.Get(types.ModelKeyHeader) != want {
 		t.Errorf("model key = %q, want %q", got.Header.Get(types.ModelKeyHeader), want)
 	}
 

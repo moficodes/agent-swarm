@@ -26,7 +26,7 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "MODEL_PROXY_ADDR", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY"}
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY"}
 
 // clearConfigEnv clears every environment variable LoadConfig reads, so tests
 // start from a clean slate regardless of the host environment.
@@ -158,11 +158,11 @@ func TestGatewayInstanceCreation(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_ModelProxyDefaults(t *testing.T) {
+func TestLoadConfig_ModelDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := LoadConfig()
-	if cfg.ModelProxyAddr != ":8091" || cfg.VertexLocation != "us-central1" {
-		t.Errorf("defaults = %q %q", cfg.ModelProxyAddr, cfg.VertexLocation)
+	if cfg.VertexLocation != "us-central1" {
+		t.Errorf("VertexLocation = %q", cfg.VertexLocation)
 	}
 	if !slices.Equal(cfg.ModelAllowlist, []string{"gemini-2.5-flash"}) {
 		t.Errorf("ModelAllowlist = %v", cfg.ModelAllowlist)
@@ -179,7 +179,7 @@ func TestLoadConfig_ModelAllowlistTrimsEntries(t *testing.T) {
 
 func TestNewModelProxy_DisabledWithoutProject(t *testing.T) {
 	clearConfigEnv(t)
-	p, err := newModelProxy(context.Background(), LoadConfig(), []byte("secret"))
+	p, err := newModelProxy(context.Background(), LoadConfig())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -80,14 +79,12 @@ type Config struct {
 	// nothing is suspended.
 	LocalMode bool
 
-	// ModelProxyAddr is the listen address for actor model calls.
-	ModelProxyAddr string
 	// VertexProject and VertexLocation identify the Vertex AI endpoint the
-	// model proxy forwards to. An empty VertexProject disables the proxy.
+	// gateway makes actors' model calls against. An empty VertexProject
+	// disables model calls.
 	VertexProject  string
 	VertexLocation string
-	// ModelAllowlist restricts which models actors may call through the
-	// proxy.
+	// ModelAllowlist restricts which models actors may call.
 	ModelAllowlist []string
 }
 
@@ -110,10 +107,6 @@ func LoadConfig() Config {
 	atespace := os.Getenv("ATESPACE")
 	if atespace == "" {
 		atespace = "ate-demo-conf"
-	}
-	modelProxyAddr := os.Getenv("MODEL_PROXY_ADDR")
-	if modelProxyAddr == "" {
-		modelProxyAddr = ":8091"
 	}
 	vertexLocation := os.Getenv("VERTEX_LOCATION")
 	if vertexLocation == "" {
@@ -143,7 +136,6 @@ func LoadConfig() Config {
 		SuspendAfter:          envDuration("SUSPEND_AFTER", 0),
 		MockLLM:               os.Getenv("DEMO_MOCK_LLM") == "true",
 		LocalMode:             os.Getenv("LOCAL_MODE") == "true",
-		ModelProxyAddr:        modelProxyAddr,
 		VertexProject:         os.Getenv("VERTEX_PROJECT"),
 		VertexLocation:        vertexLocation,
 		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
@@ -198,10 +190,8 @@ func resolveSecret(s string) (string, bool) {
 // newModelProxy builds the model proxy from cfg. An empty VertexProject
 // yields a disabled proxy; a non-empty one requires application default
 // credentials.
-func newModelProxy(ctx context.Context, cfg Config, secret []byte) (*modelproxy.Proxy, error) {
+func newModelProxy(ctx context.Context, cfg Config) (*modelproxy.Proxy, error) {
 	pc := modelproxy.Config{
-		Secret:   secret,
-		Atespace: cfg.Atespace,
 		Project:  cfg.VertexProject,
 		Location: cfg.VertexLocation,
 		Models:   cfg.ModelAllowlist,
@@ -250,12 +240,12 @@ func main() {
 		log.Printf("HMAC_SECRET is unset; generated one. Sessions and model keys will not survive a restart.")
 	}
 
-	proxy, err := newModelProxy(ctx, cfg, []byte(secret))
+	proxy, err := newModelProxy(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if !proxy.Enabled() {
-		log.Printf("VERTEX_PROJECT is unset; the model proxy is disabled and actors must run with DEMO_MOCK_LLM=true.")
+		log.Printf("VERTEX_PROJECT is unset; model calls are disabled and actors reply with the mock engine.")
 	}
 
 	routerStatusSrc, err := newRouterStatusSource(cfg)
@@ -270,6 +260,7 @@ func main() {
 		gateway.WithPollInterval(cfg.StatePollInterval),
 		gateway.WithSuspendAfter(cfg.SuspendAfter),
 		gateway.WithUsage(proxy),
+		gateway.WithModel(proxy),
 		gateway.WithMockLLM(cfg.MockLLM || !proxy.Enabled()),
 		gateway.WithStaticFS(staticFS),
 		gateway.WithRouterStatus(routerstatus.NewAggregator(routerStatusSrc, http.DefaultClient)),
@@ -295,23 +286,11 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	modelSrv := &http.Server{
-		Addr:              cfg.ModelProxyAddr,
-		Handler:           proxy,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-	}
 
 	go func() {
 		log.Printf("Starting conference edge gateway on :%s (router: %s, statusz: %s, atespace: %s)...", cfg.Port, cfg.RouterURL, cfg.StatusURL, cfg.Atespace)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("gateway server failed: %v", err)
-		}
-	}()
-	go func() {
-		log.Printf("Starting model proxy on %s (project: %s, location: %s)...", cfg.ModelProxyAddr, cfg.VertexProject, cfg.VertexLocation)
-		if err := modelSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("model proxy server failed: %v", err)
 		}
 	}()
 
@@ -321,19 +300,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("graceful shutdown failed: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		if err := modelSrv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("model proxy graceful shutdown failed: %v", err)
-		}
-	}()
-	wg.Wait()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
+	}
 }

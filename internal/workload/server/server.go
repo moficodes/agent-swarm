@@ -28,6 +28,7 @@ import (
 
 	"github.com/agent-substrate/substrate/demos/conference/internal/workload/engine"
 	"github.com/agent-substrate/substrate/demos/conference/internal/workload/gemini"
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/relay"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -41,8 +42,9 @@ func WithForceMock(forceMock bool) ServerOption {
 	}
 }
 
-// WithGeminiConfig points the actor's Gemini client at a model proxy. A
-// config that is not Enabled leaves the actor on the mock engine.
+// WithGeminiConfig names the Vertex model the actor's Gemini client calls
+// through the gateway. A config that is not Enabled leaves the actor on the
+// mock engine.
 func WithGeminiConfig(cfg gemini.Config) ServerOption {
 	return func(s *WorkloadServer) { s.geminiCfg = cfg }
 }
@@ -85,7 +87,9 @@ type WorkloadServer struct {
 	modelKey        string
 	forceMock       bool
 	workspaceDir    string
+	turnSlot        chan struct{} // held for the length of a chat turn
 	mu              sync.Mutex
+	turn            *relay.Turn // the turn holding turnSlot
 	pendingApproval *types.ApprovalRequest
 	history         []types.ChatMessage
 }
@@ -105,6 +109,7 @@ func NewWorkloadServer(opts ...ServerOption) *WorkloadServer {
 		mockEngine:   mockEngine,
 		geminiCfg:    gemini.ConfigFromEnv(),
 		forceMock:    os.Getenv("DEMO_MOCK_LLM") == "true",
+		turnSlot:     make(chan struct{}, 1),
 	}
 
 	for _, opt := range opts {
@@ -112,14 +117,15 @@ func NewWorkloadServer(opts ...ServerOption) *WorkloadServer {
 	}
 
 	if s.geminiCfg.Enabled() {
-		s.gemini = gemini.New(s.geminiCfg, s.ModelKey)
+		s.gemini = gemini.New(s.geminiCfg)
 	}
 
 	s.routes()
 	return s
 }
 
-// ModelKey returns the latest model proxy key the gateway sent.
+// ModelKey returns the latest key the gateway sent. Only the gateway knows
+// it, so it authenticates the gateway's history clears.
 func (s *WorkloadServer) ModelKey() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -127,9 +133,9 @@ func (s *WorkloadServer) ModelKey() string {
 }
 
 // Handler returns the HTTP handler for the server. Every request that
-// carries a model key refreshes the one the Gemini client uses; one without
-// a key keeps the prior key. The key is never read from a request body. A
-// history clear must present the key already held and never replaces it.
+// carries a model key refreshes the one held; one without a key keeps the
+// prior key. The key is never read from a request body. A history clear must
+// present the key already held and never replaces it.
 func (s *WorkloadServer) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == types.ClearHistoryPath {
@@ -171,6 +177,7 @@ func (s *WorkloadServer) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/chat", s.handleChat)
 	s.mux.HandleFunc("/api/approve", s.handleApprove)
+	s.mux.HandleFunc(types.ModelResultPath, s.handleModelResult)
 }
 
 // handleClearHistory drops the conversation history and any pending
@@ -215,6 +222,12 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	select {
+	case s.turnSlot <- struct{}{}:
+	case <-r.Context().Done():
+		return
+	}
+
 	userMsg := types.ChatMessage{
 		ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
 		Sender:    types.SenderUser,
@@ -222,25 +235,74 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		Timestamp: time.Now().Unix(),
 	}
 
+	t := relay.NewTurn()
 	s.mu.Lock()
 	s.history = append(s.history, userMsg)
 	historyCopy := append([]types.ChatMessage(nil), s.history...)
+	s.turn = t
 	s.mu.Unlock()
 
-	assistantMsg := s.reply(r.Context(), historyCopy, req.Message)
-
-	s.mu.Lock()
-	if assistantMsg.Approval != nil {
-		s.pendingApproval = assistantMsg.Approval
-	}
-	s.history = append(s.history, *assistantMsg)
-	s.mu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(assistantMsg)
+	// The turn outlives this request: its model calls come back through
+	// handleModelResult.
+	t.Run(context.Background(), func(ctx context.Context) *types.ChatMessage {
+		assistantMsg := s.reply(ctx, historyCopy, req.Message)
+		s.mu.Lock()
+		if assistantMsg.Approval != nil {
+			s.pendingApproval = assistantMsg.Approval
+		}
+		s.history = append(s.history, *assistantMsg)
+		s.turn = nil
+		s.mu.Unlock()
+		<-s.turnSlot
+		return assistantMsg
+	})
+	writeStep(w, r, t)
 }
 
-// chatTimeout bounds one Gemini turn, tool calls included.
+// maxModelResult bounds a model result body: the gateway caps Vertex AI
+// responses at 8 MiB, which base64 grows by a third.
+const maxModelResult = 12 << 20
+
+// handleModelResult delivers the gateway's answer to the running turn's
+// model call and answers with the turn's next step.
+func (s *WorkloadServer) handleModelResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var res types.ModelResult
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxModelResult)).Decode(&res); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	t := s.turn
+	s.mu.Unlock()
+	if t == nil || t.Deliver(res) != nil {
+		http.Error(w, "no model call is waiting for this result", http.StatusConflict)
+		return
+	}
+	writeStep(w, r, t)
+}
+
+// writeStep answers with the turn's next step: a model call for the gateway
+// to make, or the final reply. If the gateway goes away first, the turn
+// times out on its own.
+func writeStep(w http.ResponseWriter, r *http.Request, t *relay.Turn) {
+	step, err := t.Next(r.Context())
+	if err != nil {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if step.Call != nil {
+		_ = json.NewEncoder(w).Encode(types.ModelCallStep{ModelCall: step.Call})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(step.Reply)
+}
+
+// chatTimeout bounds one Gemini turn, tool calls and the gateway's model
+// calls included.
 const chatTimeout = 60 * time.Second
 
 func (s *WorkloadServer) reply(ctx context.Context, history []types.ChatMessage, prompt string) *types.ChatMessage {

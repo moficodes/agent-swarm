@@ -98,6 +98,12 @@ func WithUsage(u UsageSource) Option {
 	return func(g *Gateway) { g.usage = u }
 }
 
+// WithModel makes the model calls actors hand to the gateway through m.
+// Without it every model call is answered with 503.
+func WithModel(m actorproxy.ModelCaller) Option {
+	return func(g *Gateway) { g.model = m }
+}
+
 // WithMockLLM tells the UI that actors are replying without a model.
 func WithMockLLM(on bool) Option {
 	return func(g *Gateway) { g.mockLLM = on }
@@ -187,6 +193,7 @@ type Gateway struct {
 	pollInterval time.Duration
 	suspendAfter time.Duration
 	usage        UsageSource
+	model        actorproxy.ModelCaller
 	mockLLM      bool
 	statePollMs  atomic.Int64
 
@@ -279,7 +286,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	if gw.httpClient != nil && gw.httpClient.Transport != nil {
 		transport = gw.httpClient.Transport
 	}
-	gw.proxy = actorproxy.New(targetURL, gw.atespace, []byte(gw.secret), transport, actorproxy.Hooks{
+	gw.proxy = actorproxy.New(targetURL, gw.atespace, []byte(gw.secret), transport, gw.model, actorproxy.Hooks{
 		OnActorError: func(attendeeID string) { gw.setActivity(attendeeID, types.ActivityIdle) },
 		OnReply:      gw.onActorReply,
 		OnError:      gw.onProxyError,

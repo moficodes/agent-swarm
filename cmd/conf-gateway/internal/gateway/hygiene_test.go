@@ -22,8 +22,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/actorproxy"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
-	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -77,7 +77,7 @@ func TestProxy_DoesNotForwardSecretsToActor(t *testing.T) {
 			t.Errorf("actor received %s: %q", h, v)
 		}
 	}
-	if want := modelproxy.Key([]byte(secret), "ate-demo-conf", "attendee-01"); got.Get(types.ModelKeyHeader) != want {
+	if want := actorproxy.ModelKey([]byte(secret), "ate-demo-conf", "attendee-01"); got.Get(types.ModelKeyHeader) != want {
 		t.Errorf("actor received %s %q, want %q", types.ModelKeyHeader, got.Get(types.ModelKeyHeader), want)
 	}
 }

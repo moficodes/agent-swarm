@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package gemini runs the actor's Gemini tool loop against the gateway's
-// Vertex AI model proxy.
+// Package gemini runs the actor's Gemini tool loop. The gateway makes each
+// Vertex AI call for the actor, through the relay.
 package gemini
 
 import (
@@ -27,47 +27,39 @@ import (
 
 	"google.golang.org/genai"
 
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/relay"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
 const defaultModel = "gemini-2.5-flash"
 
-var (
-	// ErrDisabled means no model proxy is configured.
-	ErrDisabled = errors.New("gemini: model proxy not configured")
-	// ErrNoModelKey means the gateway has not sent this actor a model key yet.
-	ErrNoModelKey = errors.New("gemini: no model key received from the gateway")
-)
+// ErrDisabled means no Vertex project and location are configured.
+var ErrDisabled = errors.New("gemini: no Vertex project and location configured")
 
-// Config locates the model proxy and the Vertex model behind it.
+// Config names the Vertex model the actor's calls go to.
 type Config struct {
-	ProxyURL string
 	Project  string
 	Location string
 	Model    string
 }
 
-// ConfigFromEnv reads MODEL_PROXY_URL, VERTEX_PROJECT, VERTEX_LOCATION and GEMINI_MODEL.
+// ConfigFromEnv reads VERTEX_PROJECT, VERTEX_LOCATION and GEMINI_MODEL.
 func ConfigFromEnv() Config {
 	model := os.Getenv("GEMINI_MODEL")
 	if model == "" {
 		model = defaultModel
 	}
 	return Config{
-		ProxyURL: os.Getenv("MODEL_PROXY_URL"),
 		Project:  os.Getenv("VERTEX_PROJECT"),
 		Location: os.Getenv("VERTEX_LOCATION"),
 		Model:    model,
 	}
 }
 
-// Enabled reports whether the config names a proxy, project and location.
+// Enabled reports whether the config names a project and location.
 func (c Config) Enabled() bool {
-	return c.ProxyURL != "" && c.Project != "" && c.Location != ""
+	return c.Project != "" && c.Location != ""
 }
-
-// KeyFunc returns the actor's current model proxy key.
-type KeyFunc func() string
 
 // ResearchDataHandler answers the fetch_research_data tool.
 type ResearchDataHandler func(topic string) map[string]any
@@ -75,7 +67,7 @@ type ResearchDataHandler func(topic string) map[string]any
 // Option configures a Client.
 type Option func(*Client)
 
-// WithTransport sets the transport under the bearer-token layer.
+// WithTransport replaces the relay transport, for tests.
 func WithTransport(rt http.RoundTripper) Option {
 	return func(c *Client) { c.transport = rt }
 }
@@ -85,23 +77,22 @@ func WithResearchDataHandler(h ResearchDataHandler) Option {
 	return func(c *Client) { c.research = h }
 }
 
-// Client runs one Gemini turn, including tool calls, through the model proxy.
+// Client runs one Gemini turn, including tool calls.
 type Client struct {
 	cfg       Config
-	key       KeyFunc
 	transport http.RoundTripper
 	research  ResearchDataHandler
 }
 
-// New returns a client that authenticates every request with key().
-func New(cfg Config, key KeyFunc, opts ...Option) *Client {
+// New returns a client whose model calls go through the relay, so Generate
+// must run inside a relay.Turn.
+func New(cfg Config, opts ...Option) *Client {
 	if cfg.Model == "" {
 		cfg.Model = defaultModel
 	}
 	c := &Client{
 		cfg:       cfg,
-		key:       key,
-		transport: http.DefaultTransport,
+		transport: relay.Transport{},
 		research:  cannedResearchData,
 	}
 	for _, opt := range opts {
@@ -127,17 +118,12 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 	if !c.cfg.Enabled() {
 		return nil, ErrDisabled
 	}
-	if c.key == nil || c.key() == "" {
-		return nil, ErrNoModelKey
-	}
 	sdk, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Backend:    genai.BackendVertexAI,
-		Project:    c.cfg.Project,
-		Location:   c.cfg.Location,
-		HTTPClient: &http.Client{Transport: &bearerTransport{key: c.key, base: c.transport}},
-		HTTPOptions: genai.HTTPOptions{
-			BaseURL: strings.TrimRight(c.cfg.ProxyURL, "/") + "/model/",
-		},
+		Backend:     genai.BackendVertexAI,
+		Project:     c.cfg.Project,
+		Location:    c.cfg.Location,
+		HTTPClient:  &http.Client{Transport: c.transport},
+		HTTPOptions: genai.HTTPOptions{BaseURL: relay.BaseURL},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gemini: init client: %w", err)

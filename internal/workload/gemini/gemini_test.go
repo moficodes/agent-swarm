@@ -22,18 +22,19 @@ import (
 
 	"github.com/agent-substrate/substrate/demos/conference/internal/workload/gemini"
 	"github.com/agent-substrate/substrate/demos/conference/internal/workload/geminitest"
+	"github.com/agent-substrate/substrate/demos/conference/internal/workload/relay"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
-func testConfig(proxyURL string) gemini.Config {
-	return gemini.Config{ProxyURL: proxyURL, Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}
+var testConfig = gemini.Config{Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}
+
+func newClient(fake *geminitest.Server, opts ...gemini.Option) *gemini.Client {
+	return gemini.New(testConfig, append([]gemini.Option{gemini.WithTransport(fake.Transport())}, opts...)...)
 }
 
-func staticKey(k string) gemini.KeyFunc { return func() string { return k } }
-
-func TestGenerate_SendsVertexPathAndModelKeyAsBearer(t *testing.T) {
+func TestGenerate_SendsVertexPathWithoutCredentials(t *testing.T) {
 	fake := geminitest.New(t, geminitest.TextResponse("hello"))
-	c := gemini.New(testConfig(fake.URL), staticKey("attendee-01.mac"))
+	c := newClient(fake)
 
 	msg, err := c.Generate(context.Background(), nil, "hi")
 	if err != nil {
@@ -46,48 +47,24 @@ func TestGenerate_SendsVertexPathAndModelKeyAsBearer(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("got %d requests, want 1", len(reqs))
 	}
-	wantPath := "/model/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-2.5-flash:generateContent"
+	wantPath := "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-2.5-flash:generateContent"
 	if reqs[0].Method != "POST" || reqs[0].Path != wantPath {
 		t.Errorf("request = %s %s, want POST %s", reqs[0].Method, reqs[0].Path, wantPath)
 	}
-	if reqs[0].Authorization != "Bearer attendee-01.mac" {
-		t.Errorf("Authorization = %q, want the model key as a bearer token", reqs[0].Authorization)
+	if reqs[0].Authorization != "" {
+		t.Errorf("Authorization = %q, want none: the gateway adds credentials", reqs[0].Authorization)
 	}
 }
 
-func TestGenerate_ReadsLatestKeyPerRequest(t *testing.T) {
-	fake := geminitest.New(t, geminitest.TextResponse("a"))
-	key := "first.mac"
-	c := gemini.New(testConfig(fake.URL), func() string { return key })
-
-	if _, err := c.Generate(context.Background(), nil, "one"); err != nil {
-		t.Fatal(err)
-	}
-	key = "second.mac"
-	if _, err := c.Generate(context.Background(), nil, "two"); err != nil {
-		t.Fatal(err)
-	}
-	reqs := fake.Requests()
-	if reqs[1].Authorization != "Bearer second.mac" {
-		t.Errorf("second Authorization = %q, want Bearer second.mac", reqs[1].Authorization)
-	}
-}
-
-func TestGenerate_NoKeyFailsWithoutCallingProxy(t *testing.T) {
-	fake := geminitest.New(t, geminitest.TextResponse("unused"))
-	c := gemini.New(testConfig(fake.URL), staticKey(""))
-
-	_, err := c.Generate(context.Background(), nil, "hi")
-	if !errors.Is(err, gemini.ErrNoModelKey) {
-		t.Fatalf("err = %v, want ErrNoModelKey", err)
-	}
-	if n := len(fake.Requests()); n != 0 {
-		t.Errorf("proxy got %d requests, want 0", n)
+func TestGenerate_DefaultTransportNeedsARelayedTurn(t *testing.T) {
+	c := gemini.New(testConfig)
+	if _, err := c.Generate(context.Background(), nil, "hi"); !errors.Is(err, relay.ErrNoTurn) {
+		t.Fatalf("err = %v, want relay.ErrNoTurn", err)
 	}
 }
 
 func TestGenerate_DisabledConfig(t *testing.T) {
-	c := gemini.New(gemini.Config{}, staticKey("k.mac"))
+	c := gemini.New(gemini.Config{})
 	if _, err := c.Generate(context.Background(), nil, "hi"); !errors.Is(err, gemini.ErrDisabled) {
 		t.Fatalf("err = %v, want ErrDisabled", err)
 	}
@@ -95,7 +72,7 @@ func TestGenerate_DisabledConfig(t *testing.T) {
 
 func TestGenerate_ApprovalCallBecomesPendingApproval(t *testing.T) {
 	fake := geminitest.New(t, geminitest.ApprovalResponse("count files", "ls | wc -l", "sh"))
-	c := gemini.New(testConfig(fake.URL), staticKey("k.mac"))
+	c := newClient(fake)
 
 	msg, err := c.Generate(context.Background(), nil, "how many files?")
 	if err != nil {
@@ -117,7 +94,7 @@ func TestGenerate_ResearchToolLoopsBackToModel(t *testing.T) {
 		geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "cpu"}),
 		geminitest.TextResponse("analysis done"),
 	)
-	c := gemini.New(testConfig(fake.URL), staticKey("k.mac"),
+	c := newClient(fake,
 		gemini.WithResearchDataHandler(func(topic string) map[string]any {
 			return map[string]any{"topic": topic, "values": []int{1, 2}}
 		}))
@@ -137,19 +114,18 @@ func TestGenerate_ResearchToolLoopsBackToModel(t *testing.T) {
 
 func TestGenerate_UpstreamErrorIsReturned(t *testing.T) {
 	fake := geminitest.NewStatus(t, 500)
-	c := gemini.New(testConfig(fake.URL), staticKey("k.mac"))
+	c := newClient(fake)
 	if _, err := c.Generate(context.Background(), nil, "hi"); err == nil {
 		t.Fatal("err = nil, want the upstream failure")
 	}
 }
 
 func TestConfigFromEnv(t *testing.T) {
-	t.Setenv("MODEL_PROXY_URL", "http://proxy:8091")
 	t.Setenv("VERTEX_PROJECT", "p")
 	t.Setenv("VERTEX_LOCATION", "l")
 	t.Setenv("GEMINI_MODEL", "")
 	cfg := gemini.ConfigFromEnv()
-	want := gemini.Config{ProxyURL: "http://proxy:8091", Project: "p", Location: "l", Model: "gemini-2.5-flash"}
+	want := gemini.Config{Project: "p", Location: "l", Model: "gemini-2.5-flash"}
 	if cfg != want {
 		t.Errorf("ConfigFromEnv() = %+v, want %+v", cfg, want)
 	}

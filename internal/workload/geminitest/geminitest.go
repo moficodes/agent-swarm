@@ -13,14 +13,16 @@
 // limitations under the License.
 
 // Package geminitest serves canned Vertex AI generateContent responses for
-// tests of the workload's Gemini client and the gateway's model proxy.
+// tests of the workload's Gemini client and the gateway's model relay.
 package geminitest
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 
@@ -32,7 +34,6 @@ type Request struct {
 	Method        string
 	Path          string
 	Authorization string
-	ModelKey      string
 	Body          []byte
 }
 
@@ -71,7 +72,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		Method:        r.Method,
 		Path:          r.URL.Path,
 		Authorization: r.Header.Get("Authorization"),
-		ModelKey:      r.Header.Get(types.ModelKeyHeader),
 		Body:          body,
 	})
 	resp := `{}`
@@ -94,6 +94,53 @@ func (s *Server) Requests() []Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Request(nil), s.requests...)
+}
+
+// Transport sends every request to the fake, whatever its URL's host.
+func (s *Server) Transport() http.RoundTripper {
+	u, _ := url.Parse(s.URL)
+	return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		out := r.Clone(r.Context())
+		out.URL.Scheme, out.URL.Host, out.Host = u.Scheme, u.Host, u.Host
+		return http.DefaultTransport.RoundTrip(out)
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// maxDriveCalls bounds the model calls Drive makes for one request.
+const maxDriveCalls = 10
+
+// Drive plays the gateway for tests of an actor handler: it serves req with
+// h and, while h answers with a model call, makes the call against the
+// Vertex fake at upstream and posts the result back to h. An empty upstream
+// answers every call with 502. Drive returns the final response.
+func Drive(t testing.TB, h http.Handler, upstream string, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	for range maxDriveCalls {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var step types.ModelCallStep
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &step) != nil || step.ModelCall == nil {
+			return rec
+		}
+		res := types.ModelResult{CallID: step.ModelCall.CallID, Status: http.StatusBadGateway}
+		if upstream != "" {
+			resp, err := http.Post(upstream+step.ModelCall.Path, "application/json", bytes.NewReader(step.ModelCall.Body))
+			if err != nil {
+				t.Fatalf("calling the Vertex fake: %v", err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			res.Status, res.Body = resp.StatusCode, body
+		}
+		b, _ := json.Marshal(res)
+		req = httptest.NewRequest(http.MethodPost, types.ModelResultPath, bytes.NewReader(b))
+	}
+	t.Fatalf("actor made more than %d model calls in one turn", maxDriveCalls)
+	return nil
 }
 
 func response(parts ...map[string]any) string {

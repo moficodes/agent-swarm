@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package modelproxy makes actors' Gemini calls to Vertex AI with the
+// gateway's own credentials, so no model credential lives in an actor and
+// actors need no egress.
 package modelproxy
 
 import (
@@ -46,12 +49,10 @@ const (
 // becomes part of the host that receives the gateway's access token.
 var locationPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
 
-var generatePath = regexp.MustCompile(`^/model/(v1[a-z0-9]*)/projects/([^/]+)/locations/([^/]+)/publishers/google/models/([^/:]+):generateContent$`)
+var generatePath = regexp.MustCompile(`^/(v1[a-z0-9]*)/projects/([^/]+)/locations/([^/]+)/publishers/google/models/([^/:]+):generateContent$`)
 
 // Config configures a Proxy.
 type Config struct {
-	Secret      []byte
-	Atespace    string
 	Project     string
 	Location    string
 	Models      []string
@@ -63,8 +64,8 @@ type Config struct {
 	Transport   http.RoundTripper
 }
 
-// Proxy authenticates actors by model key and forwards allowlisted
-// generateContent calls to Vertex AI.
+// Proxy makes the allowlisted generateContent calls actors hand to the
+// gateway.
 type Proxy struct {
 	cfg    Config
 	client *http.Client
@@ -77,9 +78,6 @@ type Proxy struct {
 // New validates cfg and returns a Proxy. An empty Project yields a disabled
 // proxy that answers 503.
 func New(cfg Config) (*Proxy, error) {
-	if len(cfg.Secret) == 0 {
-		return nil, errors.New("modelproxy: secret is required")
-	}
 	if cfg.Project != "" {
 		if cfg.Location == "" {
 			return nil, errors.New("modelproxy: location is required with a project")
@@ -138,52 +136,41 @@ func validUpstream(raw string) error {
 	return nil
 }
 
-// Enabled reports whether the proxy forwards requests.
+// Enabled reports whether the proxy makes calls.
 func (p *Proxy) Enabled() bool { return p.cfg.Project != "" }
 
-func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// Call makes one actor's model call and returns Vertex AI's answer, or the
+// proxy's own refusal as an error status.
+func (p *Proxy) Call(ctx context.Context, actor string, call types.ModelCall) types.ModelResult {
+	status, body := p.call(ctx, actor, call)
+	return types.ModelResult{CallID: call.CallID, Status: status, Body: body}
+}
+
+func (p *Proxy) call(ctx context.Context, actor string, call types.ModelCall) (int, []byte) {
 	if !p.Enabled() {
-		http.Error(w, "model proxy disabled: no Vertex project configured", http.StatusServiceUnavailable)
-		return
+		return errorBody(http.StatusServiceUnavailable, "model proxy disabled: no Vertex project configured")
 	}
-	actor, ok := actorFromKey(p.cfg.Secret, p.cfg.Atespace, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if !ok {
-		http.Error(w, "invalid model key", http.StatusUnauthorized)
-		return
+	if !p.allowed(call.Path) {
+		return errorBody(http.StatusForbidden, "only allowlisted generateContent calls are permitted")
 	}
-	if !p.allowed(r) {
-		http.Error(w, "only allowlisted generateContent calls are permitted", http.StatusForbidden)
-		return
+	if int64(len(call.Body)) > p.cfg.MaxBody {
+		return errorBody(http.StatusRequestEntityTooLarge, "request body too large")
 	}
 	if !p.acquire(actor) {
-		http.Error(w, "too many model calls in flight for this actor", http.StatusTooManyRequests)
-		return
+		return errorBody(http.StatusTooManyRequests, "too many model calls in flight for this actor")
 	}
 	defer p.release(actor)
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, p.cfg.MaxBody))
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "reading request body failed", http.StatusBadRequest)
-		return
-	}
 	tok, err := p.cfg.TokenSource.Token()
 	if err != nil {
-		http.Error(w, "gateway credentials unavailable", http.StatusBadGateway)
-		return
+		return errorBody(http.StatusBadGateway, "gateway credentials unavailable")
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), p.cfg.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, p.cfg.Timeout)
 	defer cancel()
 	out, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(p.cfg.Upstream, "/")+strings.TrimPrefix(r.URL.Path, "/model"), bytes.NewReader(body))
+		strings.TrimRight(p.cfg.Upstream, "/")+call.Path, bytes.NewReader(call.Body))
 	if err != nil {
-		http.Error(w, "building upstream request failed", http.StatusInternalServerError)
-		return
+		return errorBody(http.StatusInternalServerError, "building upstream request failed")
 	}
 	out.Header.Set("Content-Type", "application/json")
 	out.Header.Set("Authorization", "Bearer "+tok.AccessToken)
@@ -191,32 +178,36 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	resp, err := p.client.Do(out)
 	if err != nil {
-		status := http.StatusBadGateway
 		if errors.Is(err, context.DeadlineExceeded) {
-			status = http.StatusGatewayTimeout
+			return errorBody(http.StatusGatewayTimeout, "Vertex AI call timed out")
 		}
-		http.Error(w, "Vertex AI call failed", status)
-		return
+		return errorBody(http.StatusBadGateway, "Vertex AI call failed")
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
-		http.Error(w, "reading Vertex AI response failed", http.StatusBadGateway)
-		return
+		return errorBody(http.StatusBadGateway, "reading Vertex AI response failed")
 	}
 	if resp.StatusCode == http.StatusOK {
 		p.record(actor, respBody, time.Since(start))
 	}
-	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBody)
+	return resp.StatusCode, respBody
 }
 
-func (p *Proxy) allowed(r *http.Request) bool {
-	if r.Method != http.MethodPost || r.URL.RawPath != "" || strings.Contains(r.URL.Path, "..") {
+// errorBody is a refusal in Vertex AI's error shape, so the genai SDK reports
+// the message.
+func errorBody(status int, msg string) (int, []byte) {
+	b, _ := json.Marshal(map[string]any{"error": map[string]any{"code": status, "message": msg}})
+	return status, b
+}
+
+// allowed accepts only a plain generateContent path for the configured
+// project, location and models.
+func (p *Proxy) allowed(path string) bool {
+	if strings.ContainsAny(path, "%?#\\") || strings.Contains(path, "..") {
 		return false
 	}
-	m := generatePath.FindStringSubmatch(r.URL.Path)
+	m := generatePath.FindStringSubmatch(path)
 	return m != nil && m[2] == p.cfg.Project && m[3] == p.cfg.Location && slices.Contains(p.cfg.Models, m[4])
 }
 
