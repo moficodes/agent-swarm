@@ -16,7 +16,6 @@ package gateway_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,8 +23,7 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/ai"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/engine"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -36,12 +34,15 @@ func TestProxy_DoesNotForwardSecretsToActor(t *testing.T) {
 		mu.Lock()
 		got = r.Header.Clone()
 		mu.Unlock()
+		// An actor echoing its key must not leak it to the client.
+		w.Header().Set(types.ModelKeyHeader, r.Header.Get(types.ModelKeyHeader))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "m", Sender: types.SenderAssistant, Content: "hi"})
 	}))
 	t.Cleanup(upstream.Close)
 
-	gw := newTestGateway(t, upstream.URL, "", gateway.WithGeminiAPIKey("server-side-gemini-key"))
+	const secret = "hygiene-secret-hygiene-secret-000"
+	gw := newTestGateway(t, upstream.URL, "", gateway.WithSecret(secret))
 	ts := httptest.NewServer(gw.Handler())
 	t.Cleanup(ts.Close)
 
@@ -50,6 +51,7 @@ func TestProxy_DoesNotForwardSecretsToActor(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+gw.MintToken("attendee-01"))
 	req.Header.Set(gateway.PresenterHeaderName, testPresenterKey)
 	req.AddCookie(presenterCookie())
+	req.Header.Set(types.ModelKeyHeader, "client-supplied-key")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -58,78 +60,52 @@ func TestProxy_DoesNotForwardSecretsToActor(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
+	if v := resp.Header.Get(types.ModelKeyHeader); v != "" {
+		t.Errorf("client received %s: %q", types.ModelKeyHeader, v)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
 	if got.Get("ate-target-actor") != "ate-demo-conf/attendee-01" {
 		t.Errorf("ate-target-actor = %q, want ate-demo-conf/attendee-01", got.Get("ate-target-actor"))
 	}
-	for _, h := range []string{"X-Gemini-API-Key", "Authorization", "Cookie", gateway.PresenterHeaderName} {
+	for _, h := range []string{"Authorization", "Cookie", gateway.PresenterHeaderName} {
 		if v := got.Get(h); v != "" {
 			t.Errorf("actor received %s: %q", h, v)
 		}
 	}
+	if want := modelproxy.Key([]byte(secret), "ate-demo-conf", "attendee-01"); got.Get(types.ModelKeyHeader) != want {
+		t.Errorf("actor received %s %q, want %q", types.ModelKeyHeader, got.Get(types.ModelKeyHeader), want)
+	}
 }
 
 func TestPost_RejectsOversizedBody(t *testing.T) {
-	forEachMode(t, func(t *testing.T, h *approvalHarness) {
-		token := h.gw.MintToken("attendee-01")
-		big := `{"message":"` + strings.Repeat("a", 70*1024) + `"}`
-		if status, _ := h.post(t, "/api/chat", token, big); status != http.StatusRequestEntityTooLarge {
-			t.Errorf("chat: status = %d, want 413", status)
-		}
-		bigApproval := `{"approval_id":"app-1","decision":"APPROVE","code":"` + strings.Repeat("a", 70*1024) + `"}`
-		if status, _ := h.post(t, "/api/approve", token, bigApproval); status != http.StatusRequestEntityTooLarge {
-			t.Errorf("approve: status = %d, want 413", status)
-		}
-	})
+	h := newApprovalHarness(t)
+	token := h.gw.MintToken("attendee-01")
+	big := `{"message":"` + strings.Repeat("a", 70*1024) + `"}`
+	if status, _ := h.post(t, "/api/chat", token, big); status != http.StatusRequestEntityTooLarge {
+		t.Errorf("chat: status = %d, want 413", status)
+	}
+	bigApproval := `{"approval_id":"app-1","decision":"APPROVE","code":"` + strings.Repeat("a", 70*1024) + `"}`
+	if status, _ := h.post(t, "/api/approve", token, bigApproval); status != http.StatusRequestEntityTooLarge {
+		t.Errorf("approve: status = %d, want 413", status)
+	}
 }
 
 func TestPost_RequiresJSONContentType(t *testing.T) {
-	forEachMode(t, func(t *testing.T, h *approvalHarness) {
-		token := h.gw.MintToken("attendee-01")
-		for _, path := range []string{"/api/chat", "/api/approve"} {
-			req, _ := http.NewRequest(http.MethodPost, h.url+path, strings.NewReader(`{"message":"hi"}`))
-			req.Header.Set("Content-Type", "text/plain")
-			req.Header.Set("Authorization", "Bearer "+token)
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusUnsupportedMediaType {
-				t.Errorf("%s: status = %d, want 415", path, resp.StatusCode)
-			}
+	h := newApprovalHarness(t)
+	token := h.gw.MintToken("attendee-01")
+	for _, path := range []string{"/api/chat", "/api/approve"} {
+		req, _ := http.NewRequest(http.MethodPost, h.url+path, strings.NewReader(`{"message":"hi"}`))
+		req.Header.Set("Content-Type", "text/plain")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
-}
-
-// TestAIChat_ConcurrentWithTelemetry is meaningful under -race: gateway-side
-// AI turns update shared state while the stage polls it.
-func TestAIChat_ConcurrentWithTelemetry(t *testing.T) {
-	aiClient := ai.NewGeminiClient(ai.WithProject(""), ai.WithGeminiMockEngine(engine.NewMockEngine()))
-	gw := newTestGateway(t, "http://127.0.0.1:1", "", gateway.WithAIClient(aiClient))
-	ts := httptest.NewServer(asPresenter(gw))
-	t.Cleanup(ts.Close)
-
-	var wg sync.WaitGroup
-	for i := 1; i <= 4; i++ {
-		wg.Add(2)
-		go func(id string) {
-			defer wg.Done()
-			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Authorization", "Bearer "+gw.MintToken(id))
-			if resp, err := http.DefaultClient.Do(req); err == nil {
-				resp.Body.Close()
-			}
-		}(fmt.Sprintf("attendee-%02d", i))
-		go func() {
-			defer wg.Done()
-			if resp, err := http.Get(ts.URL + "/api/stage/telemetry"); err == nil {
-				resp.Body.Close()
-			}
-		}()
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnsupportedMediaType {
+			t.Errorf("%s: status = %d, want 415", path, resp.StatusCode)
+		}
 	}
-	wg.Wait()
 }

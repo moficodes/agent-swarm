@@ -34,7 +34,6 @@ import (
 
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
-	"github.com/agent-substrate/substrate/demos/conference/pkg/ai"
 )
 
 //go:embed static/*
@@ -47,7 +46,6 @@ type Config struct {
 	StatusURL    string
 	HMACSecret   string
 	PresenterKey string
-	GeminiAPIKey string
 	Atespace     string
 	// SuspendMode selects how actors are suspended after a turn: empty for
 	// kubectl-ate, or "noop" for local runs with no cluster.
@@ -80,7 +78,6 @@ func LoadConfig() Config {
 	}
 	hmacSecret := os.Getenv("HMAC_SECRET")
 	presenterKey := os.Getenv("PRESENTER_TOKEN")
-	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
 	atespace := os.Getenv("ATESPACE")
 	if atespace == "" {
 		atespace = "ate-demo-conf"
@@ -100,7 +97,6 @@ func LoadConfig() Config {
 		StatusURL:      statusURL,
 		HMACSecret:     hmacSecret,
 		PresenterKey:   presenterKey,
-		GeminiAPIKey:   geminiAPIKey,
 		Atespace:       atespace,
 		SuspendMode:    os.Getenv("SUSPEND_MODE"),
 		ModelProxyAddr: modelProxyAddr,
@@ -201,11 +197,9 @@ func main() {
 
 	opts := []gateway.Option{
 		gateway.WithAtespace(cfg.Atespace),
-		gateway.WithJWTSecret(secret),
+		gateway.WithSecret(secret),
 		gateway.WithPresenterKey(cfg.PresenterKey),
-		gateway.WithGeminiAPIKey(cfg.GeminiAPIKey),
 		gateway.WithStaticFS(staticFS),
-		gateway.WithAIClient(ai.NewGeminiClient()),
 	}
 	opts = append(opts, suspendOpts...)
 

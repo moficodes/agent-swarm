@@ -22,7 +22,7 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "GEMINI_API_KEY", "ATESPACE", "SUSPEND_MODE", "MODEL_PROXY_ADDR", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST"}
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "SUSPEND_MODE", "MODEL_PROXY_ADDR", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST"}
 
 // clearConfigEnv clears every environment variable LoadConfig reads, so tests
 // start from a clean slate regardless of the host environment.
@@ -59,9 +59,6 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.Atespace != "ate-demo-conf" {
 		t.Errorf("expected default Atespace 'ate-demo-conf', got %q", cfg.Atespace)
 	}
-	if cfg.GeminiAPIKey != "" {
-		t.Errorf("expected default GeminiAPIKey '', got %q", cfg.GeminiAPIKey)
-	}
 }
 
 func TestLoadConfig_CustomEnv(t *testing.T) {
@@ -70,7 +67,6 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	t.Setenv("STATUS_URL", "http://status.example.com")
 	t.Setenv("HMAC_SECRET", "custom-secret")
 	t.Setenv("PRESENTER_TOKEN", "custom-presenter")
-	t.Setenv("GEMINI_API_KEY", "custom-key")
 	t.Setenv("ATESPACE", "custom-ns")
 	t.Setenv("SUSPEND_MODE", "noop")
 
@@ -90,9 +86,6 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	}
 	if cfg.PresenterKey != "custom-presenter" {
 		t.Errorf("expected PresenterKey 'custom-presenter', got %q", cfg.PresenterKey)
-	}
-	if cfg.GeminiAPIKey != "custom-key" {
-		t.Errorf("expected GeminiAPIKey 'custom-key', got %q", cfg.GeminiAPIKey)
 	}
 	if cfg.Atespace != "custom-ns" {
 		t.Errorf("expected Atespace 'custom-ns', got %q", cfg.Atespace)
@@ -117,7 +110,7 @@ func TestSuspenderOptions(t *testing.T) {
 func TestGatewayInstanceCreation(t *testing.T) {
 	gw := gateway.NewGateway("http://localhost:8000", "http://localhost:4040",
 		gateway.WithAtespace("ate-demo-conf"),
-		gateway.WithJWTSecret("test-secret"),
+		gateway.WithSecret("test-secret"),
 	)
 	defer gw.Close()
 

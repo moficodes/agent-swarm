@@ -45,7 +45,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/agent-substrate/substrate/demos/conference/pkg/ai"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -149,19 +149,12 @@ func WithAtespace(atespace string) Option {
 	}
 }
 
-// WithJWTSecret sets the secret key used to sign and verify attendee JWTs.
-func WithJWTSecret(secret string) Option {
+// WithSecret sets the HMAC secret that signs attendee tokens and derives actor model keys.
+func WithSecret(secret string) Option {
 	return func(g *Gateway) {
 		if secret != "" {
-			g.jwtSecret = secret
+			g.secret = secret
 		}
-	}
-}
-
-// WithGeminiAPIKey sets the backend Gemini API key injected into proxied actor requests.
-func WithGeminiAPIKey(key string) Option {
-	return func(g *Gateway) {
-		g.geminiAPIKey = key
 	}
 }
 
@@ -179,15 +172,6 @@ func WithStatusInterval(d time.Duration) Option {
 	return func(g *Gateway) {
 		if d > 0 {
 			g.statusInterval = d
-		}
-	}
-}
-
-// WithAIClient sets the Vertex AI / Gemini client for conversational planning.
-func WithAIClient(c *ai.GeminiClient) Option {
-	return func(g *Gateway) {
-		if c != nil {
-			g.aiClient = c
 		}
 	}
 }
@@ -241,15 +225,13 @@ type Gateway struct {
 	routerURL      string
 	statusURL      string
 	atespace       string
-	jwtSecret      string
+	secret         string
 	presenterKey   string
-	geminiAPIKey   string
 	suspender      Suspender
 	statusInterval time.Duration
 	httpClient     *http.Client
 	staticFS       fs.FS
 	maxActors      int
-	aiClient       *ai.GeminiClient
 	broker         *EventBroker
 
 	mux              *http.ServeMux
@@ -268,7 +250,6 @@ type Gateway struct {
 	actionFeed        []types.ActionLogEntry
 	parkedCount       int
 	simController     SimulationController
-	workerSlots       chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -295,15 +276,14 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 		recentEvents:      make([]string, 0),
 		actionFeed:        make([]types.ActionLogEntry, 0),
 		maxActors:         50,
-		workerSlots:       make(chan struct{}, 2),
 	}
 
 	for _, opt := range opts {
 		opt(gw)
 	}
 
-	if gw.jwtSecret == "" {
-		gw.jwtSecret = randomHex(32)
+	if gw.secret == "" {
+		gw.secret = randomHex(32)
 	}
 	if gw.presenterKey == "" {
 		gw.presenterKey = randomHex(16)
@@ -329,12 +309,13 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 				pr.Out.Host = targetURL.Host
 			}
 			attendeeID, _ := pr.In.Context().Value(attendeeContextKey{}).(string)
+			// Gateway credentials stay here; the actor gets only its own model key.
+			for _, h := range []string{"Authorization", "Cookie", PresenterHeaderName, types.ModelKeyHeader} {
+				pr.Out.Header.Del(h)
+			}
 			if attendeeID != "" {
 				pr.Out.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", gw.atespace, attendeeID))
-			}
-			// The actor authenticates to Gemini itself; gateway credentials stay here.
-			for _, h := range []string{"Authorization", "Cookie", PresenterHeaderName, "X-Gemini-API-Key"} {
-				pr.Out.Header.Del(h)
+				pr.Out.Header.Set(types.ModelKeyHeader, modelproxy.Key([]byte(gw.secret), gw.atespace, attendeeID))
 			}
 		},
 		ModifyResponse: gw.modifyResponse,
@@ -437,13 +418,8 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/stage/telemetry", g.requirePresenter(g.handleTelemetry))
 	g.mux.HandleFunc("/api/reset", g.requirePresenter(g.handleReset))
 	g.mux.HandleFunc("/api/simulation", g.requirePresenter(jsonPOST(g.handleSimulation)))
-	if g.aiClient != nil {
-		g.mux.HandleFunc("/api/chat", jsonPOST(g.handleChatRequest))
-		g.mux.HandleFunc("/api/approve", jsonPOST(g.handleApproveRequest))
-	} else {
-		g.mux.HandleFunc("/api/chat", jsonPOST(g.proxyToActor))
-		g.mux.HandleFunc("/api/approve", jsonPOST(g.proxyToActor))
-	}
+	g.mux.HandleFunc("/api/chat", jsonPOST(g.proxyToActor))
+	g.mux.HandleFunc("/api/approve", jsonPOST(g.proxyToActor))
 
 	chat := g.page("chat.html", false, "/chat", "/chat/")
 	feed := g.page("feed.html", true, "/feed", "/feed/")
@@ -861,245 +837,6 @@ func stateToSubtext(state types.ActorLifecycleState) string {
 	}
 }
 
-func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	attendeeID, err := g.authenticateRequest(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	var req types.ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	actionID := fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
-
-	g.mu.Lock()
-	userMsg := types.ChatMessage{
-		ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
-		Sender:    types.SenderUser,
-		Content:   req.Message,
-		Timestamp: time.Now().Unix(),
-	}
-	g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], userMsg)
-	g.currentActionID[attendeeID] = actionID
-	historyCopy := make([]types.ChatMessage, len(g.chatHistories[attendeeID]))
-	copy(historyCopy, g.chatHistories[attendeeID])
-
-	// Strict capacity gate (capacity 2 matching physical worker pods):
-	// An actor CANNOT run or think without acquiring an available worker slot!
-	var slotAcquired bool
-	select {
-	case g.workerSlots <- struct{}{}:
-		slotAcquired = true
-		g.activeActors[attendeeID] = types.StateRunning
-		g.addEventLocked(fmt.Sprintf("Attendee %s allocated worker pod: starting turn", attendeeID))
-		g.mu.Unlock()
-		g.BroadcastStateChange(attendeeID, types.StateRunning, "Running on Pod", "Allocated to worker pod on GKE")
-	default:
-		g.activeActors[attendeeID] = types.StateParkedEnvoy
-		g.addEventLocked(fmt.Sprintf("Attendee %s queued: waiting for available worker pod slot", attendeeID))
-		g.mu.Unlock()
-		g.BroadcastStateChange(attendeeID, types.StateParkedEnvoy, "Parked in Envoy", "Queued in Envoy L7 buffer — waiting for worker slot...")
-		g.RecordActionEntry(types.ActionLogEntry{
-			ID:         actionID,
-			AttendeeID: attendeeID,
-			Timestamp:  time.Now().Unix(),
-			Prompt:     req.Message,
-			State:      types.StateParkedEnvoy,
-		})
-
-		select {
-		case <-r.Context().Done():
-			g.setActorState(attendeeID, types.StateSuspended)
-			return
-		case g.workerSlots <- struct{}{}:
-			slotAcquired = true
-			g.setActorState(attendeeID, types.StateRunning)
-			g.BroadcastStateChange(attendeeID, types.StateRunning, "Running on Pod", "Allocated to worker pod on GKE")
-		}
-	}
-
-	if slotAcquired {
-		defer func() { <-g.workerSlots }()
-	}
-
-	// Now that worker compute is allocated, transition to thinking on Vertex AI
-	g.setActorState(attendeeID, types.StateThinkingVertexAI)
-	g.mu.Lock()
-	g.addEventLocked(fmt.Sprintf("Attendee %s analyzing prompt with Vertex AI", attendeeID))
-	g.mu.Unlock()
-	g.BroadcastStateChange(attendeeID, types.StateThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
-
-	g.RecordActionEntry(types.ActionLogEntry{
-		ID:         actionID,
-		AttendeeID: attendeeID,
-		Timestamp:  time.Now().Unix(),
-		Prompt:     req.Message,
-		State:      types.StateThinkingVertexAI,
-	})
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	assistantMsg, err := g.aiClient.GenerateContent(ctx, g.geminiAPIKey, historyCopy, req.Message)
-	if err != nil || assistantMsg == nil {
-		assistantMsg = g.aiClient.FallbackTurn(req.Message)
-	}
-
-	g.mu.Lock()
-	if assistantMsg.Approval != nil {
-		g.pendingApprovals[attendeeID] = assistantMsg.Approval
-		g.activeActors[attendeeID] = types.StateAwaitingApproval
-		g.addEventLocked(fmt.Sprintf("Attendee %s awaiting human approval for %s", attendeeID, assistantMsg.Approval.Summary))
-	} else {
-		g.activeActors[attendeeID] = types.StateSuspended
-	}
-	g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], *assistantMsg)
-	actionID = g.currentActionID[attendeeID]
-	g.mu.Unlock()
-
-	if actionID == "" {
-		actionID = fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
-	}
-
-	if assistantMsg.Approval != nil {
-		g.BroadcastStateChange(attendeeID, types.StateAwaitingApproval, "Awaiting Approval", assistantMsg.Approval.Summary)
-		g.RecordActionEntry(types.ActionLogEntry{
-			ID:            actionID,
-			AttendeeID:    attendeeID,
-			Timestamp:     time.Now().Unix(),
-			Prompt:        req.Message,
-			ModelResponse: assistantMsg.Content,
-			Code:          assistantMsg.Approval.Code,
-			Language:      assistantMsg.Approval.Language,
-			RiskLevel:     assistantMsg.Approval.RiskLevel,
-			ApprovalID:    assistantMsg.Approval.ApprovalID,
-			State:         types.StateAwaitingApproval,
-		})
-	} else {
-		g.BroadcastStateChange(attendeeID, types.StateSuspended, "Suspended", "Turn completed - suspended to GCS")
-		g.RecordActionEntry(types.ActionLogEntry{
-			ID:            actionID,
-			AttendeeID:    attendeeID,
-			Timestamp:     time.Now().Unix(),
-			Prompt:        req.Message,
-			ModelResponse: assistantMsg.Content,
-			State:         types.StateSuspended,
-		})
-	}
-
-	// Zero-cost suspension while attendee reviews code or when turn is complete
-	g.asyncSuspendActor(attendeeID)
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(assistantMsg)
-}
-
-func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	attendeeID, err := g.authenticateRequest(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	req, release, ok := g.claimApproval(w, r, attendeeID)
-	if !ok {
-		return
-	}
-	defer release()
-
-	g.mu.Lock()
-	actionID := g.currentActionID[attendeeID]
-	if actionID == "" {
-		actionID = fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano())
-	}
-
-	// Gated by workerSlots (capacity 2): max 2 running in gVisor, excess are PARKED in Envoy buffer!
-	var slotAcquired bool
-	select {
-	case g.workerSlots <- struct{}{}:
-		slotAcquired = true
-		g.activeActors[attendeeID] = types.StateRunningGVisor
-		g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: executing in gVisor", attendeeID, req.ApprovalID))
-		g.mu.Unlock()
-		g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing code in gVisor sandbox")
-		g.RecordActionEntry(types.ActionLogEntry{
-			ID:         actionID,
-			AttendeeID: attendeeID,
-			Timestamp:  time.Now().Unix(),
-			ApprovalID: req.ApprovalID,
-			Decision:   req.Decision,
-			Code:       req.Code,
-			Language:   req.Language,
-			State:      types.StateRunningGVisor,
-			WorkerPod:  "conf-workers-0",
-		})
-	default:
-		g.activeActors[attendeeID] = types.StateParkedEnvoy
-		g.addEventLocked(fmt.Sprintf("Attendee %s approved %s: queued in Envoy L7 buffer", attendeeID, req.ApprovalID))
-		g.mu.Unlock()
-		g.BroadcastStateChange(attendeeID, types.StateParkedEnvoy, "Parked in Envoy", "Queued in Envoy L7 buffer — waiting for worker slot...")
-		g.RecordActionEntry(types.ActionLogEntry{
-			ID:         actionID,
-			AttendeeID: attendeeID,
-			Timestamp:  time.Now().Unix(),
-			ApprovalID: req.ApprovalID,
-			Decision:   req.Decision,
-			Code:       req.Code,
-			Language:   req.Language,
-			State:      types.StateParkedEnvoy,
-		})
-
-		select {
-		case <-r.Context().Done():
-			g.setActorState(attendeeID, types.StateSuspended)
-			return
-		case g.workerSlots <- struct{}{}:
-			slotAcquired = true
-			g.setActorState(attendeeID, types.StateRunningGVisor)
-			g.BroadcastStateChange(attendeeID, types.StateRunningGVisor, "Running in Sandbox", "Executing code in gVisor sandbox")
-			g.RecordActionEntry(types.ActionLogEntry{
-				ID:         actionID,
-				AttendeeID: attendeeID,
-				Timestamp:  time.Now().Unix(),
-				ApprovalID: req.ApprovalID,
-				Decision:   req.Decision,
-				Code:       req.Code,
-				Language:   req.Language,
-				State:      types.StateRunningGVisor,
-				WorkerPod:  "conf-workers-0",
-			})
-		}
-	}
-
-	if slotAcquired {
-		defer func() { <-g.workerSlots }()
-	}
-
-	ctx := context.WithValue(r.Context(), attendeeContextKey{}, attendeeID)
-	outReq := r.WithContext(ctx)
-
-	g.proxy.ServeHTTP(w, outReq)
-}
-
-// claimApproval binds an approval decision to the approval this attendee was
-// last shown. On success it rewrites r.Body to carry the proposed code, never
-// code supplied by the client, and marks the approval in flight until release
-// is called. The pending approval itself is cleared by modifyResponse once the
-// actor answers 200. On failure it writes the error response.
 // MaxRequestBodyBytes caps JSON request bodies accepted by the gateway.
 const MaxRequestBodyBytes = 64 << 10
 
@@ -1131,6 +868,11 @@ func jsonPOST(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// claimApproval binds an approval decision to the approval this attendee was
+// last shown. On success it rewrites r.Body to carry the proposed code, never
+// code supplied by the client, and marks the approval in flight until release
+// is called. The pending approval itself is cleared by modifyResponse once the
+// actor answers 200. On failure it writes the error response.
 func (g *Gateway) claimApproval(w http.ResponseWriter, r *http.Request, attendeeID string) (types.ApprovalResponse, func(), bool) {
 	var req types.ApprovalResponse
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1422,6 +1164,7 @@ func (g *Gateway) GetFeedHistory() []types.ActionLogEntry {
 }
 
 func (g *Gateway) modifyResponse(resp *http.Response) error {
+	resp.Header.Del(types.ModelKeyHeader)
 	attendeeID, _ := resp.Request.Context().Value(attendeeContextKey{}).(string)
 	if attendeeID == "" {
 		return nil
@@ -1452,52 +1195,13 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		}
 	}
 
-	// Record execution result if returned
-	var execRes types.ExecutionResult
-	var hasNewExec bool
 	var newExec types.ExecutionResult
-	if err := json.Unmarshal(bodyBytes, &execRes); err == nil && (execRes.Stdout != "" || execRes.Stderr != "" || execRes.ExitCode != 0 || execRes.DurationMs > 0) {
+	hasNewExec := hasChatMsg && chatMsg.Execution != nil
+	if hasNewExec {
+		newExec = *chatMsg.Execution
 		g.mu.Lock()
-		g.lastResults[attendeeID] = &execRes
+		g.lastResults[attendeeID] = &newExec
 		g.mu.Unlock()
-		hasNewExec = true
-		newExec = execRes
-	} else if hasChatMsg {
-		if strings.HasPrefix(chatMsg.Content, "Execution completed in ") {
-			var durationMs int64
-			var exitCode int
-			if n, _ := fmt.Sscanf(chatMsg.Content, "Execution completed in %dms (exit code %d):", &durationMs, &exitCode); n >= 2 {
-				stdout := ""
-				if idx := strings.Index(chatMsg.Content, "):"); idx != -1 {
-					stdout = strings.TrimPrefix(chatMsg.Content[idx+2:], "\n")
-					stdout = strings.TrimPrefix(stdout, "\n")
-				}
-				var stderr string
-				if stderrIdx := strings.Index(stdout, "\nStderr:\n"); stderrIdx != -1 {
-					stderr = stdout[stderrIdx+len("\nStderr:\n"):]
-					stdout = stdout[:stderrIdx]
-				}
-				newExec = types.ExecutionResult{
-					Stdout:     stdout,
-					Stderr:     stderr,
-					ExitCode:   exitCode,
-					DurationMs: durationMs,
-				}
-				g.mu.Lock()
-				g.lastResults[attendeeID] = &newExec
-				g.mu.Unlock()
-				hasNewExec = true
-			}
-		} else if strings.HasPrefix(chatMsg.Content, "Execution error:") {
-			newExec = types.ExecutionResult{
-				Stderr:   chatMsg.Content,
-				ExitCode: 1,
-			}
-			g.mu.Lock()
-			g.lastResults[attendeeID] = &newExec
-			g.mu.Unlock()
-			hasNewExec = true
-		}
 	}
 
 	g.mu.RLock()
@@ -1929,7 +1633,7 @@ func (g *Gateway) MintToken(attendeeID string) string {
 	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
 
 	signingInput := header + "." + payload
-	mac := hmac.New(sha256.New, []byte(g.jwtSecret))
+	mac := hmac.New(sha256.New, []byte(g.secret))
 	mac.Write([]byte(signingInput))
 	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
@@ -1944,7 +1648,7 @@ func (g *Gateway) VerifyToken(tokenStr string) (*Claims, error) {
 	}
 
 	signingInput := parts[0] + "." + parts[1]
-	mac := hmac.New(sha256.New, []byte(g.jwtSecret))
+	mac := hmac.New(sha256.New, []byte(g.secret))
 	mac.Write([]byte(signingInput))
 	expectedSig := mac.Sum(nil)
 

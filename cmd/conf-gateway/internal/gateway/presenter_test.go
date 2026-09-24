@@ -245,13 +245,13 @@ func TestEvents_RequireOwnToken(t *testing.T) {
 	}
 }
 
-func TestDefaultJWTSecretIsRandom(t *testing.T) {
+func TestDefaultSecretIsRandom(t *testing.T) {
 	a := newTestGateway(t, "http://localhost:8000", "")
 	b := newTestGateway(t, "http://localhost:8000", "")
 	if _, err := b.VerifyToken(a.MintToken("attendee-01")); err == nil {
-		t.Errorf("gateways without WithJWTSecret accepted each other's tokens")
+		t.Errorf("gateways without WithSecret accepted each other's tokens")
 	}
-	old := newTestGateway(t, "http://localhost:8000", "", gateway.WithJWTSecret("conf-demo-secret-key"))
+	old := newTestGateway(t, "http://localhost:8000", "", gateway.WithSecret("conf-demo-secret-key"))
 	if _, err := a.VerifyToken(old.MintToken("attendee-01")); err == nil {
 		t.Errorf("default gateway accepted a token signed with the old hardcoded secret")
 	}

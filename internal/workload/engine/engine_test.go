@@ -515,7 +515,7 @@ func TestSandboxExecutor_SerializesExecutions(t *testing.T) {
 func TestExecute_ChildSeesOnlyMinimalEnvironment(t *testing.T) {
 	t.Setenv("HMAC_SECRET", "must-not-leak")
 	t.Setenv("MODEL_PROXY_URL", "http://proxy")
-	t.Setenv("GEMINI_API_KEY", "leaked-gemini-key")
+	t.Setenv("GEMINI_CREDENTIALS", "leaked-gemini-key")
 	t.Setenv("GOOGLE_API_KEY", "leaked-google-key")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
