@@ -18,23 +18,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
 	"maps"
-	"mime"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
-	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +39,7 @@ import (
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/feed"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/routerstatus"
 	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/simulation"
+	"github.com/agent-substrate/substrate/demos/conference/cmd/conf-gateway/internal/web"
 	"github.com/agent-substrate/substrate/demos/conference/pkg/types"
 )
 
@@ -190,7 +184,7 @@ func WithPresenterKey(key string) Option {
 func WithStaticFS(staticFS fs.FS) Option {
 	return func(g *Gateway) {
 		if staticFS != nil {
-			g.staticFS = normalizeStaticFS(staticFS)
+			g.staticFS = web.NormalizeStaticFS(staticFS)
 		}
 	}
 }
@@ -290,7 +284,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	}
 
 	if gw.staticFS == nil {
-		gw.staticFS = normalizeStaticFS(resolveStaticFS())
+		gw.staticFS = web.NormalizeStaticFS(web.ResolveStaticFS())
 	}
 
 	targetURL, err := url.Parse(gw.routerURL)
@@ -511,13 +505,14 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/actor", g.requirePresenter(g.handleActorDetails))
 	g.mux.HandleFunc("/api/stage/telemetry", g.requirePresenter(g.handleTelemetry))
 	g.mux.HandleFunc("/api/reset", g.requirePresenter(g.handleReset))
-	g.mux.HandleFunc("/api/simulation", g.requirePresenter(jsonPOST(g.handleSimulation)))
-	g.mux.HandleFunc("/api/chat", jsonPOST(g.proxyToActor))
-	g.mux.HandleFunc("/api/approve", jsonPOST(g.proxyToActor))
+	g.mux.HandleFunc("/api/simulation", g.requirePresenter(web.JSONPOST(g.handleSimulation)))
+	g.mux.HandleFunc("/api/chat", web.JSONPOST(g.proxyToActor))
+	g.mux.HandleFunc("/api/approve", web.JSONPOST(g.proxyToActor))
 
-	chat := g.page("chat.html", false, "/chat", "/chat/")
-	feedPage := g.page("feed.html", true, "/feed", "/feed/")
-	stage := g.page("stage.html", true, "/stage", "/stage/", "/")
+	pages := web.Pages{FS: g.staticFS, PresenterKey: g.presenterKey}
+	chat := pages.Page("chat.html", false, "/chat", "/chat/")
+	feedPage := pages.Page("feed.html", true, "/feed", "/feed/")
+	stage := pages.Page("stage.html", true, "/stage", "/stage/", "/")
 	g.mux.HandleFunc("/chat", chat)
 	g.mux.HandleFunc("/chat/", chat)
 	g.mux.HandleFunc("/feed", feedPage)
@@ -528,104 +523,6 @@ func (g *Gateway) routes() {
 	if g.staticFS != nil {
 		g.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(g.staticFS))))
 	}
-}
-
-const presenterKeyRequiredPage = `<!doctype html>
-<html><head><meta charset="utf-8"><title>Presenter key required</title></head>
-<body style="font-family:sans-serif;padding:2rem">
-<h1>Presenter key required</h1>
-<p>Open this page with <code>?key=&lt;presenter key&gt;</code>. The gateway logs the full URL at startup.</p>
-</body></html>
-`
-
-// page serves a static HTML file on the given paths. A presenter page first
-// requires the presenter key: a correct ?key= query sets the presenter cookie
-// and redirects to the same path without the key.
-func (g *Gateway) page(file string, presenter bool, paths ...string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !slices.Contains(paths, r.URL.Path) {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if presenter {
-			if key := r.URL.Query().Get("key"); key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(g.presenterKey)) == 1 {
-				http.SetCookie(w, &http.Cookie{
-					Name:     PresenterCookieName,
-					Value:    g.presenterKey,
-					Path:     "/",
-					HttpOnly: true,
-					SameSite: http.SameSiteStrictMode,
-				})
-				http.Redirect(w, r, r.URL.Path, http.StatusSeeOther)
-				return
-			}
-			if !g.isPresenter(r) {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = io.WriteString(w, presenterKeyRequiredPage)
-				return
-			}
-		}
-		if g.staticFS == nil {
-			http.Error(w, "Static filesystem not configured", http.StatusInternalServerError)
-			return
-		}
-		data, err := fs.ReadFile(g.staticFS, file)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to read %s: %v", file, err), http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		w.WriteHeader(http.StatusOK)
-		if r.Method != http.MethodHead {
-			_, _ = w.Write(data)
-		}
-	}
-}
-
-func normalizeStaticFS(sysFS fs.FS) fs.FS {
-	if sysFS == nil {
-		return nil
-	}
-	if _, err := fs.Stat(sysFS, "static/chat.html"); err == nil {
-		if sub, err := fs.Sub(sysFS, "static"); err == nil {
-			return sub
-		}
-	}
-	return sysFS
-}
-
-func resolveStaticFS() fs.FS {
-	_, currentFile, _, ok := runtime.Caller(0)
-	if ok {
-		devPath := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", "..", "static"))
-		if fi, err := os.Stat(devPath); err == nil && fi.IsDir() {
-			if _, err := os.Stat(filepath.Join(devPath, "chat.html")); err == nil {
-				return os.DirFS(devPath)
-			}
-		}
-	}
-
-	candidates := []string{
-		"static",
-		"../static",
-		"../../static",
-		"demos/conference/cmd/conf-gateway/static",
-		"cmd/conf-gateway/static",
-	}
-	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
-			if _, err := os.Stat(filepath.Join(c, "chat.html")); err == nil {
-				return os.DirFS(c)
-			}
-		}
-	}
-	return nil
 }
 
 func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -783,37 +680,6 @@ func (g *Gateway) handleActionStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.broker.ServeActions(w, r)
-}
-
-// MaxRequestBodyBytes caps JSON request bodies accepted by the gateway.
-const MaxRequestBodyBytes = 64 << 10
-
-// jsonPOST requires POST bodies to be JSON no larger than MaxRequestBodyBytes.
-// The body is buffered so downstream handlers and the proxy can re-read it.
-func jsonPOST(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			next(w, r)
-			return
-		}
-		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
-			return
-		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes))
-		if err != nil {
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
-				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "failed to read request body", http.StatusBadRequest)
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
-		next(w, r)
-	}
 }
 
 func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
@@ -1185,6 +1051,9 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 		"suspend_errors": failed.Load(),
 	})
 }
+
+// MaxRequestBodyBytes caps JSON request bodies accepted by the gateway.
+const MaxRequestBodyBytes = web.MaxRequestBodyBytes
 
 // SetSimulationController attaches an active simulation controller to the gateway.
 func (g *Gateway) SetSimulationController(sc SimulationController) {
