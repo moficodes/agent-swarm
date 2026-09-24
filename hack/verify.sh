@@ -414,6 +414,15 @@ if [[ "${SENDER}" != "assistant" ]]; then
   exit 1
 fi
 
+# The workload falls back to its mock engine when a Gemini turn fails, so a
+# cluster run must check where the reply came from.
+SOURCE=$(printf "%s" "${CHAT_RESP}" | jq -r .source 2>/dev/null || true)
+if [[ "${MOCK_MODE}" != true && "${SOURCE}" != "gemini" ]]; then
+  log_err "Expected a Gemini reply, got source '${SOURCE}'; check the actor's model proxy calls in the worker pod logs."
+  log_fail "Step 3: Turn 1 Chat & HITL Approval Generation"
+  exit 1
+fi
+
 if [[ -z "${APPROVAL_ID}" || "${APPROVAL_ID}" == "null" ]]; then
   log_err "No pending ApprovalRequest returned in Turn 1 chat. Response: ${CHAT_RESP}"
   log_fail "Step 3: Turn 1 Chat & HITL Approval Generation"
