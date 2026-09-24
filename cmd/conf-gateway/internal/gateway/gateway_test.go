@@ -407,8 +407,8 @@ func TestProxyRouting_HeadersAndSuspension(t *testing.T) {
 	if receivedTargetActor.Load() == nil || *receivedTargetActor.Load() != "ate-demo-conf/attendee-01" {
 		t.Errorf("expected ate-target-actor 'ate-demo-conf/attendee-01', got %v", receivedTargetActor.Load())
 	}
-	if receivedAPIKey.Load() == nil || *receivedAPIKey.Load() != secretKey {
-		t.Errorf("expected X-Gemini-API-Key %q, got %v", secretKey, receivedAPIKey.Load())
+	if receivedAPIKey.Load() == nil || *receivedAPIKey.Load() != "" {
+		t.Errorf("actor must not receive the gateway's Gemini key, got %v", receivedAPIKey.Load())
 	}
 
 	// Verify suspension hook was called for attendee-01

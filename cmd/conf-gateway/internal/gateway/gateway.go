@@ -29,6 +29,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -331,8 +332,9 @@ func NewGateway(routerURL, statusURL string, opts ...Option) *Gateway {
 			if attendeeID != "" {
 				pr.Out.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", gw.atespace, attendeeID))
 			}
-			if gw.geminiAPIKey != "" {
-				pr.Out.Header.Set("X-Gemini-API-Key", gw.geminiAPIKey)
+			// The actor authenticates to Gemini itself; gateway credentials stay here.
+			for _, h := range []string{"Authorization", "Cookie", PresenterHeaderName, "X-Gemini-API-Key"} {
+				pr.Out.Header.Del(h)
 			}
 		},
 		ModifyResponse: gw.modifyResponse,
@@ -434,13 +436,13 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/actor", g.requirePresenter(g.handleActorDetails))
 	g.mux.HandleFunc("/api/stage/telemetry", g.requirePresenter(g.handleTelemetry))
 	g.mux.HandleFunc("/api/reset", g.requirePresenter(g.handleReset))
-	g.mux.HandleFunc("/api/simulation", g.requirePresenter(g.handleSimulation))
+	g.mux.HandleFunc("/api/simulation", g.requirePresenter(jsonPOST(g.handleSimulation)))
 	if g.aiClient != nil {
-		g.mux.HandleFunc("/api/chat", g.handleChatRequest)
-		g.mux.HandleFunc("/api/approve", g.handleApproveRequest)
+		g.mux.HandleFunc("/api/chat", jsonPOST(g.handleChatRequest))
+		g.mux.HandleFunc("/api/approve", jsonPOST(g.handleApproveRequest))
 	} else {
-		g.mux.HandleFunc("/api/chat", g.proxyToActor)
-		g.mux.HandleFunc("/api/approve", g.proxyToActor)
+		g.mux.HandleFunc("/api/chat", jsonPOST(g.proxyToActor))
+		g.mux.HandleFunc("/api/approve", jsonPOST(g.proxyToActor))
 	}
 
 	chat := g.page("chat.html", false, "/chat", "/chat/")
@@ -931,7 +933,9 @@ func (g *Gateway) handleChatRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Now that worker compute is allocated, transition to thinking on Vertex AI
 	g.setActorState(attendeeID, types.StateThinkingVertexAI)
+	g.mu.Lock()
 	g.addEventLocked(fmt.Sprintf("Attendee %s analyzing prompt with Vertex AI", attendeeID))
+	g.mu.Unlock()
 	g.BroadcastStateChange(attendeeID, types.StateThinkingVertexAI, "Thinking...", "Reasoning on Vertex AI")
 
 	g.RecordActionEntry(types.ActionLogEntry{
@@ -1096,6 +1100,37 @@ func (g *Gateway) handleApproveRequest(w http.ResponseWriter, r *http.Request) {
 // code supplied by the client, and marks the approval in flight until release
 // is called. The pending approval itself is cleared by modifyResponse once the
 // actor answers 200. On failure it writes the error response.
+// MaxRequestBodyBytes caps JSON request bodies accepted by the gateway.
+const MaxRequestBodyBytes = 64 << 10
+
+// jsonPOST requires POST bodies to be JSON no larger than MaxRequestBodyBytes.
+// The body is buffered so downstream handlers and the proxy can re-read it.
+func jsonPOST(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			next(w, r)
+			return
+		}
+		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes))
+		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		next(w, r)
+	}
+}
+
 func (g *Gateway) claimApproval(w http.ResponseWriter, r *http.Request, attendeeID string) (types.ApprovalResponse, func(), bool) {
 	var req types.ApprovalResponse
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

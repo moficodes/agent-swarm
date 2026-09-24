@@ -166,7 +166,7 @@ func TestChat_MockedGeminiHTTPTransport(t *testing.T) {
 		t.Fatalf("failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Gemini-API-Key", "test-gemini-key")
+	t.Setenv("GEMINI_API_KEY", "test-gemini-key")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -634,7 +634,7 @@ func TestApprove_IncludeStderr(t *testing.T) {
 		t.Fatalf("failed to create chat request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Gemini-API-Key", "test-key")
+	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -793,7 +793,7 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 			t.Fatalf("failed to create request: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Gemini-API-Key", "test-api-key")
+		t.Setenv("GEMINI_API_KEY", "test-api-key")
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -909,7 +909,7 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 			t.Fatalf("failed to create request: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Gemini-API-Key", "test-api-key")
+		t.Setenv("GEMINI_API_KEY", "test-api-key")
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -1299,7 +1299,7 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 		chatReq, _ := json.Marshal(types.ChatRequest{Message: "Run slow job"})
 		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(chatReq))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Gemini-API-Key", "test-key")
+		t.Setenv("GEMINI_API_KEY", "test-key")
 		chatResp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("chat request failed: %v", err)
@@ -1391,7 +1391,7 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 			reqBody, _ := json.Marshal(types.ChatRequest{Message: "Check latency"})
 			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", bytes.NewReader(reqBody))
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Gemini-API-Key", "test-key")
+			t.Setenv("GEMINI_API_KEY", "test-key")
 			resp, chatErr := http.DefaultClient.Do(req)
 			if chatErr == nil {
 				_ = resp.Body.Close()
@@ -1422,4 +1422,60 @@ func TestFineGrainedMutexLocking(t *testing.T) {
 			t.Fatalf("expected 2 messages after chat completed, got %d", len(histAfter))
 		}
 	})
+}
+
+func TestChat_GeminiKeyComesFromEnvNotRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		envKey  string
+		wantKey string // empty means Gemini must not be called
+	}{
+		{name: "no env key", envKey: ""},
+		{name: "env key", envKey: "env-key", wantKey: "env-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GEMINI_API_KEY", tc.envKey)
+			var mu sync.Mutex
+			var keys []string
+			geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				keys = append(keys, r.Header.Get("x-goog-api-key"))
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}`))
+			}))
+			defer geminiServer.Close()
+
+			srv := server.NewWorkloadServer(
+				server.WithGeminiClient(server.NewGeminiClient(server.WithBaseURL(geminiServer.URL), server.WithProject(""))),
+				server.WithForceMock(false),
+			)
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/chat", strings.NewReader(`{"message":"hello"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Gemini-API-Key", "client-supplied-key")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if tc.wantKey == "" {
+				if len(keys) != 0 {
+					t.Fatalf("Gemini called with client-supplied key %q; want mock engine", keys)
+				}
+				return
+			}
+			if len(keys) == 0 || keys[0] != tc.wantKey {
+				t.Fatalf("Gemini keys = %q, want [%q]", keys, tc.wantKey)
+			}
+		})
+	}
 }

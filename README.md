@@ -94,7 +94,7 @@ Attendees prompt their agents to perform real-time telemetry analysis and code e
   1. `execute_sandbox_code`: Executes Python or Bash scripts inside an isolated workspace with a hard 5-second timeout.
   2. `fetch_research_data`: Fetches real-time cluster telemetry and anomaly metrics.
   3. `request_human_approval`: Mandates explicit human sign-off before executing privileged code in the sandbox.
-- **Dynamic Credential Injection**: The edge gateway injects `X-Gemini-API-Key` headers into upstream router requests. Mobile clients never receive or expose raw API secrets.
+- **Server-Side Credentials**: Gemini keys never reach the browser. The gateway strips its own credentials, the caller's `Authorization` and cookies from proxied requests; actors read `GEMINI_API_KEY` from their own environment or use Vertex AI through Workload Identity. Today the gateway runs the Gemini turn itself (`GEMINI_API_KEY` on the gateway); moving that loop into the actor is planned.
 - **Conference Wi-Fi Defense (Mock Engine)**: If conference venue Wi-Fi drops or Gemini API rate limits (HTTP 429) are encountered, the runtime automatically falls back to an embedded deterministic mock reasoning engine (`DEMO_MOCK_LLM=true`) to guarantee 100% demo uptime.
 
 ### 5. gVisor (`runsc`) Sandbox Security Isolation
@@ -284,16 +284,24 @@ Start the conference edge gateway locally to serve the web UIs and proxy traffic
 export ROUTER_URL="http://localhost:8000"
 export STATUS_URL="http://localhost:4040"
 export GEMINI_API_KEY="your-gemini-api-key"   # Optional: omit for mock reasoning mode
+export PRESENTER_TOKEN="$(openssl rand -hex 16)" # Optional: generated and logged if unset
 export PORT="8090"
 
 go run ./demos/conference/cmd/conf-gateway
 ```
 
+| Variable | Default | Purpose |
+|---|---|---|
+| `PRESENTER_TOKEN` | random, logged at startup | Unlocks `/stage`, `/feed` and the presenter APIs. |
+| `JWT_SECRET` | random per process | Signs attendee session tokens. With the default, sessions end when the gateway restarts and the chat app fetches a new one. |
+| `SUSPEND_MODE` | empty (suspend through ateapi) | `noop` skips real suspension, for local runs without a cluster. |
+| `ATESPACE` | `ate-demo-conf` | Atespace that holds the attendee actors. |
+
 ### 4. Access the UIs
 
-- **Stage Presentation Dashboard**: Open [http://localhost:8090/stage](http://localhost:8090/stage) on your projector or external monitor.
-- **Dedicated Live Stream Dashboard**: Open [http://localhost:8090/feed](http://localhost:8090/feed) on a secondary screen or dedicated monitoring display.
-- **Mobile Attendee Chat App**: Open [http://localhost:8090/chat](http://localhost:8090/chat) on your mobile phone (or test in desktop browser responsive view).
+- **Stage Presentation Dashboard**: Open `http://localhost:8090/stage?key=$PRESENTER_TOKEN` on your projector or external monitor. The key is exchanged for an HttpOnly cookie and removed from the URL, so later visits to `/stage` and `/feed` in the same browser need no key.
+- **Dedicated Live Stream Dashboard**: Open [http://localhost:8090/feed](http://localhost:8090/feed) in the same browser, or `/feed?key=$PRESENTER_TOKEN` on another machine.
+- **Mobile Attendee Chat App**: Open [http://localhost:8090/chat](http://localhost:8090/chat) on your mobile phone (or test in desktop browser responsive view). No key is needed; each attendee can only read their own event stream and approve their own pending request.
 
 ---
 
@@ -323,8 +331,8 @@ You can run full end-to-end automated verification without needing a live Kubern
 The automated verification script validates all conference subsystems end-to-end:
 
 ```bash
-# Run against a running cluster deployment
-./hack/verify-demo-conference.sh --gateway-url http://localhost:8090 --concurrency 25
+# Run against a running cluster deployment (use the gateway's presenter key)
+./hack/verify-demo-conference.sh --gateway-url http://localhost:8090 --presenter-token "$PRESENTER_TOKEN" --concurrency 25
 
 # Run in self-contained mock mode
 ./hack/verify-demo-conference.sh --mock-mode --concurrency 20

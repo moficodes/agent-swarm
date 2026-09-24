@@ -166,10 +166,7 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey := r.Header.Get("X-Gemini-API-Key")
-	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
+	apiKey := os.Getenv("GEMINI_API_KEY")
 
 	userMsg := types.ChatMessage{
 		ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
