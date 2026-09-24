@@ -16,349 +16,233 @@ limitations under the License.
 
 # Interactive Conference Agent Swarm Demo (`demos/conference`)
 
-An interactive, conference-scale demonstration of **Agent Substrate** showcasing **50 to 100+ stateful AI agents** multiplexed onto a physical `WorkerPool` of **just 2 Kubernetes pods**.
+## What it shows
 
-During a live presentation, 50–100+ audience members scan a QR code from the stage projector screen using their smartphones. With zero login friction, each attendee is provisioned an isolated, stateful AI agent running inside a **gVisor sandbox** on the Kubernetes cluster.
+50 attendee actors (`attendee-01` .. `attendee-50`, one `conf-agent` actor
+each) multiplexed onto a `WorkerPool` of 2 Kubernetes pods
+(`demos/conference/conference.yaml.tmpl`). Each attendee's conversation
+history lives in the actor's own process memory
+(`demos/conference/internal/workload/server/server.go`); the actor's
+`snapshotsConfig` captures full content on pause and commit
+(`demos/conference/conference-template.yaml.tmpl`), so the conversation
+survives Substrate suspending and resuming the actor on a different worker
+pod.
 
-Attendees prompt their agents to perform real-time telemetry analysis and code execution. When the agents require **Human-in-the-Loop (HITL)** approval to run privileged code, Substrate immediately snapshots and freezes them to Google Cloud Storage (GCS) at **zero idle compute cost**. When the speaker triggers a synchronized approval wave across the entire auditorium, Substrate's **L7 Request Parking** holds bursts in memory, serving all attendees with **zero dropped requests and zero HTTP 503 errors**.
+The `/stage` header's "2 Physical Worker Pods" and "50x Oversubscription"
+copy (`demos/conference/cmd/conf-gateway/static/stage.html`) states the
+default `WorkerPool` size and attendee count
+(`demos/conference/conference.yaml.tmpl`'s `replicas: 2`,
+`hack/install-demo-conference.sh`'s `DEMO_CONF_ACTORS=50`); it is fixed
+header copy, not a live count read from the cluster.
 
----
-
-## Architectural Highlights
-
-```
-+-------------------------------------------------------------------------+
-|                          CONFERENCE AUDIENCE                            |
-|                                                                         |
-|  [Attendee Phone 1]   [Attendee Phone 2]  ...  [Attendee Phone 50+]     |
-|          |                   |                         |                |
-|          +-------------------+-------------------------+                |
-|                              |                                          |
-|                 HTTPS / WSS (Mobile Chat UI)                            |
-+------------------------------|------------------------------------------+
-                               v
-+-------------------------------------------------------------------------+
-|                  DEMO EDGE GATEWAY (conf-gateway)                       |
-|                                                                         |
-|  * Mints Ephemeral Attendee JWTs (sub: attendee-X)                      |
-|  * Injects Gemini API Key from Secret into HTTP Headers                 |
-|  * Proxies Stage Dashboard & Mobile Web Assets                          |
-|  * Dispatches to atenet-router with ate-target-actor Header              |
-+------------------------------|------------------------------------------+
-                               v
-+-------------------------------------------------------------------------+
-|                   atenet-router (Envoy + ext_proc)                      |
-|                                                                         |
-|  * Target Routing: ate-target-actor: ate-demo-conf/attendee-X           |
-|  * L7 Request Parking: --parked-request-budget=60s                      |
-|  * Holds excess requests in memory buffer during audience flash mob     |
-+------------------------------|------------------------------------------+
-                               v
-+-------------------------------------------------------------------------+
-|                      GKE CLUSTER: ate-demo-conf                         |
-|                                                                         |
-|  +-------------------------------------------------------------------+  |
-|  | WorkerPool: conf-workers (2 Pods: pod-0, pod-1)                   |  |
-|  |                                                                   |  |
-|  |  Pod-0: [ Active Actor: attendee-14 (gVisor runsc sandbox) ]      |  |
-|  |  Pod-1: [ Active Actor: attendee-29 (gVisor runsc sandbox) ]      |  |
-|  +-------------------------------------------------------------------+  |
-|                                ^                                        |
-|         Restore (<300ms) /     |     Suspend (RAM + FS)                 |
-|         Snapshot Stream        |                                        |
-|                                v                                        |
-|  +-------------------------------------------------------------------+  |
-|  | GCS Snapshot Bucket: gs://${BUCKET_NAME}/ate-demo-conf/           |  |
-|  | 50-100 Sleeping Actors (checkpoint.img.zstd, pages.img.zstd)     |  |
-|  | Compute footprint: 0 vCPU, 0 MB cluster RAM                      |  |
-|  +-------------------------------------------------------------------+  |
-+-------------------------------------------------------------------------+
-```
-
-### 1. 50x Oversubscription (50–100 Agents on 2 Physical Pods)
-- **The Problem**: Traditional Kubernetes binds one pod per agent tenant. Running 50 to 100 stateful agents requires 50 to 100 dedicated pods or VMs. At 2 vCPU and 4 GB RAM per agent, that amounts to **100–200 vCPUs and 200–400 GB RAM** ($2,000–$4,000/mo), with **99% idle compute waste** because humans spend most of their time reading or typing.
-- **The Substrate Solution**: Agent Substrate completely decouples agent identity from container processes. All 50–100 attendee agents multiplex dynamically onto a single `WorkerPool` of **just 2 physical pods** (4 vCPUs and 8 GB RAM total), reducing cluster compute costs by **96% to 98%**.
-
-### 2. Zero-Cost Idle Suspension
-- **Instant Freeze to Cloud Storage**: When an agent pauses to ask the attendee for approval to run an analysis script, Substrate takes an incremental snapshot of its live memory pages and filesystem (`pages.img.zstd`, `checkpoint.img.zstd`) and streams it to Google Cloud Storage (`gs://${BUCKET_NAME}/ate-demo-conf/`).
-- **Zero Compute Waste**: While the human reads the code on mobile for 30–60 seconds (or 10 minutes), the actor occupies **0 vCPU and 0 MB RAM** on the Kubernetes cluster.
-- **Sub-Second Wake-from-Sleep**: When the user submits a decision or next turn, Substrate restores the container into a warm gVisor worker pod in **under 300 ms**, preserving complete memory state without external databases (Redis, Postgres).
-
-### 3. Mass L7 Request Parking
-- **The Problem**: In conventional Kubernetes ingress controllers, a burst of 50 concurrent requests hitting a 2-pod service causes an immediate cascade of `503 Service Unavailable` errors and connection resets.
-- **The Substrate Solution**: The Substrate router (`atenet-router`) integrates deep Envoy filters to **park excess incoming HTTP requests in memory** with `--parked-request-budget=60s`. During an audience approval wave, 48 requests are held safely in memory and drain through the 2 worker pods in rapid ~200ms increments with **zero dropped packets and zero 503s**.
-
-### 4. Google ADK / GenAI Go SDK v2 Integration
-- **Modern Gemini Orchestration**: Workloads are implemented with the official Google GenAI Go SDK v2 (`google.golang.org/genai`), supporting **Gemini 2.5 / 3.5+ Flash and Flash-Lite** models.
-- **Function Calling Tools**:
-  1. `execute_sandbox_code`: Executes Python or Bash scripts inside an isolated workspace with a hard 5-second timeout.
-  2. `fetch_research_data`: Fetches real-time cluster telemetry and anomaly metrics.
-  3. `request_human_approval`: Mandates explicit human sign-off before executing privileged code in the sandbox.
-- **Server-Side Credentials**: Gemini keys never reach the browser. The gateway strips its own credentials, the caller's `Authorization` and cookies from proxied requests; actors read `GEMINI_API_KEY` from their own environment or use Vertex AI through Workload Identity. Today the gateway runs the Gemini turn itself (`GEMINI_API_KEY` on the gateway); moving that loop into the actor is planned.
-- **Conference Wi-Fi Defense (Mock Engine)**: If conference venue Wi-Fi drops or Gemini API rate limits (HTTP 429) are encountered, the runtime automatically falls back to an embedded deterministic mock reasoning engine (`DEMO_MOCK_LLM=true`) to guarantee 100% demo uptime.
-
-### 5. gVisor (`runsc`) Sandbox Security Isolation
-- Workloads execute within a hardened **gVisor** boundary, preventing host filesystem tampering or container escapes.
-- All code runs within `/tmp/workspace` with dropped privileges and resource boundaries.
-
-### 6. 1-Click Audience Simulation Engine (`/api/simulation`)
-- **Synthetic Swarm Generation**: For presentations or rehearsals where 50 physical attendees are not present, the speaker can toggle an autonomous virtual attendee engine directly from the `/stage` header (`[▶ Simulate 25]`, `[▶ Simulate 50]`, `[■ Stop]`).
-- **Autonomous Multi-Turn Workloads**: Virtual attendees cycle through realistic prompts (telemetry anomalies, security audits, gVisor benchmarks), wait with simulated human reading delays, and submit human-in-the-loop approvals to generate real burst traffic.
-- **Controlled Lifecycle**: Backed by `POST /api/simulation` (`{"action":"start","count":N}` and `{"action":"stop"}`) and `GET /api/simulation` status reporting.
-
-### 7. Interactive Actor Spotlight & Inspection Drawer (`/api/actor/{id}`)
-- **Deep MicroVM/Sandbox Introspection**: Clicking any badge in the Audience Fleet Matrix slides open the Actor Spotlight Drawer, providing full transparency into the actor's current state.
-- **Cloud Storage Metadata**: Shows the snapshot location in Cloud Storage (`gs://${BUCKET_NAME}/ate-demo-conf/actors/attendee-X.snap`) and exact compressed footprint (e.g., 384 KB).
-- **Execution & Turn History**: Displays the actor's conversation turns, pending human approvals, proposed script code with syntax highlighting, and live sandbox execution metrics (stdout, stderr, exit code, duration in ms).
-
-### 8. Real-Time Server-Sent Events (SSE) State Synchronization (`/api/events`)
-- **Push-Based State Propagation**: The mobile client (`/chat`) connects to `/api/events?attendee_id=...` via standard browser `EventSource`, replacing client-side polling and artificial delays with authentic, server-driven lifecycle events.
-- **Instant Visual Feedback**: The mobile Substrate Transparency Pill dynamically reflects authoritative cluster states in real-time (`THINKING_VERTEX_AI`, `AWAITING_APPROVAL`, `PARKED_ENVOY`, `RUNNING_GVISOR`, `SUSPENDED`).
-
-### 9. 1-Click Cluster Reset Controller (`/api/reset`)
-- **Instant Clean-Slate Recovery**: The `[⟲ Reset All]` button on `/stage` invokes `POST /api/reset` to halt active simulations, wipe pending approvals and chat histories, and issue parallel suspension sweeps across all running or awaiting actors.
-- **Zero Orphaned Workers**: Ensures all actors are safely frozen to GCS (`types.StateSuspended`), freeing worker pods to idle in milliseconds and preparing the cluster for repeated presentation runs.
-
-### 10. Real-Time Live Actor Action Stream (`/feed`, `/api/stream`, `/api/feed/history`)
-- **Fleet-Wide Event Pipeline**: While `/api/events` provides per-attendee state synchronization, `/api/stream` broadcasts every attendee prompt, Gemini reasoning response, generated Python code, HITL approval decision, and gVisor terminal output across all 50–100 actors over Server-Sent Events (SSE).
-- **In-Memory Ring Buffer**: `conf-gateway` maintains an in-memory ring buffer of the last 100 action events exposed via `GET /api/feed/history`, allowing newly connected dashboards to instantly hydrate full conversation and execution history.
-- **Dedicated Live Streaming Dashboard**: Available at `/feed`, offering a full-page cyber-themed dashboard with real-time state filtering, instant full-text search, auto-scrolling terminal cards, and syntax-highlighted code execution logs.
-
-### 11. Segmented Attendee Allocation (Zero Human/Swarm Collision)
-- **The Challenge**: When background virtual swarms are active (e.g., 25 simulated attendees occupying `attendee-01`..`attendee-25`), real humans scanning the QR code at `/chat` could collide with simulated actors if IDs were allocated sequentially from 1. This would cause hijacked conversations, conflicting prompts, or corrupted HITL states.
-- **Dynamic Range Partitioning**: `conf-gateway` (`GET /api/session`) inspects the active `SimulationController` status. When simulation is active with count *N*, newly connected human attendees are dynamically partitioned into the unreserved range from *N+1* up to `maxActors` (e.g., `attendee-26` through `attendee-50` when `count=25`), cycling safely within this partition.
-- **Fair Multi-Tenant Competition**: Human and virtual attendees share the exact same 2 physical worker pods (`conf-workers-0`, `conf-workers-1`). Humans experience authentic Envoy L7 request parking and sub-300ms container wake-ups under swarm load with zero session collisions.
-- **Explicit Actor Overrides**: URL parameters (`/chat?attendee_id=attendee-07`) continue to be honored directly for reproducible testing, specific attendee demonstrations, and presenter spotlighting.
-- **Graceful Lifecycle Reversion**: Halting simulation or triggering 1-click reset dynamically restores attendee session allocation to the full unpartitioned range (`1..maxActors`) without server restart.
-
----
-
-## User Interface Guide
-
-The demo provides three specialized interfaces designed for live presentations and audience participation:
-
-### 1. Stage Presentation Dashboard (`/stage`)
-Optimized for 1080p and 4K conference projector screens with a high-contrast dark theme:
-
-| Component | Description |
-|---|---|
-| **QR Code Banner** | Prominently displayed QR code linking directly to `/chat` for rapid smartphone onboarding. |
-| **View Switcher** | Segmented header toggle (`[⊞ Grid Matrix | ≡ Live Stream]`) to seamlessly toggle between the 50–100 badge fleet matrix and the integrated live action stream directly on stage. |
-| **Simulation Controls** | `[▶ Simulate 25]`, `[▶ Simulate 50]`, and `[■ Stop]` buttons in the header to launch or halt autonomous virtual attendee traffic on demand. |
-| **1-Click Cluster Reset** | `[⟲ Reset All]` button in the header triggering immediate parallel suspension of all active actors and clearing cluster state. |
-| **Envoy L7 Parking Lot Gauge** | Real-time gauge polling `statusz` (`parking.active`), visualizing queued requests during audience bursts. |
-| **Hardware Worker Cards** | Displays the real-time execution state of `conf-workers-0` and `conf-workers-1`, including active tenant ID, current task, and live turn timers. |
-| **Audience Fleet Matrix** | Interactive 50–100 badge grid displaying each attendee's real-time lifecycle state: ⚪ **Suspended in GCS**, 🟡 **Parked in Envoy**, 🟢 **Running on Pod**, 🟣 **Awaiting Approval**. |
-| **Embedded Live Stream** | Alternative stage view (`#stage-stream-view`) presenting incoming action cards in real-time; clicking any card opens the Actor Spotlight Drawer. |
-| **Actor Spotlight Drawer** | Click any fleet matrix badge (`#badge-attendee-XX`) or stream action card to slide open a detailed drawer displaying live code, execution stdout/stderr, and GCS snapshot location/size (`GET /api/actor/{id}`). |
-| **Streaming Activity Ticker** | Live bottom ticker logging cluster events, turn durations, and suspension snapshot completions. |
-
-### 2. Mobile Attendee Chat App (`/chat`)
-A lightweight, mobile-optimized web application for attendee smartphones:
-
-| Feature | Description |
-|---|---|
-| **Zero-Friction Auth** | Scanning the QR code mints an ephemeral HS256 JWT via `GET /api/session`, assigning a unique identifier (e.g., `Attendee #14`). |
-| **Quick Chip Prompts** | One-tap starter prompts: `[📊 Outlier Telemetry Analysis]`, `[🔒 Sandbox Vulnerability Scan]`, `[⚡ Benchmark gVisor CPU]`. |
-| **HITL Approval Cards** | Displays proposed Python/Bash code with risk assessment badges (`HIGH RISK: Sandbox Code Execution`), allowing the user to **Approve & Execute** or **Reject**. |
-| **Substrate Transparency Pill** | Real-time badge bound to Server-Sent Events (`/api/events`), informing the user of authoritative Substrate states (e.g., *"⚡ Actor suspended in Cloud Storage (0 MB RAM used)"*, *"⏳ Parked in ingress queue — waiting for worker slot..."*). |
-
-### 3. Dedicated Live Stream Dashboard (`/feed`)
-A full-screen cyberpunk-themed streaming dashboard designed for secondary stage screens, technical overflow rooms, or backstage monitoring:
-
-| Feature | Description |
-|---|---|
-| **Header Status & Controls** | Displays brand identity, live Envoy L7 parking meter badge (`#parking-badge`), quick navigation back to `/stage`, and the 1-click `[⟲ Reset All]` controller (`#btn-reset-all`). |
-| **State Filter Pills** | Real-time filter buttons (`All`, `Awaiting Approval`, `Running`, `Completed`) to filter cards based on actor lifecycle state. |
-| **Full-Text Live Search** | Client-side search input (`#feed-search`) filtering cards in real-time across prompts, generated code, attendee IDs, and execution output. |
-| **Auto-Scroll Engine** | Smooth auto-scroll toggle (`#feed-autoscroll`) that automatically keeps the viewport pinned to the latest incoming execution events. |
-| **Interactive Action Cards** | Rich cards rendering prompts, Gemini reasoning responses, code blocks with one-click copy, live gVisor execution output, durations, and deep links to inspect the attendee in `/chat`. |
-
----
-
-## Live Speaker Playbook
-
-A minute-by-minute cue sheet for presenting the demo on stage:
+## Architecture
 
 ```
-+-----------------------------------------------------------------------------------------------+
-| TIME   | STAGE CUE                 | SPEAKER SCRIPT                    | CLUSTER ACTION       |
-+-----------------------------------------------------------------------------------------------+
-| 00:00  | The Hook                  | "Look at the screen: 2 pods total. | Attendees scan QR;   |
-|        | Projected /stage showing  | Scan this QR code on your phone   | 50 sessions minted   |
-|        | 2 idle workers and empty  | to get your own isolated agent."  | in SUSPENDED state.  |
-|        | fleet matrix.             |                                   |                      |
-+-----------------------------------------------------------------------------------------------+
-| 01:00  | The Virtual Swarm &       | "Need a full room? Watch this:    | POST /api/simulation |
-|        | Segmented Allocation      | 25 virtual bots start prompting.  | launches swarm 01-25;|
-|        | Click [▶ Simulate 25]     | If you scan now, you get assigned | /api/session assigns |
-|        | in stage header.          | attendee-26+ with zero collision! | attendee-26+ cleanly.|
-+-----------------------------------------------------------------------------------------------+
-| 01:45  | The Prompt & Spotlight    | "Let's inspect Attendee #07. Click| Drawer fetches       |
-|        | Click badge attendee-07   | the badge to open the Spotlight   | /api/actor/attendee-07|
-|        | to open Spotlight drawer. | Inspector with live code and GCS  | showing prompt, code, |
-|        |                           | snapshot metadata."               | and GCS snapshot.    |
-+-----------------------------------------------------------------------------------------------+
-| 02:45  | The Freeze                | "Look at the grid: all agents are | All actors frozen;   |
-|        | Fleet turns solid purple; | purple (Awaiting Approval).       | RAM streamed to GCS; |
-|        | workers return to idle.   | But our pods use 0% CPU and 0 MB! | 0 vCPU, 0 RAM used.  |
-|        |                           | Take your time reading the code." |                      |
-+-----------------------------------------------------------------------------------------------+
-| 03:45  | The Flash Mob (Surge)     | "On count of three, everyone tap  | 50 concurrent        |
-|        | Speaker counts down:      | APPROVE at the exact same instant!| approvals hit Envoy; |
-|        | 3... 2... 1... TAP!       | 3... 2... 1... TAP APPROVE!"      | 48 requests park!    |
-+-----------------------------------------------------------------------------------------------+
-| 04:00  | Flip to Live Stream       | "Let's flip to the Live Stream    | Speaker toggles      |
-|        | Click [≡ Live Stream]     | view! Watch every Python script   | [≡ Live Stream];     |
-|        | in stage view switcher.   | execute inside gVisor and stream  | live action cards    |
-|        |                           | terminal stdout in real-time."    | stream over SSE.     |
-+-----------------------------------------------------------------------------------------------+
-| 04:30  | The Unparking Drain       | "Watch the parking meter drain!   | Workers multiplex    |
-|        | Parking meter counts down | Standard K8s would have 503'd.    | 200ms turns; all 50  |
-|        | from 48 to 0 in real-time.| Substrate served all 50 with zero | get live ASCII plots |
-|        |                           | dropped requests!"                | with HTTP 200 OK.    |
-+-----------------------------------------------------------------------------------------------+
-| 05:15  | 1-Click Cluster Reset     | "Clicking Reset All suspends every| POST /api/reset      |
-|        | Click [⟲ Reset All]       | active actor back to GCS and frees| parallel-suspends all|
-|        | in stage header.          | the cluster for the next talk."   | actors, clearing pods|
-+-----------------------------------------------------------------------------------------------+
+browser
+  |  HTTP(S)
+  v
+conf-gateway (in-cluster, Deployment in ate-demo-conf, 1 replica)
+  |  chat/approve requests, ate-target-actor header
+  v
+atenet-router (ate-system)
+  |
+  v
+actor (conf-workload, on a conf-workers pod)
+  |  model call, Authorization: Bearer <model key>
+  v
+conf-gateway-internal:8091 (ClusterIP, actors only, model proxy)
+  |  Vertex AI call, Workload Identity token
+  v
+Vertex AI (generateContent)
+
+conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
+              (polls actor state; also issues the suspend after a turn)
 ```
 
-> **Presenter Cue — Segmented Attendee Allocation (Zero Human/Swarm Collision)**:
-> When running a simulated swarm during live talks, `conf-gateway` automatically partitions newly onboarding human phones into attendee IDs beyond the simulation count (e.g., `attendee-26`..`attendee-50` when `count=25`). Both real attendees and virtual bots compete for execution turns across the same 2 physical worker pods, allowing human audience members to experience authentic L7 request parking and sub-300ms container wake-ups without collision with background bots. For controlled demonstrations of specific actors, pass explicit query parameters (e.g. `/chat?attendee_id=attendee-07`).
+- Browser to gateway: plain HTTP through the `conf-gateway` `LoadBalancer`
+  Service, unless `DEMO_DOMAIN` is set, in which case
+  `gateway-ingress.yaml.tmpl` fronts it with a GKE-managed TLS Ingress.
+- Gateway to actor: `conf-gateway` proxies `/api/chat` and `/api/approve`
+  through `atenet-router` (`ROUTER_URL=http://atenet-router.ate-system.svc:80`
+  in `demos/conference/manifests/gateway.yaml.tmpl`) with an
+  `ate-target-actor` header identifying the attendee's actor
+  (`demos/conference/cmd/conf-gateway/internal/actorproxy/proxy.go`).
+- Actor to model: the actor's Gemini client calls
+  `MODEL_PROXY_URL=http://conf-gateway-internal.ate-demo-conf.svc:8091`
+  (`demos/conference/conference-template.yaml.tmpl`), a `ClusterIP` Service
+  that is never exposed outside the cluster.
+- Gateway to ateapi: the gateway shells out to `kubectl-ate` against
+  `ATEAPI_ENDPOINT=api.ate-system.svc:443` to read actor state and to issue
+  suspends (`demos/conference/cmd/conf-gateway/internal/actorstate`).
 
----
+## Credentials
 
-## Prerequisites
+- Actors hold no model credential. `demos/conference/conference-template.yaml.tmpl`
+  sets `VERTEX_PROJECT`/`VERTEX_LOCATION` on the actor only so it can build
+  the request; there is no API key or service-account key in the actor's
+  environment.
+- On every proxied chat/approve request, the gateway strips the client's
+  `Authorization`, `Cookie` and any client-supplied model-key header, then
+  sets its own `X-Conf-Model-Key` header to a value scoped to that one actor:
+  `<actor>.<base64 HMAC(HMAC_SECRET, "model-key/" + atespace + "/" + actor)>`
+  (`demos/conference/cmd/conf-gateway/internal/actorproxy/proxy.go`,
+  `demos/conference/cmd/conf-gateway/internal/modelproxy/key.go`). The
+  `model-key/` prefix domain-separates it from the HMAC that signs attendee
+  session tokens, so the same `HMAC_SECRET` cannot be replayed between the
+  two uses.
+- The actor's workload server remembers the latest key it was sent and hands
+  it to the Gemini client as a bearer token
+  (`demos/conference/internal/workload/gemini/transport.go`) when it calls
+  the gateway's model proxy at `conf-gateway-internal:8091`. The proxy
+  verifies the key's HMAC before forwarding
+  (`demos/conference/cmd/conf-gateway/internal/modelproxy/proxy.go`); a
+  forged key never reaches Vertex.
+- The model proxy itself calls Vertex AI with the gateway's own Workload
+  Identity: the `conf-gateway` `ServiceAccount` is annotated with a GCP
+  service account that holds `roles/aiplatform.user` only
+  (`hack/install-demo-conference.sh`'s `demo-conference_ensure_gsa`,
+  `demos/conference/manifests/gateway.yaml.tmpl`). No provider credential
+  ever reaches an actor, and none is captured in a snapshot.
 
-- **Kubernetes Cluster**: Local `kind` cluster with gVisor support or Google Kubernetes Engine (GKE).
-- **Agent Substrate**: Installed in the cluster (`./hack/install-ate.sh --deploy-ate-system`).
-- **CLI Tools**:
-  - `kubectl` configured with cluster context.
-  - `kubectl-ate` (`go install ./cmd/kubectl-ate` or `go run ./cmd/kubectl-ate`).
-  - `ko` for building container images.
-  - `curl` and `jq` installed locally.
-- **Environment Variables**:
-  - `BUCKET_NAME`: Google Cloud Storage bucket for actor snapshots.
-  - `GEMINI_API_KEY`: (Optional) Google Gemini API key for live LLM reasoning.
+## Deploy
 
----
-
-## How to Run on Agent Substrate
-
-### 1. Deploy the Conference Demo
-
-Deploy the `ate-demo-conf` namespace, the 2-worker `WorkerPool`, the `conf-agent` template, and 50 pre-provisioned attendee actors:
+Required environment: `BUCKET_NAME` (GCS bucket for actor snapshots),
+`KO_DOCKER_REPO`. Optional: `PROJECT_ID` (enables Vertex AI; unset runs in
+mock mode with `DEMO_MOCK_LLM=true`), `VERTEX_LOCATION` (default
+`us-central1`), `DEMO_DOMAIN` (fronts the gateway with a TLS Ingress). See
+`hack/ate-dev-env.sh.example` for how these are normally set for a dev
+cluster.
 
 ```bash
-# Ensure GCS bucket is exported
-export BUCKET_NAME="my-substrate-snapshots"
-
-# Deploy conference demo
-./hack/install-demo-conference.sh --deploy
+hack/install-ate.sh --patch-router --deploy-demo-conference
 ```
 
-The script automatically:
-- Adjusts `atenet-router` with `--parked-request-budget=60s`.
-- Builds and deploys the `conf-workload` container using `ko`.
-- Creates `WorkerPool` `conf-workers` (2 replicas with gVisor sandboxing).
-- Provisions 50 sleeping actors (`attendee-01` through `attendee-50`) in `ate-demo-conf`.
+`--patch-router` must come **before** `--deploy-demo-conference`:
+`install-ate.sh` processes flags in the order given, so a `--patch-router`
+after the deploy flag has already started has no effect
+(`hack/install-demo-conference.sh`). Setting `DEMO_CONF_PATCH_ROUTER=true` in
+the environment works too and is order-independent. The standalone wrapper
+`hack/install-demo-conference.sh --deploy --patch-router` reorders its flags
+for you before calling `install-ate.sh`, so either order works there.
 
-### 2. Setup Port-Forwarding
+`atenet-router` needs `--parked-request-budget` at least 60s, any
+`--route-timeout` at least 60s, and `terminationGracePeriodSeconds` at least
+120 to survive an LLM turn and drain safely; `--patch-router` applies all
+three (`demo-conference_check_router` in `hack/install-demo-conference.sh`).
+Without it, the deploy fails with the specific changes needed instead of
+silently deploying a router that will 503 or get killed mid-drain.
 
-In a dedicated terminal, port-forward the `atenet-router` service:
+Deleting the demo (`--delete-demo-conference`) does not revert these router
+flags, and does not delete the `conf-gateway` GCP service account or its IAM
+bindings — the install output prints the exact `gcloud` commands to remove
+them (`demo-conference_delete` in `hack/install-demo-conference.sh`).
+
+## Presenter access
 
 ```bash
-# Forward L7 router traffic (port 80 -> 8000)
-kubectl port-forward -n ate-system svc/atenet-router 8000:80 &
-
-# Forward router statusz telemetry (port 4040 -> 4040)
-kubectl port-forward -n ate-system svc/atenet-router 4040:4040 &
+kubectl port-forward -n ate-demo-conf svc/conf-gateway 8090:80
+open "http://localhost:8090/stage?key=$(kubectl get secret conf-gateway -n ate-demo-conf -o jsonpath='{.data.PRESENTER_TOKEN}' | base64 -d)"
 ```
 
-### 3. Run the Demo Edge Gateway
+The `key` query parameter is exchanged for an `HttpOnly` cookie
+(`conf_presenter`) and removed from the URL, so later visits to `/stage` and
+`/feed` in the same browser need no key. Scripts and `curl` can send the same
+key as an `X-Presenter-Key` header instead
+(`demos/conference/cmd/conf-gateway/internal/auth/auth.go`).
 
-Start the conference edge gateway locally to serve the web UIs and proxy traffic:
+## What the badges mean
+
+Every badge comes from an `ActorView` the gateway reads from ateapi through
+`kubectl-ate`. The shared mapping lives in
+`demos/conference/cmd/conf-gateway/static/actorview.js`:
+
+| View | Badge label | Sub | Class |
+|---|---|---|---|
+| `never_started` | Never started | No snapshot yet | `never-started` |
+| SUSPENDED + `snapshot_uri` | Suspended | Snapshot saved | `suspended` |
+| RESUMING | Resuming | Restoring on a worker | `resuming` |
+| RUNNING | Running | `worker_pod` | `running` |
+| SUSPENDING | Suspending | Writing snapshot | `suspending` |
+| PAUSING / PAUSED | Pausing / Paused | | `paused` |
+| CRASHED | Crashed | `state_detail` | `crashed` |
+| DELETING / REVERTING | Deleting / Reverting | | `transition` |
+| UNAVAILABLE | State unavailable | `state_detail` | `unavailable` |
+| UNKNOWN / other | Unknown | `state_detail` | `unknown` |
+
+"State unavailable" means the gateway could not read the actor's state from
+ateapi (for example `kubectl-ate` failed, or the gateway is running with
+`LOCAL_MODE=true`); it is not a claim about the actor itself.
+
+A separate activity chip shows what the actor is doing right now: Thinking,
+Awaiting approval, or Executing, with nothing shown when idle. A reply may
+also carry a source tag: "Mock reply" or "Mock (model error)"; a real
+Gemini reply carries no tag.
+
+## Timing honesty
+
+- Actor state comes from polling every `STATE_POLL_INTERVAL` (default 1s)
+  plus the `kubectl-ate` call time on top of that, so a short-lived
+  transition such as RESUMING can be missed between two polls
+  (`demos/conference/cmd/conf-gateway/main.go`,
+  `demos/conference/cmd/conf-gateway/internal/actorstate`).
+- Parked-request counts are summed across every ready `atenet-router` pod
+  (discovered from its EndpointSlices) on each telemetry tick, not read from
+  a single router instance
+  (`demos/conference/cmd/conf-gateway/internal/routerstatus`).
+
+## Limits and risks
+
+- One gateway replica: attendee sessions, pending approvals and the feed's
+  event history all live in its memory
+  (`demos/conference/manifests/gateway.yaml.tmpl` runs `replicas: 1`), so a
+  restart drops them all.
+- Plain HTTP end to end unless `DEMO_DOMAIN` is set to front the gateway
+  with a TLS Ingress.
+- The model key the gateway hands an actor is a bearer credential valid on
+  the cluster network for as long as `HMAC_SECRET` is unchanged; anyone who
+  can reach `conf-gateway-internal:8091` and obtain a valid key can spend the
+  gateway's Vertex AI quota as that actor.
+- `SUSPEND_AFTER` defaults to `0`: the gateway asks Substrate to suspend the
+  actor immediately after each turn completes. A positive duration delays
+  that suspend, and starting a new turn cancels a pending one
+  (`demos/conference/cmd/conf-gateway/internal/gateway/turns.go`).
+- Deleting the demo does not revert the `atenet-router` flags `--patch-router`
+  applied, and does not remove the `conf-gateway` GCP service account or its
+  IAM bindings; see Deploy above.
+
+## Local development
+
+Run the full local check, which builds the gateway and a local router and
+runs all 13 verification steps against them, without a cluster:
 
 ```bash
-export ROUTER_URL="http://localhost:8000"
-export STATUS_URL="http://localhost:4040"
-export GEMINI_API_KEY="your-gemini-api-key"   # Optional: omit for mock reasoning mode
-export PRESENTER_TOKEN="$(openssl rand -hex 16)" # Optional: generated and logged if unset
-export PORT="8090"
+hack/verify-demo-conference.sh --mock-mode
+```
 
+To run the pieces by hand: `demos/conference/cmd/conf-localrouter` builds
+one real actor workload server per attendee behind a router that limits
+concurrency to `--slots` in-flight requests (parking the rest) and serves
+`/statusz`:
+
+```bash
+go run ./demos/conference/cmd/conf-localrouter --addr=127.0.0.1:18080 --slots=2 &
+
+PORT=18090 PRESENTER_TOKEN=dev \
+LOCAL_MODE=true DEMO_MOCK_LLM=true \
+ROUTER_URL=http://127.0.0.1:18080 STATUS_URL=http://127.0.0.1:18080 \
+ROUTER_STATUS_DISCOVERY=static \
 go run ./demos/conference/cmd/conf-gateway
 ```
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `PRESENTER_TOKEN` | random, logged at startup | Unlocks `/stage`, `/feed` and the presenter APIs. |
-| `JWT_SECRET` | random per process | Signs attendee session tokens. With the default, sessions end when the gateway restarts and the chat app fetches a new one. |
-| `SUSPEND_MODE` | empty (suspend through ateapi) | `noop` skips real suspension, for local runs without a cluster. |
-| `ATESPACE` | `ate-demo-conf` | Atespace that holds the attendee actors. |
-
-### 4. Access the UIs
-
-- **Stage Presentation Dashboard**: Open `http://localhost:8090/stage?key=$PRESENTER_TOKEN` on your projector or external monitor. The key is exchanged for an HttpOnly cookie and removed from the URL, so later visits to `/stage` and `/feed` in the same browser need no key.
-- **Dedicated Live Stream Dashboard**: Open [http://localhost:8090/feed](http://localhost:8090/feed) in the same browser, or `/feed?key=$PRESENTER_TOKEN` on another machine.
-- **Mobile Attendee Chat App**: Open [http://localhost:8090/chat](http://localhost:8090/chat) on your mobile phone (or test in desktop browser responsive view). No key is needed; each attendee can only read their own event stream and approve their own pending request.
-
----
-
-## Local Development & Offline Mock Mode
-
-For development, testing, or presentations without active Google Cloud / Gemini credentials:
-
-### 1. Offline Reasoning
-Set `DEMO_MOCK_LLM=true` to force deterministic offline reasoning:
-
-```bash
-# Start workload in standalone mock mode
-PORT=8080 DEMO_MOCK_LLM=true go run ./demos/conference/cmd/conf-workload
-```
-
-### 2. Standalone Verification
-You can run full end-to-end automated verification without needing a live Kubernetes cluster using `--mock-mode`:
-
-```bash
-./hack/verify-demo-conference.sh --mock-mode
-```
-
----
-
-## Automated Verification (`hack/verify-demo-conference.sh`)
-
-The automated verification script validates all conference subsystems end-to-end:
-
-```bash
-# Run against a running cluster deployment (use the gateway's presenter key)
-./hack/verify-demo-conference.sh --gateway-url http://localhost:8090 --presenter-token "$PRESENTER_TOKEN" --concurrency 25
-
-# Run in self-contained mock mode
-./hack/verify-demo-conference.sh --mock-mode --concurrency 20
-```
-
-### Verification Steps Performed:
-
-1. **Step 1: Health & Static UI Assets**: Asserts that `/healthz`, `/stage`, `/chat`, and all static JS/CSS assets return HTTP 200.
-2. **Step 2: Ephemeral Session Minting**: Calls `GET /api/session` and validates that an ephemeral attendee ID and a valid, signed HS256 JWT are generated.
-3. **Step 3: Turn 1 Chat & HITL Approval**: Sends a prompt to `/api/chat` and confirms receipt of an assistant message containing a pending `ApprovalRequest` with language, risk rating, and executable code.
-4. **Step 4: Turn 2 Approval & Sandbox Execution**: Submits `POST /api/approve` and asserts execution inside the gVisor sandbox, confirming exit code 0 and stdout metrics.
-5. **Step 5: Audience Burst & Request Parking**: Fires concurrent requests across multiple attendees, asserting that request parking is engaged, with **zero dropped packets and zero HTTP 503 errors**.
-6. **Step 6: Telemetry Endpoint**: Verifies `GET /api/stage/telemetry`, checking physical worker slots (`conf-workers-0`, `conf-workers-1`), active actor tracking, and live cluster events.
-7. **Step 7: Audience Simulation Engine**: Verifies `/api/simulation` by starting 5 virtual attendees (`POST /api/simulation` with `action: start`), asserting `GET /api/simulation` reports `running: true`, asserting segmented human attendee allocation beyond the simulation batch (`GET /api/session` assigns `attendee-06` or higher), stopping simulation (`action: stop`), confirming `running: false`, and verifying normal session allocation resumes.
-8. **Step 8: Actor Spotlight Inspector API**: Verifies `GET /api/actor/attendee-01`, asserting HTTP 200 OK and validating presence of `actor_id`, `state`, `snapshot_location`, and `snapshot_size_bytes`.
-9. **Step 9: 1-Click Cluster Reset Controller**: Submits `POST /api/reset`, verifies `HTTP 200 OK` with `status: ok`, and asserts `GET /api/actor/attendee-01` transitions to `SUSPENDED`.
-10. **Step 10: Dedicated Live Feed Page (`/feed`)**: Verifies `GET /feed` returns HTTP 200 OK with `text/html`, asserts presence of `#action-stream`, `#feed-search`, `#feed-autoscroll`, and `#btn-reset-all`, and confirms `/static/feed.js` and `/static/feed.css` return HTTP 200.
-11. **Step 11: Action Feed History API (`/api/feed/history`)**: Verifies `GET /api/feed/history` returns HTTP 200 OK with `application/json` and asserts the response is a valid JSON array (`jq 'type == "array"'`).
-12. **Step 12: Real-Time Action Stream SSE (`/api/stream`)**: Verifies `GET /api/stream` returns HTTP 200 OK with `Content-Type: text/event-stream`, establishes connection handshake, and reads streamed action events.
-
----
+`LOCAL_MODE=true` skips ateapi entirely, so every actor shows "State
+unavailable"; `DEMO_MOCK_LLM=true` forces the deterministic mock reasoning
+engine instead of calling Vertex AI; `ROUTER_STATUS_DISCOVERY=static` polls
+`STATUS_URL` directly instead of discovering router pods from
+EndpointSlices, which only exist in a real cluster. Open
+`http://localhost:8090/stage?key=dev`, `/feed` and `/chat`.
 
 ## Teardown
 
-To delete all conference demo resources and restore default router settings:
-
 ```bash
-./hack/install-demo-conference.sh --delete
+hack/install-ate.sh --delete-demo-conference
 ```
