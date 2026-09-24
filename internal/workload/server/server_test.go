@@ -135,7 +135,7 @@ func TestChat_MockedGeminiHTTPTransport(t *testing.T) {
 		"print('executing gemini generated python script')",
 		"python",
 	))
-	srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)))
+	srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)), server.WithWorkspaceDir(t.TempDir()))
 
 	chatMsg := postChat(t, srv.Handler(), "test-gemini-key", "Check cluster metrics")
 
@@ -521,7 +521,7 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 			geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "cluster_telemetry"}),
 			geminitest.ApprovalResponse("Apply telemetry mitigation script", "print('mitigation executed')", "python"),
 		)
-		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)))
+		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)), server.WithWorkspaceDir(t.TempDir()))
 
 		msg := postChat(t, srv.Handler(), "k.mac", "Analyze metrics and mitigate anomalies")
 
@@ -552,7 +552,7 @@ func TestChat_MultiTurnToolExecutionLoop(t *testing.T) {
 			geminitest.FunctionCallResponse("fetch_research_data", map[string]any{"topic": "system_telemetry"}),
 			geminitest.TextResponse("All 7 telemetry samples are within nominal parameters."),
 		)
-		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)))
+		srv := server.NewWorkloadServer(server.WithGeminiConfig(proxyConfig(fake.URL)), server.WithWorkspaceDir(t.TempDir()))
 
 		msg := postChat(t, srv.Handler(), "k.mac", "Check cluster telemetry status")
 
@@ -748,8 +748,18 @@ func TestChat_HistoryIsSentOnFollowingTurn(t *testing.T) {
 	postChat(t, s.Handler(), "k.mac", "remember the word pelican")
 	postChat(t, s.Handler(), "k.mac", "what word?")
 
+	first := string(fake.Requests()[0].Body)
 	second := string(fake.Requests()[1].Body)
 	if !strings.Contains(second, "pelican") || !strings.Contains(second, "first answer") {
 		t.Errorf("second model request lacks history: %s", second)
+	}
+	// The user's own turn must appear exactly once: handleChat appends it to
+	// history before calling Generate, so BuildContents must not also append
+	// it as the trailing prompt.
+	if n := strings.Count(first, "remember the word pelican"); n != 1 {
+		t.Errorf("first request contains the prompt %d times, want 1: %s", n, first)
+	}
+	if n := strings.Count(second, "what word?"); n != 1 {
+		t.Errorf("second request contains the prompt %d times, want 1: %s", n, second)
 	}
 }

@@ -173,3 +173,23 @@ func TestBuildContents_MergesConsecutiveRolesAndAppendsPrompt(t *testing.T) {
 		t.Fatalf("BuildContents = %+v", got)
 	}
 }
+
+// TestBuildContents_PromptAlreadyLastInHistoryIsNotDuplicated covers the
+// server's handleChat path, which appends the user's turn to history before
+// calling Generate. BuildContents must recognize the prompt is already the
+// last history entry and not append it a second time.
+func TestBuildContents_PromptAlreadyLastInHistoryIsNotDuplicated(t *testing.T) {
+	history := []types.ChatMessage{
+		{Sender: types.SenderUser, Content: "first prompt"},
+		{Sender: types.SenderAssistant, Content: "response 1"},
+		{Sender: types.SenderUser, Content: "second prompt"},
+	}
+	got := gemini.BuildContents(history, "second prompt")
+	if len(got) != 3 {
+		t.Fatalf("BuildContents = %+v, want 3 contents (prompt not duplicated)", got)
+	}
+	last := got[len(got)-1]
+	if last.Role != "user" || len(last.Parts) != 1 || last.Parts[0].Text != "second prompt" {
+		t.Fatalf("last content = %+v, want a single-part user content with the prompt once", last)
+	}
+}
