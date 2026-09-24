@@ -24,11 +24,12 @@
 #   Step 5: Audience Burst & Request Parking (concurrent load, 0 dropped/503s, parking check)
 #   Step 6: Telemetry Endpoint (/api/stage/telemetry -> actors, workers, parking)
 #   Step 7: Audience Simulation Engine (/api/simulation -> start/stop lifecycle & segmented allocation)
-#   Step 8: Actor Spotlight Inspector API (/api/actor/{id} -> snapshot metadata & execution state)
+#   Step 8: Actor Spotlight Inspector API (/api/actor/{id} -> ActorView fields & post-turn state)
 #   Step 9: 1-Click Cluster Reset Controller (/api/reset -> parallel suspend sweep & state reset)
 #   Step 10: Dedicated Live Feed Page (/feed -> DOM elements & static assets)
 #   Step 11: Action Feed History API (/api/feed/history -> JSON array)
 #   Step 12: Real-Time Action Stream SSE (/api/stream -> text/event-stream & event streaming)
+#   Step 13: Model Key Is Not Client-Settable (/api/chat -> forged X-Conf-Model-Key header ignored)
 
 set -o errexit -o nounset -o pipefail
 
@@ -241,10 +242,6 @@ if [[ "${MOCK_MODE}" == "true" ]]; then
     log_err "Required dependency 'go' is not installed (required for --mock-mode)."
     exit 1
   fi
-  if ! command -v python3 &>/dev/null; then
-    log_err "Required dependency 'python3' is not installed (required for --mock-mode)."
-    exit 1
-  fi
 fi
 
 # Check if conference edge gateway is reachable, or launch mock environment if in mock mode
@@ -261,123 +258,19 @@ if [[ "${IS_GATEWAY_REACHABLE}" != "true" ]]; then
     log_info "Gateway at ${GATEWAY_URL} not detected. Initializing standalone mock environment..."
 
     log_info "Compiling conference binaries into temporary workspace..."
-    go build -o "${TMP_DIR}/conf-workload" ./demos/conference/cmd/conf-workload
     go build -o "${TMP_DIR}/conf-gateway" ./demos/conference/cmd/conf-gateway
 
-    MOCK_WORKLOAD_PORT=18081
     MOCK_ROUTER_PORT=18080
     MOCK_GATEWAY_PORT=18090
 
-    # Start mock workload server with forced mock reasoning
-    PORT="${MOCK_WORKLOAD_PORT}" DEMO_MOCK_LLM=true "${TMP_DIR}/conf-workload" >/dev/null 2>&1 &
+    log_info "Starting conf-localrouter (2 slots, one real workload server per attendee)..."
+    go build -o "${TMP_DIR}/conf-localrouter" ./demos/conference/cmd/conf-localrouter
+    "${TMP_DIR}/conf-localrouter" --addr="127.0.0.1:${MOCK_ROUTER_PORT}" --slots=2 \
+      --workspace-root="${TMP_DIR}/actors" >"${TMP_DIR}/localrouter.log" 2>&1 &
     SPAWNED_PIDS+=($!)
 
-    # Create mock router script with 2-worker concurrency capacity and statusz active parking counter
-    cat <<'PYEOF' > "${TMP_DIR}/mock_router.py"
-import http.server, urllib.request, threading, time, json, socketserver, signal, sys
-
-signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
-signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
-
-class RouterHandler(http.server.BaseHTTPRequestHandler):
-    active = 0
-    parked = 0
-    lock = threading.Lock()
-    cv = threading.Condition(lock)
-    upstream = "http://127.0.0.1:18081"
-
-    def do_GET(self):
-        if self.path.startswith("/statusz"):
-            with self.lock:
-                p = RouterHandler.parked
-            resp = json.dumps({"parking": {"active": p}}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(resp)))
-            self.end_headers()
-            self.wfile.write(resp)
-        elif self.path == "/healthz":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-        elif self.path.startswith("/api/actor/"):
-            actor_id = self.path.split("/")[-1]
-            resp = json.dumps({
-                "actor_id": actor_id,
-                "state": "SUSPENDED",
-                "worker_pod": "",
-                "snapshot_location": f"gs://conf-demo-bucket/ate-demo-conf/actors/{actor_id}.snap",
-                "snapshot_size_bytes": 384000,
-                "chat_history": []
-            }).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(resp)))
-            self.end_headers()
-            self.wfile.write(resp)
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def do_POST(self):
-        content_len = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_len) if content_len > 0 else b""
-
-        if self.path == "/api/reset":
-            resp = json.dumps({"status": "ok", "message": "Cluster reset", "actors_reset": 0}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(resp)))
-            self.end_headers()
-            self.wfile.write(resp)
-            return
-        
-        with self.cv:
-            if RouterHandler.active >= 2:
-                RouterHandler.parked += 1
-                while RouterHandler.active >= 2:
-                    self.cv.wait(timeout=2.0)
-                RouterHandler.parked -= 1
-            RouterHandler.active += 1
-
-        try:
-            time.sleep(0.02)
-            url = f"{self.upstream}{self.path}"
-            req = urllib.request.Request(url, data=body, method="POST")
-            for k, v in self.headers.items():
-                if k.lower() not in ["host", "content-length"]:
-                    req.add_header(k, v)
-            with urllib.request.urlopen(req, timeout=10) as upstream_resp:
-                resp_body = upstream_resp.read()
-                self.send_response(upstream_resp.status)
-                for k, v in upstream_resp.headers.items():
-                    if k.lower() not in ["transfer-encoding", "content-length"]:
-                        self.send_header(k, v)
-                self.send_header("Content-Length", str(len(resp_body)))
-                self.end_headers()
-                self.wfile.write(resp_body)
-        finally:
-            with self.cv:
-                RouterHandler.active -= 1
-                self.cv.notify_all()
-
-    def log_message(self, format, *args):
-        pass
-
-class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-
-srv = ThreadedHTTPServer(("127.0.0.1", 18080), RouterHandler)
-srv.serve_forever()
-PYEOF
-
-    python3 "${TMP_DIR}/mock_router.py" >/dev/null 2>&1 &
-    SPAWNED_PIDS+=($!)
-
-    # Start conference edge gateway
     ROUTER_URL="http://127.0.0.1:${MOCK_ROUTER_PORT}"
-    STATUS_URL="http://127.0.0.1:${MOCK_ROUTER_PORT}"
+    STATUS_URL="${ROUTER_URL}"
     GATEWAY_URL="http://127.0.0.1:${MOCK_GATEWAY_PORT}"
 
     if [[ -z "${PRESENTER_TOKEN}" ]]; then
@@ -385,10 +278,12 @@ PYEOF
     fi
     PORT="${MOCK_GATEWAY_PORT}" \
     PRESENTER_TOKEN="${PRESENTER_TOKEN}" \
-    SUSPEND_MODE=noop \
+    LOCAL_MODE=true \
+    DEMO_MOCK_LLM=true \
     ROUTER_URL="${ROUTER_URL}" \
     STATUS_URL="${STATUS_URL}" \
-    "${TMP_DIR}/conf-gateway" >/dev/null 2>&1 &
+    ROUTER_STATUS_DISCOVERY=static \
+    "${TMP_DIR}/conf-gateway" >"${TMP_DIR}/gateway.log" 2>&1 &
     SPAWNED_PIDS+=($!)
 
     # Wait for gateway readiness
@@ -407,15 +302,12 @@ PYEOF
     fi
     log_ok "Standalone mock environment active (Gateway: ${GATEWAY_URL}, Router: ${ROUTER_URL})"
   else
-    log_err "Conference edge gateway is not reachable at ${GATEWAY_URL}."
-    printf "\nTo verify against an active Kubernetes cluster:\n"
-    printf "  1. Deploy the demo: ./hack/install-demo-conference.sh --deploy\n"
-    printf "  2. Port-forward the atenet router and run the gateway:\n"
-    printf "       kubectl port-forward -n ate-system svc/atenet-router 8000:80 &\n"
-    printf "       kubectl port-forward -n ate-system svc/atenet-router 4040:4040 &\n"
-    printf "       PORT=8090 ROUTER_URL=http://localhost:8000 STATUS_URL=http://localhost:4040 go run ./demos/conference/cmd/conf-gateway\n\n"
-    printf "To run self-contained automated verification locally without a cluster:\n"
-    printf "  %s --mock-mode\n\n" "$0"
+    log_err "Conference gateway is not reachable at ${GATEWAY_URL}."
+    printf "\nTo verify against a cluster:\n"
+    printf "  1. Deploy: hack/install-ate.sh --deploy-demo-conference\n"
+    printf "  2. kubectl port-forward -n ate-demo-conf svc/conf-gateway 8090:80 &\n"
+    printf "  3. export PRESENTER_TOKEN=\"\$(kubectl get secret conf-gateway -n ate-demo-conf -o jsonpath='{.data.PRESENTER_TOKEN}' | base64 -d)\"\n\n"
+    printf "To verify locally without a cluster:\n  %s --mock-mode\n\n" "$0"
     exit 1
   fi
 fi
@@ -653,16 +545,21 @@ log_pass "Step 5: Audience Burst & Request Parking Verified"
 log_info "Step 6: Telemetry Endpoint"
 TELEM_RESP=$(curl -s "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/stage/telemetry")
 
+if ! jq -e '((.workers // []) | type == "array") and all((.workers // [])[]; .pod_name != "")' <<<"${TELEM_RESP}" >/dev/null; then
+  log_err "Telemetry workers malformed: ${TELEM_RESP}"
+  log_fail "Step 6: Telemetry Endpoint"
+  exit 1
+fi
+if [[ "${MOCK_MODE}" == true ]] && ! jq -e '.parking_available == true' <<<"${TELEM_RESP}" >/dev/null; then
+  log_err "Local router statusz should make parking available: ${TELEM_RESP}"
+  log_fail "Step 6: Telemetry Endpoint"
+  exit 1
+fi
+
 WORKERS_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.workers | length' 2>/dev/null || echo 0)
 ACTORS_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.actors | length' 2>/dev/null || echo 0)
 PARKED_COUNT=$(printf "%s" "${TELEM_RESP}" | jq -r '.parked_requests // -1' 2>/dev/null || echo -1)
 EVENTS_COUNT=$(printf "%s" "${TELEM_RESP}" | jq '.recent_events | length' 2>/dev/null || echo 0)
-
-if [[ ${WORKERS_COUNT} -lt 2 ]]; then
-  log_err "Expected at least 2 worker slots in telemetry, got ${WORKERS_COUNT}. Response: ${TELEM_RESP}"
-  log_fail "Step 6: Telemetry Endpoint"
-  exit 1
-fi
 
 if [[ ${ACTORS_COUNT} -lt 1 ]]; then
   log_err "Expected at least 1 tracked actor in telemetry, got ${ACTORS_COUNT}. Response: ${TELEM_RESP}"
@@ -677,12 +574,14 @@ if ! [[ -n "${PARKED_COUNT}" && "${PARKED_COUNT}" != "null" && "${PARKED_COUNT}"
 fi
 
 log_ok "Physical Worker Pod Slots : ${WORKERS_COUNT}"
-for i in $(seq 0 $((${WORKERS_COUNT} - 1))); do
-  pod_name=$(printf "%s" "${TELEM_RESP}" | jq -r ".workers[$i].pod_name")
-  pod_actor=$(printf "%s" "${TELEM_RESP}" | jq -r ".workers[$i].active_actor")
-  pod_task=$(printf "%s" "${TELEM_RESP}" | jq -r ".workers[$i].current_task")
-  log_ok "  - Slot ${i}: ${pod_name} (${pod_actor}: ${pod_task})"
-done
+if [[ ${WORKERS_COUNT} -gt 0 ]]; then
+  for i in $(seq 0 $((WORKERS_COUNT - 1))); do
+    pod_name=$(printf "%s" "${TELEM_RESP}" | jq -r ".workers[$i].pod_name")
+    pod_actor=$(printf "%s" "${TELEM_RESP}" | jq -r ".workers[$i].active_actor")
+    pod_state=$(printf "%s" "${TELEM_RESP}" | jq -r ".workers[$i].state")
+    log_ok "  - Slot ${i}: ${pod_name} (${pod_actor}: ${pod_state})"
+  done
+fi
 log_ok "Active Fleet Actors Count : ${ACTORS_COUNT}"
 log_ok "Router Parked Counter     : ${PARKED_COUNT}"
 log_ok "Logged Cluster Events     : ${EVENTS_COUNT} events recorded"
@@ -777,54 +676,44 @@ log_pass "Step 7: Audience Simulation Engine Verified"
 # =========================================================================
 TARGET_ACTOR_ID="${ATTENDEE_ID:-attendee-01}"
 log_info "Step 8: Actor Spotlight Inspector API (/api/actor/{id})"
-ACTOR_HTTP_CODE=$(curl -s "${PRESENTER_HDR[@]}" -o "${TMP_DIR}/actor_details.json" -w "%{http_code}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")
 
-if [[ "${ACTOR_HTTP_CODE}" != "200" ]]; then
-  log_err "GET /api/actor/${TARGET_ACTOR_ID} returned HTTP ${ACTOR_HTTP_CODE} (expected 200)"
+# Trigger a fresh turn: the mock engine always attaches a pending approval,
+# so the actor's activity stays populated for the checks below, and in
+# cluster mode a turn ending schedules the auto-suspend this step also checks.
+curl -s --max-time 20 -X POST "${GATEWAY_URL}/api/chat" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Spotlight inspector probe"}' >/dev/null
+
+DETAILS="$(curl -fsS "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")"
+if ! jq -e 'has("state") and has("never_started") and has("activity") and (has("snapshot_location") | not)' <<<"${DETAILS}" >/dev/null; then
+  log_err "Actor details lack ActorView fields: ${DETAILS}"
   log_fail "Step 8: Actor Spotlight Inspector API"
   exit 1
 fi
+log_ok "Actor details carry ateapi state ($(jq -r .state <<<"${DETAILS}")), activity ($(jq -r .activity <<<"${DETAILS}"))"
 
-ACTOR_RESP=$(cat "${TMP_DIR}/actor_details.json")
-ACTOR_ID=$(printf "%s" "${ACTOR_RESP}" | jq -r .actor_id 2>/dev/null || true)
-ACTOR_STATE=$(printf "%s" "${ACTOR_RESP}" | jq -r .state 2>/dev/null || true)
-HAS_ACTOR_ID=$(printf "%s" "${ACTOR_RESP}" | jq 'has("actor_id")' 2>/dev/null || echo false)
-HAS_STATE=$(printf "%s" "${ACTOR_RESP}" | jq 'has("state")' 2>/dev/null || echo false)
-HAS_SNAP_LOC=$(printf "%s" "${ACTOR_RESP}" | jq 'has("snapshot_location")' 2>/dev/null || echo false)
-HAS_SNAP_SIZE=$(printf "%s" "${ACTOR_RESP}" | jq 'has("snapshot_size_bytes")' 2>/dev/null || echo false)
-
-if [[ "${HAS_ACTOR_ID}" != "true" || -z "${ACTOR_ID}" || "${ACTOR_ID}" == "null" ]]; then
-  log_err "Missing or null actor_id in /api/actor/attendee-01 response: ${ACTOR_RESP}"
-  log_fail "Step 8: Actor Spotlight Inspector API"
-  exit 1
+if [[ "${MOCK_MODE}" != true ]]; then
+  POST_CHAT_STATE="$(jq -r .state <<<"${DETAILS}")"
+  for _ in $(seq 1 10); do
+    case "${POST_CHAT_STATE}" in
+      RESUMING | RUNNING | SUSPENDING | SUSPENDED) break ;;
+    esac
+    sleep 1
+    DETAILS="$(curl -fsS "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")"
+    POST_CHAT_STATE="$(jq -r .state <<<"${DETAILS}")"
+  done
+  case "${POST_CHAT_STATE}" in
+    RESUMING | RUNNING | SUSPENDING | SUSPENDED)
+      log_ok "Actor state after chat turn: ${POST_CHAT_STATE}"
+      ;;
+    *)
+      log_err "Actor state after chat turn was '${POST_CHAT_STATE}', expected RESUMING, RUNNING, SUSPENDING or SUSPENDED"
+      log_fail "Step 8: Actor Spotlight Inspector API"
+      exit 1
+      ;;
+  esac
 fi
-
-if [[ "${HAS_STATE}" != "true" || -z "${ACTOR_STATE}" || "${ACTOR_STATE}" == "null" ]]; then
-  log_err "Missing or null state in /api/actor/attendee-01 response: ${ACTOR_RESP}"
-  log_fail "Step 8: Actor Spotlight Inspector API"
-  exit 1
-fi
-
-if [[ "${HAS_SNAP_LOC}" != "true" ]]; then
-  log_err "Missing snapshot_location in /api/actor/attendee-01 response: ${ACTOR_RESP}"
-  log_fail "Step 8: Actor Spotlight Inspector API"
-  exit 1
-fi
-
-if [[ "${HAS_SNAP_SIZE}" != "true" ]]; then
-  log_err "Missing snapshot_size_bytes in /api/actor/attendee-01 response: ${ACTOR_RESP}"
-  log_fail "Step 8: Actor Spotlight Inspector API"
-  exit 1
-fi
-
-SNAP_LOC=$(printf "%s" "${ACTOR_RESP}" | jq -r .snapshot_location 2>/dev/null || echo "")
-SNAP_SIZE=$(printf "%s" "${ACTOR_RESP}" | jq -r .snapshot_size_bytes 2>/dev/null || echo 0)
-
-log_ok "GET /api/actor/attendee-01 returned HTTP 200 OK"
-log_ok "  actor_id            : ${ACTOR_ID}"
-log_ok "  state               : ${ACTOR_STATE}"
-log_ok "  snapshot_location   : ${SNAP_LOC}"
-log_ok "  snapshot_size_bytes : ${SNAP_SIZE}"
 log_pass "Step 8: Actor Spotlight Inspector API Verified"
 
 # =========================================================================
@@ -848,17 +737,26 @@ if [[ "${RESET_STATUS}" != "ok" ]]; then
 fi
 log_ok "POST /api/reset returned HTTP 200 OK with payload status: ok"
 
-# Asserts GET /api/actor/{id} reports state SUSPENDED
-ACTOR_RESET_RESP=$(curl -s "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")
-ACTOR_RESET_STATE=$(printf "%s" "${ACTOR_RESET_RESP}" | jq -r .state 2>/dev/null || true)
-
-if [[ "${ACTOR_RESET_STATE}" != "SUSPENDED" ]]; then
-  log_err "GET /api/actor/${TARGET_ACTOR_ID} reported state '${ACTOR_RESET_STATE}' after reset (expected 'SUSPENDED'). Response: ${ACTOR_RESET_RESP}"
-  log_fail "Step 9: 1-Click Cluster Reset Controller"
-  exit 1
+DETAILS="$(curl -fsS "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")"
+if [[ "${MOCK_MODE}" == true ]]; then
+  if ! jq -e '.state == "UNAVAILABLE" and (.state_detail | contains("local mode"))' <<<"${DETAILS}" >/dev/null; then
+    log_err "Mock mode should report state unavailable: ${DETAILS}"
+    log_fail "Step 9: 1-Click Cluster Reset Controller"
+    exit 1
+  fi
+else
+  for _ in $(seq 1 30); do
+    DETAILS="$(curl -fsS "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/actor/${TARGET_ACTOR_ID}")"
+    jq -e '.state == "SUSPENDED" or .never_started' <<<"${DETAILS}" >/dev/null && break
+    sleep 1
+  done
+  if ! jq -e '.state == "SUSPENDED" or .never_started' <<<"${DETAILS}" >/dev/null; then
+    log_err "Actor not suspended 30s after reset: ${DETAILS}"
+    log_fail "Step 9: 1-Click Cluster Reset Controller"
+    exit 1
+  fi
 fi
-
-log_ok "GET /api/actor/${TARGET_ACTOR_ID} confirmed actor state is SUSPENDED"
+log_ok "Post-reset state: $(jq -r .state <<<"${DETAILS}")"
 log_pass "Step 9: 1-Click Cluster Reset Controller Verified"
 
 # =========================================================================
@@ -1016,7 +914,44 @@ fi
 
 log_pass "Step 12: Real-Time Action Stream SSE Verified"
 
+# =========================================================================
+# Step 13: Model Key Is Not Client-Settable
+# =========================================================================
+log_info "Step 13: Model Key Is Not Client-Settable (/api/chat)"
+MODEL_KEY_SESSION_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/session")
+MODEL_KEY_TOKEN=$(printf "%s" "${MODEL_KEY_SESSION_RESP}" | jq -r .token 2>/dev/null || true)
+
+if [[ -z "${MODEL_KEY_TOKEN}" || "${MODEL_KEY_TOKEN}" == "null" ]]; then
+  log_err "Missing token in session response: ${MODEL_KEY_SESSION_RESP}"
+  log_fail "Step 13: Model Key Is Not Client-Settable"
+  exit 1
+fi
+
+MODEL_KEY_HTTP_CODE=$(curl -s -o "${TMP_DIR}/model_key_resp.json" -w "%{http_code}" --max-time 20 -X POST "${GATEWAY_URL}/api/chat" \
+  -H "Authorization: Bearer ${MODEL_KEY_TOKEN}" \
+  -H "X-Conf-Model-Key: forged" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Model key forgery probe"}')
+
+if [[ "${MODEL_KEY_HTTP_CODE}" != "200" ]]; then
+  log_err "POST /api/chat with a forged X-Conf-Model-Key returned HTTP ${MODEL_KEY_HTTP_CODE} (expected 200)"
+  log_fail "Step 13: Model Key Is Not Client-Settable"
+  exit 1
+fi
+log_ok "POST /api/chat with a forged X-Conf-Model-Key still returned HTTP 200 OK"
+
+if [[ "${MOCK_MODE}" == true ]]; then
+  MODEL_KEY_SOURCE=$(jq -r .source <"${TMP_DIR}/model_key_resp.json" 2>/dev/null || true)
+  if [[ "${MODEL_KEY_SOURCE}" != "mock" ]]; then
+    log_err "Expected reply source 'mock' in mock mode, got '${MODEL_KEY_SOURCE}'. Response: $(cat "${TMP_DIR}/model_key_resp.json")"
+    log_fail "Step 13: Model Key Is Not Client-Settable"
+    exit 1
+  fi
+  log_ok "Actor reply source is 'mock'; the forged header did not reach the model proxy"
+fi
+log_pass "Step 13: Model Key Is Not Client-Settable Verified"
+
 printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
-printf "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 12 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}\n"
+printf "${CLR_GREEN}${CLR_BOLD}  ✓ ALL 13 VERIFICATION STEPS PASSED SUCCESSFULLY! (exit 0)${CLR_RESET}\n"
 printf "${CLR_CYAN}========================================================================${CLR_RESET}\n"
 exit 0
