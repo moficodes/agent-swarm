@@ -37,10 +37,9 @@ type Board struct {
 }
 
 // NewBoard returns an empty Board that calls publish for each changed view.
-// publish must not call any Board mutator (SetStatuses, SetUnavailable,
-// SetActivity, SetSource, Reset): doing so deadlocks, because a mutator
-// call already in progress holds the lock that serializes publishing.
-// Reading the board back via View or Views from within publish is fine.
+// publish must not call any Board method: publish runs holding the lock
+// that orders publishes, and a concurrent update may hold the board lock
+// while it waits for that one.
 func NewBoard(publish func(types.ActorView)) *Board {
 	return &Board{publish: publish, views: map[string]types.ActorView{}}
 }
