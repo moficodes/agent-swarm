@@ -1261,6 +1261,11 @@ func TestChatRoute(t *testing.T) {
 	if !strings.Contains(cssBody, "chat-feed") || !strings.Contains(cssBody, "approval-card") {
 		t.Errorf("expected chat.css to contain chat-feed and approval-card rules")
 	}
+	// Chips and banners set display, which would override the hidden attribute
+	// and leave a stale "Executing" or "Mock LLM" on screen.
+	if !strings.Contains(cssBody, "[hidden] {\n  display: none !important;") {
+		t.Errorf("expected chat.css to keep hidden elements hidden")
+	}
 
 	// 4. POST /chat should return 405 Method Not Allowed
 	respPost, err := http.Post(ts.URL+"/chat", "application/json", nil)
@@ -1464,6 +1469,11 @@ func TestStageRoute(t *testing.T) {
 	cssBody := string(cssBytes)
 	if !strings.Contains(cssBody, "parking-meter") || !strings.Contains(cssBody, "fleet-grid") {
 		t.Errorf("expected stage.css to contain parking-meter and fleet-grid rules")
+	}
+	// Chips and banners set display, which would override the hidden attribute
+	// and leave a stale "Executing" or "Mock LLM" on screen.
+	if !strings.Contains(cssBody, "[hidden] {\n  display: none !important;") {
+		t.Errorf("expected stage.css to keep hidden elements hidden")
 	}
 
 	// 7. GET /stage/ should return 200 OK

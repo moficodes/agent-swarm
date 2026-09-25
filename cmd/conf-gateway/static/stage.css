@@ -50,6 +50,12 @@
   padding: 0;
 }
 
+/* Rules below set display on elements toggled with the hidden attribute;
+   keep hidden meaning hidden. */
+[hidden] {
+  display: none !important;
+}
+
 html, body {
   width: 100%;
   height: 100vh;
