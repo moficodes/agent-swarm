@@ -57,7 +57,7 @@ limitations under the License.
         <button type="button" class="chip" data-prompt="Report who and where this script is running: the user and uid, the hostname, the kernel from os.uname() and /proc/version, and the mounts in /proc/self/mountinfo">
           <span class="chip-icon" aria-hidden="true">🔍</span> Where am I running?
         </button>
-        <button type="button" class="chip" title="Tap it again after your agent suspends: the earlier entries are still there" data-prompt="Append the current time to /tmp/diary.txt, then print every entry in the diary so far, numbered">
+        <button type="button" class="chip" data-prompt="Append the current time to /tmp/diary.txt, then print every entry in the diary so far, numbered">
           <span class="chip-icon" aria-hidden="true">📓</span> Keep a diary
         </button>
       </div>
@@ -73,8 +73,9 @@ limitations under the License.
         </div>
         <div class="message-bubble">
           <p><strong>Welcome to Agent Substrate.</strong></p>
-          <p>You have been provisioned an isolated stateful agent running in a gVisor container sandbox. When idle, your agent state is snapshotted to Google Cloud Storage at 0 cost.</p>
-          <p class="intro-hint">Select a prompt chip above or type a command below to trigger execution.</p>
+          <p>This agent is yours. Gemini writes a Python script for each request, and it runs in a gVisor sandbox only after you approve it.</p>
+          <p>Between turns your agent is suspended: its memory is saved as a snapshot and it gives up its place on the worker until your next message. Try Keep a diary twice to see its files survive.</p>
+          <p class="intro-hint">Pick an example above, or ask for anything a short Python script can do.</p>
         </div>
       </div>
     </main>
@@ -130,7 +131,7 @@ limitations under the License.
           <span class="btn-icon" aria-hidden="true">✕</span> Reject
         </button>
         <button type="button" class="action-btn btn-approve">
-          <span class="btn-icon" aria-hidden="true">✓</span> Approve &amp; Execute
+          <span class="btn-icon" aria-hidden="true">✓</span> Approve &amp; run
         </button>
       </div>
     </div>
