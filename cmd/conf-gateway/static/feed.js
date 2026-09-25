@@ -187,16 +187,30 @@
       `;
     }
 
-    // Execution Terminal Section
+    // Execution Terminal Section. A failed run shows one line, not a dump.
     let terminalHTML = '';
-    if (entry.execution) {
-      const exitClass = entry.execution.exit_code === 0 ? 'exit-0' : 'exit-err';
+    const failure = window.ActorView.run(entry.execution);
+    if (failure) {
       terminalHTML = `
         <div class="card-terminal-section">
           <div class="terminal-header-bar">
             <span class="terminal-title">💻 gVisor Sandbox Output</span>
             <div class="terminal-metrics">
-              <span class="term-exit-status ${exitClass}">Exit ${entry.execution.exit_code}</span>
+              <span class="term-exit-status ${failure.cls}">${escapeHtml(failure.label)}</span>
+            </div>
+          </div>
+          <div class="terminal-body">
+            ${failure.detail ? `<div class="term-detail">${escapeHtml(failure.detail)}</div>` : ''}
+          </div>
+        </div>
+      `;
+    } else if (entry.execution) {
+      terminalHTML = `
+        <div class="card-terminal-section">
+          <div class="terminal-header-bar">
+            <span class="terminal-title">💻 gVisor Sandbox Output</span>
+            <div class="terminal-metrics">
+              <span class="term-exit-status exit-0">Exit ${entry.execution.exit_code}</span>
               <span class="term-duration">${entry.execution.duration_ms}ms</span>
             </div>
           </div>

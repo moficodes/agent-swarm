@@ -90,5 +90,16 @@
     return Object.keys(actorsMap || {}).sort();
   }
 
-  window.ActorView = { state: state, activity: activity, source: source, badge: badge, fleetIDs: fleetIDs };
+  // run maps an execution result to how pages present a failed run: a chip
+  // {label, cls} and one line of detail, the last line of stderr, which for
+  // a Python traceback is the exception. A successful run maps to null.
+  function run(exec) {
+    if (!exec || (exec.exit_code === 0 && !exec.corrected)) return null;
+    const lines = (exec.stderr || '').trim().split('\n');
+    const detail = lines[lines.length - 1].trim();
+    if (exec.corrected) return { label: 'Self-corrected', cls: 'run-corrected', detail: detail };
+    return { label: "Didn't run", cls: 'run-failed', detail: detail };
+  }
+
+  window.ActorView = { state: state, activity: activity, source: source, badge: badge, fleetIDs: fleetIDs, run: run };
 })();

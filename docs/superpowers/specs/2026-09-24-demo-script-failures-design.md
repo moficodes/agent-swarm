@@ -180,13 +180,15 @@ It records the corrected run on the action log entry with the new approval,
 so the feed can show it.
 
 **Stage spotlight (`stage.js`).** A failed run that is not corrected shows
-under "Didn't run" in amber instead of the red exit line, with the first line
-of stderr only.
+under "Didn't run" in amber instead of the red exit line, with the last
+non-empty line of stderr (for a Python traceback, the exception) only.
 
 **Feed cards (`feed.js`, `stage.js`).** A `Corrected` run shows an amber
-"Self-corrected" chip and the first line of stderr; the card goes on to show
-the new proposal. A failed run that is not corrected shows an amber "Didn't
-run" chip and the first line of stderr. Successful runs are unchanged.
+"Self-corrected" chip and the last non-empty line of stderr (for a Python
+traceback, the exception); the card goes on to show the new proposal. A
+failed run that is not corrected shows an amber "Didn't run" chip and the
+last non-empty line of stderr (for a Python traceback, the exception).
+Successful runs are unchanged.
 
 ## Testing
 

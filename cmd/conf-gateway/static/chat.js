@@ -283,6 +283,33 @@
     scrollToBottom();
   }
 
+  // renderReply shows an assistant reply: its text, a failed run's stderr
+  // collapsed under a note, and any approval it asks for.
+  function renderReply(msg) {
+    const msgDiv = appendMessage('assistant', msg.content, msg.timestamp, msg.source);
+    const failure = window.ActorView.run(msg.execution);
+    if (failure) appendRunDetails(msgDiv, failure, msg.execution.stderr);
+    if (msg.approval) appendApprovalCard(msg.approval, msgDiv);
+    return msgDiv;
+  }
+
+  function appendRunDetails(msgDiv, failure, stderr) {
+    const bubble = msgDiv.querySelector('.message-bubble');
+    const note = document.createElement('div');
+    note.className = 'run-note ' + failure.cls;
+    note.textContent = failure.label;
+    const details = document.createElement('details');
+    details.className = 'run-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'What went wrong';
+    const pre = document.createElement('pre');
+    pre.textContent = stderr || '';
+    details.appendChild(summary);
+    details.appendChild(pre);
+    bubble.appendChild(note);
+    bubble.appendChild(details);
+  }
+
   function appendApprovalCard(approval, messageContainer) {
     if (!approval || !el.approvalTemplate) return;
 
@@ -396,11 +423,7 @@
       }
 
       const chatMsg = await resp.json();
-      const msgDiv = appendMessage('assistant', chatMsg.content, chatMsg.timestamp, chatMsg.source);
-
-      if (chatMsg.approval) {
-        appendApprovalCard(chatMsg.approval, msgDiv);
-      }
+      renderReply(chatMsg);
     } catch (err) {
       console.error('Chat error:', err);
       removeTypingIndicator();
@@ -470,7 +493,7 @@
       }
 
       const resultMsg = await resp.json();
-      appendMessage('assistant', resultMsg.content, resultMsg.timestamp, resultMsg.source);
+      renderReply(resultMsg);
     } catch (err) {
       console.error('Approval submission error:', err);
       removeTypingIndicator();

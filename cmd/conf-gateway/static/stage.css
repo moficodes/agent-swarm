@@ -1375,6 +1375,10 @@ html, body {
   word-break: break-all;
 }
 
+.drawer-terminal-box.run-failed {
+  color: var(--neon-amber);
+}
+
 .drawer-phone-btn {
   display: flex;
   align-items: center;
@@ -2116,6 +2120,18 @@ html, body {
 .term-exit-status.exit-err {
   background: rgba(239, 68, 68, 0.2);
   color: #fca5a5;
+}
+
+.term-exit-status.run-corrected,
+.term-exit-status.run-failed {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--neon-amber);
+}
+
+.term-detail {
+  color: var(--neon-amber);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .term-duration {

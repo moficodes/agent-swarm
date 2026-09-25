@@ -860,6 +860,18 @@ html, body {
   color: #fca5a5;
 }
 
+.term-exit-status.run-corrected,
+.term-exit-status.run-failed {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--neon-amber);
+}
+
+.term-detail {
+  color: var(--neon-amber);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .term-duration {
   color: var(--text-muted);
 }

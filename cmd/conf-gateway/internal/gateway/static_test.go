@@ -134,3 +134,45 @@ func TestStatic_StageStylesEveryBadgeClass(t *testing.T) {
 		}
 	}
 }
+
+// TestStatic_FailedRunsGoThroughActorView checks that every page presents a
+// failed run through the shared ActorView.run mapping, and that the phone
+// renders the approve reply like a chat reply, so a fix's approval appears.
+func TestStatic_FailedRunsGoThroughActorView(t *testing.T) {
+	if js := readStatic(t, "actorview.js"); !strings.Contains(js, "run: run") {
+		t.Error("actorview.js does not export run")
+	}
+	for _, page := range []string{"chat.js", "feed.js", "stage.js"} {
+		if js := readStatic(t, page); !strings.Contains(js, "ActorView.run(") {
+			t.Errorf("%s does not use ActorView.run", page)
+		}
+	}
+	chat := readStatic(t, "chat.js")
+	for _, want := range []string{"renderReply(chatMsg)", "renderReply(resultMsg)", "createElement('details')", "What went wrong"} {
+		if !strings.Contains(chat, want) {
+			t.Errorf("chat.js lacks %q", want)
+		}
+	}
+}
+
+// TestStatic_FailedRunsAreStyled checks that each page styles the classes
+// ActorView.run returns.
+func TestStatic_FailedRunsAreStyled(t *testing.T) {
+	for _, sheet := range []string{"feed.css", "stage.css"} {
+		css := readStatic(t, sheet)
+		for _, cls := range []string{".term-exit-status.run-corrected", ".term-exit-status.run-failed", ".term-detail"} {
+			if !strings.Contains(css, cls) {
+				t.Errorf("%s has no %s rule", sheet, cls)
+			}
+		}
+	}
+	if css := readStatic(t, "stage.css"); !strings.Contains(css, ".drawer-terminal-box.run-failed") {
+		t.Error("stage.css does not style a failed run in the spotlight")
+	}
+	css := readStatic(t, "chat.css")
+	for _, cls := range []string{".run-note", ".run-details"} {
+		if !strings.Contains(css, cls) {
+			t.Errorf("chat.css has no %s rule", cls)
+		}
+	}
+}
