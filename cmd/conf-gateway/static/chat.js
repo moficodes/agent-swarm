@@ -283,14 +283,44 @@
     scrollToBottom();
   }
 
-  // renderReply shows an assistant reply: its text, a failed run's stderr
-  // collapsed under a note, and any approval it asks for.
+  // renderReply shows an assistant reply: its text, a successful run's
+  // output as it printed, a failed run's stderr collapsed under a note, and
+  // any approval it asks for.
   function renderReply(msg) {
+    const exec = msg.execution;
+    const failure = window.ActorView.run(exec);
+    if (exec && !failure) {
+      const msgDiv = appendMessage('assistant', 'Ran in ' + exec.duration_ms + ' ms.', msg.timestamp, msg.source);
+      appendRunOutput(msgDiv, exec);
+      return msgDiv;
+    }
     const msgDiv = appendMessage('assistant', msg.content, msg.timestamp, msg.source);
-    const failure = window.ActorView.run(msg.execution);
-    if (failure) appendRunDetails(msgDiv, failure, msg.execution.stderr);
+    if (failure) appendRunDetails(msgDiv, failure, exec.stderr);
     if (msg.approval) appendApprovalCard(msg.approval, msgDiv);
     return msgDiv;
+  }
+
+  // appendRunOutput shows stdout with its line breaks and spacing kept, so
+  // ASCII charts and tables line up, and any stderr (such as a warning)
+  // collapsed beneath it.
+  function appendRunOutput(msgDiv, exec) {
+    const bubble = msgDiv.querySelector('.message-bubble');
+    const pre = document.createElement('pre');
+    pre.className = 'run-output';
+    pre.textContent = (exec.stdout || '').replace(/\s+$/, '') || '(no output)';
+    bubble.appendChild(pre);
+    if (exec.stderr) {
+      const details = document.createElement('details');
+      details.className = 'run-details';
+      const summary = document.createElement('summary');
+      summary.textContent = 'Warnings';
+      const err = document.createElement('pre');
+      err.textContent = exec.stderr;
+      details.appendChild(summary);
+      details.appendChild(err);
+      bubble.appendChild(details);
+    }
+    scrollToBottom();
   }
 
   function appendRunDetails(msgDiv, failure, stderr) {
@@ -487,7 +517,7 @@
         const actionsDiv = cardElement.querySelector('.approval-actions');
         if (actionsDiv) {
           actionsDiv.innerHTML = '<div class="approval-status-badge ' + (decision === 'APPROVE' ? 'approved' : 'rejected') + '">' +
-            (decision === 'APPROVE' ? '✓ Execution Approved &amp; Executed' : '✕ Execution Rejected') +
+            (decision === 'APPROVE' ? '✓ Approved' : '✕ Rejected') +
             '</div>';
         }
       }

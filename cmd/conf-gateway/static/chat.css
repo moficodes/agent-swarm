@@ -88,6 +88,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   margin-bottom: 8px;
 }
 
@@ -120,6 +121,7 @@ html, body {
   padding: 3px 8px;
   border-radius: 9999px;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .model-badge {
@@ -140,12 +142,14 @@ html, body {
 .status-bar {
   display: flex;
   align-items: center;
+  gap: 6px;
 }
 
 .status-pill {
   display: flex;
   align-items: center;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   gap: 8px;
   padding: 6px 12px;
   border-radius: 8px;
@@ -166,6 +170,7 @@ html, body {
 .status-text {
   font-weight: 700;
   letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 .status-sub {
@@ -174,6 +179,10 @@ html, body {
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Status Pill States */
@@ -280,7 +289,8 @@ html, body {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  margin-top: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .activity-chip.thinking {
@@ -335,14 +345,8 @@ html, body {
 
 .chips-scroll {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  padding-bottom: 2px;
-}
-.chips-scroll::-webkit-scrollbar {
-  display: none;
 }
 
 .chip {
@@ -616,7 +620,7 @@ html, body {
   line-height: 1.45;
   color: #d1d9e6;
   white-space: pre-wrap;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 /* Syntax Highlighting */
@@ -651,6 +655,8 @@ html, body {
 }
 
 .btn-reject {
+  flex: 0 0 auto;
+  padding: 0 18px;
   background: rgba(255, 51, 102, 0.15);
   color: #ff5577;
   border: 1px solid rgba(255, 51, 102, 0.4);
@@ -802,4 +808,34 @@ html, body {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--font-mono);
+}
+
+/* A successful run's output, spaced exactly as printed so charts line up */
+.run-output {
+  margin-top: 0.5rem;
+  padding: 10px 12px;
+  max-height: 22rem;
+  overflow: auto;
+  background: #05070b;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  color: #d1d9e6;
+  white-space: pre;
+}
+
+@media (max-width: 380px) {
+  .brand-title {
+    font-size: 15px;
+    letter-spacing: 0.04em;
+  }
+  .badge {
+    font-size: 10px;
+    padding: 3px 6px;
+  }
+  .attendee-badge {
+    font-size: 11px;
+  }
 }
