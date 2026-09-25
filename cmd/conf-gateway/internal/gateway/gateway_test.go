@@ -1220,6 +1220,8 @@ func TestChatRoute(t *testing.T) {
 		`Where am I running?`,
 		`Keep a diary`,
 		`/tmp/diary.txt`,
+		`Try the internet`,
+		`fetch https://example.com with urllib`,
 		`approval-card`,
 		`btn-reject`,
 		`btn-approve`,
