@@ -31,7 +31,7 @@
 
   --text-primary: #f8fafc;
   --text-secondary: #94a3b8;
-  --text-muted: #64748b;
+  --text-muted: #8494ab;
 
   --neon-cyan: #00ffcc;
   --neon-green: #10b981;
@@ -197,6 +197,31 @@ html, body {
   max-width: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+/* The stage is read from across a room: scale all rem-sized type up on
+   projector-sized screens. */
+@media (min-width: 1600px) {
+  html {
+    font-size: 19px;
+  }
+
+  .stage-main {
+    grid-template-columns: 400px minmax(0, 1fr);
+  }
+
+  /* Tighter sidebar spacing keeps both cards on a 1080p screen. */
+  .stage-sidebar .card {
+    padding: 1rem 1.25rem;
+  }
+
+  .qr-wrapper {
+    margin: 0;
+  }
+
+  .parking-metric-block {
+    margin: 0.5rem 0 0.75rem;
+  }
 }
 
 @media (min-width: 2560px) {
