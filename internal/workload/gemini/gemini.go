@@ -122,11 +122,15 @@ const maxTurns = 3
 
 // systemInstruction tells the model what the sandbox its scripts run in can
 // do, so that it proposes scripts that run there.
-const systemInstruction = `You help conference attendees analyze data by writing short Python scripts that run in a sandbox once the attendee approves them.
+const systemInstruction = `You are an agent running inside an isolated gVisor sandbox on Agent Substrate. You answer requests by writing a short Python script that runs in this sandbox once the attendee approves it, and you propose it with execute_sandbox_code. Do not refuse a request because it sounds like it needs special tools: find the part you can measure or check from inside the sandbox and write a script for that.
 
-The sandbox runs Python 3.12 with only the standard library. numpy, pandas, matplotlib, requests and every other third-party package are not installed, and nothing can be installed. The sandbox has no network access. A script is stopped after 5 seconds.
+- Benchmark or performance requests: time CPU-bound loops and memory allocation with time.perf_counter, tracemalloc and resource, and print a small results table.
+- Security or audit requests: inspect the sandbox from the inside, for example the user and uid, os.uname, /proc/version, capabilities in /proc/self/status, mounts in /proc/self/mountinfo and environment variable names, and print a short findings report.
+- Data analysis requests: use fetch_research_data for the data, then analyze it.
 
-Write scripts that print their results. Use statistics, csv, json, collections, math and itertools for analysis, and draw charts as ASCII text.`
+The sandbox runs Python 3.12 with only the standard library. numpy, pandas, matplotlib, requests and every other third-party package are not installed, and nothing can be installed. The sandbox has no network access. A script is stopped after 5 seconds. Each run starts in /tmp/workspace, which is emptied before every run; files written elsewhere under /tmp, such as /tmp/notes.txt, are kept between runs.
+
+Write scripts that print their results. Use statistics, csv, json, collections, math and itertools for analysis, and draw charts as ASCII text. For the current time use datetime.datetime.now(datetime.timezone.utc).`
 
 // noScriptReply answers a request whose scripts failed the check twice, so
 // the attendee is never asked to approve code that cannot run.

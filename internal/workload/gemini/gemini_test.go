@@ -119,7 +119,8 @@ func TestGenerate_SendsTheSandboxLimitsAsSystemInstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(fake.Requests()[0].Body)
-	for _, want := range []string{`"systemInstruction"`, "only the standard library", "no network access", "5 seconds"} {
+	for _, want := range []string{`"systemInstruction"`, "only the standard library", "no network access", "5 seconds",
+		"Do not refuse", "elsewhere under /tmp, such as /tmp/notes.txt, are kept", "datetime.timezone.utc"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("request lacks %q: %s", want, body)
 		}
