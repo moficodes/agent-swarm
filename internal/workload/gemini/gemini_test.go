@@ -428,3 +428,80 @@ func TestFix_CorrectionThatFailsTheCheckTwiceIsAnError(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoFix", err)
 	}
 }
+
+func TestGenerate_MalformedCallIsAskedAgain(t *testing.T) {
+	fake := geminitest.New(t,
+		geminitest.MalformedCallResponse(),
+		geminitest.ApprovalResponse("pi", "print(3.14)", "python"),
+	)
+	msg, err := newClient(fake).Generate(context.Background(), nil, "estimate pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Approval == nil || msg.Approval.Code != "print(3.14)" {
+		t.Fatalf("Approval = %+v, want the second reply's script", msg.Approval)
+	}
+	if n := len(fake.Requests()); n != 2 {
+		t.Errorf("got %d requests, want 2", n)
+	}
+}
+
+// The model sometimes calls a code tool it was not offered, such as
+// google:python_interpreter; it is told which tool to use instead.
+func TestGenerate_UnknownToolIsRedirectedToTheSandbox(t *testing.T) {
+	fake := geminitest.New(t,
+		geminitest.FunctionCallResponse("google:python_interpreter", map[string]any{"code": "print(3.14)"}),
+		geminitest.ApprovalResponse("pi", "print(3.14)", "python"),
+	)
+	msg, err := newClient(fake).Generate(context.Background(), nil, "estimate pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Approval == nil {
+		t.Fatalf("Approval = nil, want the second reply's script")
+	}
+	reqs := fake.Requests()
+	if len(reqs) != 2 {
+		t.Fatalf("got %d requests, want 2", len(reqs))
+	}
+	body := string(reqs[1].Body)
+	for _, want := range []string{`"functionResponse"`, "google:python_interpreter", "execute_sandbox_code"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("retry request lacks %q; body = %s", want, body)
+		}
+	}
+}
+
+func TestGenerate_SecondBadReplyGetsThePlainReply(t *testing.T) {
+	fake := geminitest.New(t, geminitest.MalformedCallResponse())
+	msg, err := newClient(fake).Generate(context.Background(), nil, "estimate pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Approval != nil || !strings.Contains(msg.Content, "couldn't write a script that runs in this sandbox") {
+		t.Fatalf("msg = %+v, want the plain reply", msg)
+	}
+	if n := len(fake.Requests()); n != 2 {
+		t.Errorf("got %d requests, want 2", n)
+	}
+}
+
+// A bad reply and a script that fails the check share the one retry.
+func TestGenerate_BadReplyAfterABrokenScriptGetsThePlainReply(t *testing.T) {
+	fake := geminitest.New(t,
+		geminitest.ApprovalResponse("sum", "print('a\nb')", "python"),
+		geminitest.MalformedCallResponse(),
+		geminitest.ApprovalResponse("sum", "print('ab')", "python"),
+	)
+	c := newClient(fake, gemini.WithScriptChecker(fakeChecker("print('a\nb')")))
+	msg, err := c.Generate(context.Background(), nil, "sum it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Approval != nil {
+		t.Fatalf("Approval = %+v, want the plain reply", msg.Approval)
+	}
+	if n := len(fake.Requests()); n != 2 {
+		t.Errorf("got %d requests, want 2", n)
+	}
+}

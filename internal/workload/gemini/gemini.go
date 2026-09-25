@@ -147,9 +147,11 @@ func (c *Client) Generate(ctx context.Context, history []types.ChatMessage, prom
 
 // run plays up to maxTurns model turns over contents. A proposed script that
 // fails the check goes back to the model once, so the attendee is not asked
-// to approve code that cannot run; one that fails again, or on the last
-// turn, is dropped for noScriptReply. An approval message's Content is the
-// model's text, which may be empty.
+// to approve code that cannot run. A reply with nothing usable in it (a
+// malformed tool call, a call to a tool that was not offered, or no content)
+// is retried the same way, sharing that one retry. After a second failure,
+// or a failure on the last turn, the attendee gets noScriptReply. An
+// approval message's Content is the model's text, which may be empty.
 func (c *Client) run(ctx context.Context, contents []*genai.Content) (*types.ChatMessage, error) {
 	if !c.cfg.Enabled() {
 		return nil, ErrDisabled
@@ -175,26 +177,31 @@ func (c *Client) run(ctx context.Context, contents []*genai.Content) (*types.Cha
 		if err != nil {
 			return nil, fmt.Errorf("gemini: generateContent: %w", err)
 		}
-		if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-			return nil, errors.New("gemini: empty candidates")
+		// A malformed tool call comes back as a candidate with no content.
+		var cand *genai.Content
+		if len(resp.Candidates) > 0 {
+			cand = resp.Candidates[0].Content
 		}
-		cand := resp.Candidates[0].Content
 
 		var text strings.Builder
 		var approval *types.ApprovalRequest
 		var approvalCall *genai.FunctionCall
-		var research []*genai.FunctionCall
-		for _, part := range cand.Parts {
-			text.WriteString(part.Text)
-			if part.FunctionCall == nil {
-				continue
-			}
-			switch part.FunctionCall.Name {
-			case "request_human_approval", "execute_sandbox_code":
-				approval = approvalFromCall(part.FunctionCall)
-				approvalCall = part.FunctionCall
-			case "fetch_research_data":
-				research = append(research, part.FunctionCall)
+		var research, unknown []*genai.FunctionCall
+		if cand != nil {
+			for _, part := range cand.Parts {
+				text.WriteString(part.Text)
+				if part.FunctionCall == nil {
+					continue
+				}
+				switch part.FunctionCall.Name {
+				case "request_human_approval", "execute_sandbox_code":
+					approval = approvalFromCall(part.FunctionCall)
+					approvalCall = part.FunctionCall
+				case "fetch_research_data":
+					research = append(research, part.FunctionCall)
+				default:
+					unknown = append(unknown, part.FunctionCall)
+				}
 			}
 		}
 
@@ -225,10 +232,27 @@ func (c *Client) run(ctx context.Context, contents []*genai.Content) (*types.Cha
 			contents = append(contents, &genai.Content{Role: "user", Parts: parts})
 			continue
 		}
-		if text.Len() > 0 {
+		if len(unknown) == 0 && text.Len() > 0 {
 			return assistantMessage(text.String(), nil), nil
 		}
-		return nil, errors.New("gemini: reply had neither text nor a tool call")
+		if retried || turn == maxTurns-1 {
+			return assistantMessage(noScriptReply, nil), nil
+		}
+		retried = true
+		if len(unknown) > 0 {
+			contents = append(contents, cand)
+			var parts []*genai.Part
+			for _, call := range unknown {
+				parts = append(parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{
+					Name: call.Name, Response: map[string]any{
+						"error": "There is no tool named " + call.Name + ". Propose the script with execute_sandbox_code.",
+					},
+				}})
+			}
+			contents = append(contents, &genai.Content{Role: "user", Parts: parts})
+		}
+		// A malformed call leaves nothing to answer, so the same request is
+		// sent again.
 	}
 	return nil, errors.New("gemini: no answer within the turn limit")
 }

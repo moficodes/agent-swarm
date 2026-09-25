@@ -184,3 +184,12 @@ func ExplainedApprovalResponse(text, summary, code, language string) string {
 		}}},
 	)
 }
+
+// MalformedCallResponse is a reply in which the model tried to call a tool
+// but produced a call Vertex AI could not parse, so it carries no content.
+func MalformedCallResponse() string {
+	b, _ := json.Marshal(map[string]any{
+		"candidates": []any{map[string]any{"finishReason": "MALFORMED_FUNCTION_CALL"}},
+	})
+	return string(b)
+}
