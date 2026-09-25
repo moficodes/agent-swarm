@@ -28,10 +28,9 @@ type ScriptChecker func(ctx context.Context, language, code string) string
 
 // checkProgram reads a script on stdin and, running none of it, prints the
 // first reason it cannot run in the sandbox: a syntax error, a relative
-// import, a module outside the standard library, or a network module.
+// import, or a module outside the standard library. Network modules pass:
+// the sandbox itself blocks egress, and a script may show that.
 const checkProgram = `import ast, sys
-NETWORK = {"socket", "ssl", "http", "urllib", "ftplib", "smtplib", "poplib",
-           "imaplib", "telnetlib", "xmlrpc", "socketserver", "asyncio"}
 src = sys.stdin.read()
 try:
     compile(src, "script.py", "exec")
@@ -52,9 +51,6 @@ for node in ast.walk(ast.parse(src)):
         top = name.split(".")[0]
         if top not in sys.stdlib_module_names:
             print(f"module {top} is not installed (line {node.lineno}); use only the standard library")
-            sys.exit()
-        if top in NETWORK:
-            print(f"module {top} needs the network (line {node.lineno}); the sandbox has no network access")
             sys.exit()
 `
 

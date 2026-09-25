@@ -119,7 +119,7 @@ func TestGenerate_SendsTheSandboxLimitsAsSystemInstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(fake.Requests()[0].Body)
-	for _, want := range []string{`"systemInstruction"`, "only the standard library", "no network access", "5 seconds",
+	for _, want := range []string{`"systemInstruction"`, "only the standard library", "Network connections are blocked", "catch the error", "5 seconds",
 		"Do not refuse", "elsewhere under /tmp, such as /tmp/notes.txt, are kept", "datetime.timezone.utc"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("request lacks %q: %s", want, body)
@@ -329,8 +329,10 @@ func TestScriptProblem(t *testing.T) {
 		{"dotted third-party import", "python", "import matplotlib.pyplot as plt\n", "module matplotlib is not installed"},
 		{"import inside a function", "python", "def f():\n    import requests\n", "module requests is not installed"},
 		{"relative import", "python", "from . import helpers\n", "relative import"},
-		{"network module", "python", "import urllib.request\n", "no network access"},
-		{"network from-import", "python", "from socket import socket\n", "no network access"},
+		// The sandbox itself blocks egress, so a network script is allowed to
+		// run and show the block.
+		{"network module", "python", "import urllib.request\n", ""},
+		{"network from-import", "python", "from socket import socket\n", ""},
 		{"shell script", "sh", "echo hi", "only Python scripts can run in this sandbox"},
 		{"bash script", "bash", "echo hi", "only Python scripts can run in this sandbox"},
 	} {

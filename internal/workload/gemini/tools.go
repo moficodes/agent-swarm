@@ -21,7 +21,7 @@ import (
 )
 
 // sandboxLimits is what a script may rely on in the sandbox.
-const sandboxLimits = "It may use only the standard library (numpy, pandas and other third-party packages are not installed), has no network access, and is stopped after 5 seconds."
+const sandboxLimits = "It may use only the standard library (numpy, pandas and other third-party packages are not installed), cannot reach the network (connections are blocked), and is stopped after 5 seconds."
 
 // ToolDeclarations returns the tools offered to the model.
 func ToolDeclarations() []*genai.Tool {
