@@ -162,6 +162,40 @@ func TestApprove_NewRequestGetsItsOwnFix(t *testing.T) {
 	}
 }
 
+func TestApprove_FailedRunInMockModeGetsThePlainReply(t *testing.T) {
+	// Mock mode's proposal is a fixed script that runs cleanly on its own, so
+	// make it fail without touching its code: hide python from PATH.
+	t.Setenv("PATH", t.TempDir())
+	fake := geminitest.New(t)
+	s := server.NewWorkloadServer(
+		server.WithWorkspaceDir(t.TempDir()),
+		server.WithGeminiConfig(geminiConfig),
+		server.WithForceMock(true),
+	)
+	proposal := postChat(t, s.Handler(), fake.URL, "k.mac", "do the thing")
+	if proposal.Approval == nil {
+		t.Fatalf("chat reply carried no approval: %+v", proposal)
+	}
+
+	msg := approveDriven(t, s.Handler(), fake.URL, proposal.Approval.ApprovalID)
+
+	if n := len(fake.Requests()); n != 0 {
+		t.Errorf("mock mode made %d upstream model requests, want 0", n)
+	}
+	if msg.Content != "That approach didn't work in this sandbox. Try asking for something simpler." {
+		t.Errorf("Content = %q, want the plain reply", msg.Content)
+	}
+	if msg.Execution == nil || msg.Execution.ExitCode == 0 || msg.Execution.Corrected {
+		t.Errorf("Execution = %+v, want a failed, uncorrected run", msg.Execution)
+	}
+	if msg.Approval != nil {
+		t.Errorf("Approval = %+v, want no fix in mock mode", msg.Approval)
+	}
+	if s.PendingApproval() != nil {
+		t.Error("a mock-mode failure left an approval pending")
+	}
+}
+
 func TestApprove_SuccessfulRunIsUnchanged(t *testing.T) {
 	s, fake, id := fixServer(t, geminitest.ApprovalResponse("run it", fixedScript, "python"))
 	calls := len(fake.Requests())

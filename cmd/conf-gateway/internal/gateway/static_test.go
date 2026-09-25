@@ -155,6 +155,18 @@ func TestStatic_FailedRunsGoThroughActorView(t *testing.T) {
 	}
 }
 
+// TestStatic_FailedRunsExplainTheSandboxTimeout checks that ActorView.run
+// turns Go's context-deadline stderr into a plain word about the sandbox's
+// own 5-second limit, rather than showing attendees the raw Go text.
+func TestStatic_FailedRunsExplainTheSandboxTimeout(t *testing.T) {
+	js := readStatic(t, "actorview.js")
+	for _, want := range []string{"deadline exceeded", "Stopped after the 5 second limit"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("actorview.js does not handle %q", want)
+		}
+	}
+}
+
 // TestStatic_FailedRunsAreStyled checks that each page styles the classes
 // ActorView.run returns.
 func TestStatic_FailedRunsAreStyled(t *testing.T) {

@@ -87,7 +87,7 @@ type WorkloadServer struct {
 	modelKey        string
 	forceMock       bool
 	workspaceDir    string
-	turnSlot        chan struct{} // held for the length of a chat turn
+	turnSlot        chan struct{} // held for the length of a chat or fix turn
 	mu              sync.Mutex
 	turn            *relay.Turn // the turn holding turnSlot
 	pendingApproval *types.ApprovalRequest

@@ -96,7 +96,12 @@
   function run(exec) {
     if (!exec || (exec.exit_code === 0 && !exec.corrected)) return null;
     const lines = (exec.stderr || '').trim().split('\n');
-    const detail = lines[lines.length - 1].trim();
+    let detail = lines[lines.length - 1].trim();
+    // The sandbox's own timeout, not the script, ended the run: say so
+    // plainly instead of showing Go's context-deadline text.
+    if (exec.exit_code === -1 && (exec.stderr || '').includes('deadline exceeded')) {
+      detail = 'Stopped after the 5 second limit';
+    }
     if (exec.corrected) return { label: 'Self-corrected', cls: 'run-corrected', detail: detail };
     return { label: "Didn't run", cls: 'run-failed', detail: detail };
   }
