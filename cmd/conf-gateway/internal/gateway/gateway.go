@@ -173,20 +173,43 @@ func WithRouterStatus(a *routerstatus.Aggregator) Option {
 	}
 }
 
+// WorkerScaleSource reports the worker pool's size.
+type WorkerScaleSource interface {
+	Fetch(ctx context.Context) types.WorkerPods
+}
+
+// WithWorkerScale polls s every workerScaleInterval and reports the worker
+// pool's size through telemetry. Without this option, telemetry reports
+// worker_pods.available: false.
+func WithWorkerScale(s WorkerScaleSource) Option {
+	return func(g *Gateway) { g.workerScale = s }
+}
+
+// WithWorkerScaleInterval sets how often the worker pool's size is read.
+func WithWorkerScaleInterval(d time.Duration) Option {
+	return func(g *Gateway) {
+		if d > 0 {
+			g.workerScaleInterval = d
+		}
+	}
+}
+
 // Gateway manages sessions, reverse proxying to atenet-router, and telemetry aggregation.
 type Gateway struct {
-	routerURL      string
-	routerStatus   *routerstatus.Aggregator
-	atespace       string
-	secret         string
-	signer         *auth.Signer
-	presenterKey   string
-	statusInterval time.Duration
-	httpClient     *http.Client
-	staticFS       fs.FS
-	maxActors      int
-	broker         *feed.Broker
-	actions        *feed.Log
+	routerURL           string
+	routerStatus        *routerstatus.Aggregator
+	atespace            string
+	secret              string
+	signer              *auth.Signer
+	presenterKey        string
+	statusInterval      time.Duration
+	workerScale         WorkerScaleSource
+	workerScaleInterval time.Duration
+	httpClient          *http.Client
+	staticFS            fs.FS
+	maxActors           int
+	broker              *feed.Broker
+	actions             *feed.Log
 
 	control      actorstate.ActorControl
 	board        *actorstate.Board
@@ -209,6 +232,7 @@ type Gateway struct {
 	currentActionID map[string]string
 	recentEvents    []string
 	parking         atomic.Pointer[routerstatus.Snapshot]
+	workerPods      atomic.Pointer[types.WorkerPods]
 	simController   SimulationController
 	// suspendTimers holds each attendee's pending auto-suspend when
 	// suspendAfter is positive. Each pending timer holds one wg count.
@@ -238,23 +262,24 @@ type Gateway struct {
 // NewGateway creates and initializes a new Gateway.
 func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw := &Gateway{
-		routerURL:       routerURL,
-		atespace:        "ate-demo-conf",
-		statusInterval:  500 * time.Millisecond,
-		pollInterval:    time.Second,
-		httpClient:      &http.Client{Timeout: 5 * time.Second},
-		broker:          feed.NewBroker(),
-		actions:         feed.NewLog(100),
-		mux:             http.NewServeMux(),
-		chatHistories:   make(map[string][]types.ChatMessage),
-		lastResults:     make(map[string]*types.ExecutionResult),
-		currentActionID: make(map[string]string),
-		recentEvents:    make([]string, 0),
-		suspendTimers:   make(map[string]*time.Timer),
-		turnsInFlight:   make(map[string]int),
-		turnSeq:         make(map[string]uint64),
-		historyClears:   make(map[string]*historyClear),
-		maxActors:       50,
+		routerURL:           routerURL,
+		atespace:            "ate-demo-conf",
+		statusInterval:      500 * time.Millisecond,
+		workerScaleInterval: 2 * time.Second,
+		pollInterval:        time.Second,
+		httpClient:          &http.Client{Timeout: 5 * time.Second},
+		broker:              feed.NewBroker(),
+		actions:             feed.NewLog(100),
+		mux:                 http.NewServeMux(),
+		chatHistories:       make(map[string][]types.ChatMessage),
+		lastResults:         make(map[string]*types.ExecutionResult),
+		currentActionID:     make(map[string]string),
+		recentEvents:        make([]string, 0),
+		suspendTimers:       make(map[string]*time.Timer),
+		turnsInFlight:       make(map[string]int),
+		turnSeq:             make(map[string]uint64),
+		historyClears:       make(map[string]*historyClear),
+		maxActors:           50,
 	}
 
 	for _, opt := range opts {
@@ -301,6 +326,10 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw.cancel = cancel
 	gw.wg.Add(1)
 	go gw.pollStatus(ctx)
+	if gw.workerScale != nil {
+		gw.wg.Add(1)
+		go gw.pollWorkerScale(ctx)
+	}
 	if gw.control != nil {
 		gw.wg.Add(1)
 		go func() {

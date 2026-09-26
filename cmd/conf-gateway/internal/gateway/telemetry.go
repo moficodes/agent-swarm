@@ -56,6 +56,11 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		parked, parkingOK = snap.Parked, snap.Available
 	}
 
+	var pods types.WorkerPods
+	if p := g.workerPods.Load(); p != nil {
+		pods = *p
+	}
+
 	telem := types.StageTelemetry{
 		ParkedRequests:   parked,
 		ParkingAvailable: parkingOK,
@@ -64,6 +69,8 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		RecentEvents:     eventsCopy,
 		MockLLM:          g.mockLLM,
 		StatePollMs:      g.statePollMs.Load(),
+		WorkerPods:       pods,
+		ActorCount:       g.maxActors,
 	}
 	if g.usage != nil {
 		telem.ModelUsage = g.usage.TotalUsage()
@@ -167,6 +174,26 @@ func (g *Gateway) pollStatus(ctx context.Context) {
 		case <-ticker.C:
 			snap := g.routerStatus.Fetch(ctx)
 			g.parking.Store(&snap)
+		}
+	}
+}
+
+// pollWorkerScale reads the worker pool's size once right away, so the stage
+// header fills in without waiting a full interval, then every
+// workerScaleInterval.
+func (g *Gateway) pollWorkerScale(ctx context.Context) {
+	defer g.wg.Done()
+
+	ticker := time.NewTicker(g.workerScaleInterval)
+	defer ticker.Stop()
+
+	for {
+		pods := g.workerScale.Fetch(ctx)
+		g.workerPods.Store(&pods)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }
