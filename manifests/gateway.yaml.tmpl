@@ -76,6 +76,39 @@ roleRef:
   name: conf-gateway-trust-bundles
   apiGroup: rbac.authorization.k8s.io
 ---
+# The stage header reads the worker pool's size from its HPA, or from the
+# WorkerPool when there is no HPA.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: conf-gateway-worker-scale
+  namespace: ate-demo-conf
+rules:
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  resourceNames:
+  - conf-workers
+  verbs: ["get"]
+- apiGroups: ["ate.dev"]
+  resources: ["workerpools"]
+  resourceNames:
+  - conf-workers
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: conf-gateway-worker-scale
+  namespace: ate-demo-conf
+subjects:
+- kind: ServiceAccount
+  name: conf-gateway
+  namespace: ate-demo-conf
+roleRef:
+  kind: Role
+  name: conf-gateway-worker-scale
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

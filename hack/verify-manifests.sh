@@ -74,7 +74,8 @@ fi
 out="$(render "${GATEWAY_MANIFEST}" "demo.example.com")"
 for want in "kind: ServiceAccount" "iam.gke.io/gcp-service-account" "kind: Deployment" \
             "resourceNames:" "- ate-client" "clustertrustbundles" \
-            "endpointslices" "readOnlyRootFilesystem: true" "runAsNonRoot: true" "runAsUser: 65532" \
+            "endpointslices" "horizontalpodautoscalers" "workerpools" "- conf-workers" \
+            "readOnlyRootFilesystem: true" "runAsNonRoot: true" "runAsUser: 65532" \
             "cloud.google.com/backend-config: '{\"default\":\"conf-gateway\"}'"; do
   if ! grep -qF -- "${want}" <<<"${out}"; then
     echo "error: gateway manifest lacks ${want}" >&2

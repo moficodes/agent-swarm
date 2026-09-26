@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"golang.org/x/oauth2/google"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -38,6 +39,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/routerstatus"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/workerscale"
 )
 
 // routerStatusNamespace and routerStatusService identify the atenet-router
@@ -46,6 +48,13 @@ const (
 	routerStatusNamespace = "ate-system"
 	routerStatusService   = "atenet-router"
 	routerStatusPort      = 4040
+)
+
+// workerPoolNamespace and workerPoolName identify the WorkerPool, and the
+// HPA of the same name, whose size the stage header shows.
+const (
+	workerPoolNamespace = "ate-demo-conf"
+	workerPoolName      = "conf-workers"
 )
 
 //go:embed static/*
@@ -248,6 +257,24 @@ func newRouterStatusSource(cfg Config) (routerstatus.Source, error) {
 	}
 }
 
+// newWorkerScaleReader builds a reader for the conf-workers pool's size from
+// the in-cluster Kubernetes API.
+func newWorkerScaleReader() (*workerscale.Reader, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("loading in-cluster config: %w", err)
+	}
+	client, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("building Kubernetes client: %w", err)
+	}
+	dyn, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("building dynamic client: %w", err)
+	}
+	return workerscale.New(client, dyn, workerPoolNamespace, workerPoolName), nil
+}
+
 func main() {
 	cfg := LoadConfig()
 
@@ -289,6 +316,11 @@ func main() {
 		log.Printf("LOCAL_MODE=true; actor state is not read from ateapi and actors are never suspended.")
 	} else {
 		opts = append(opts, gateway.WithActorControl(actorstate.NewKubectlATE(cfg.KubectlATE, cfg.ATEAPIEndpoint, cfg.Atespace)))
+		if r, err := newWorkerScaleReader(); err != nil {
+			log.Printf("Worker pod counts are unavailable: %v", err)
+		} else {
+			opts = append(opts, gateway.WithWorkerScale(r))
+		}
 	}
 
 	gw := gateway.NewGateway(cfg.RouterURL, opts...)

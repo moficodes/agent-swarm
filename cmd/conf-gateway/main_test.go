@@ -241,3 +241,11 @@ func TestResolveSecret(t *testing.T) {
 		t.Errorf("generated secrets %q %q", a, b)
 	}
 }
+
+func TestNewWorkerScaleReader_OutsideCluster(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	if _, err := newWorkerScaleReader(); err == nil {
+		t.Fatal("newWorkerScaleReader() outside a cluster returned no error")
+	}
+}
