@@ -296,6 +296,8 @@ func TestAuxiliaryTypesSerialization(t *testing.T) {
 			MockLLM:     true,
 			ModelUsage:  types.ModelUsage{Calls: 2, PromptTokens: 10},
 			StatePollMs: 40,
+			WorkerPods:  types.WorkerPods{Current: 3, Desired: 5, Max: 5, Available: true},
+			ActorCount:  50,
 			RecentEvents: []string{
 				"Actor actor-planner resumed",
 				"Approval requested for actor-executor",
@@ -314,6 +316,11 @@ func TestAuxiliaryTypesSerialization(t *testing.T) {
 
 		if diff := cmp.Diff(telemetry, decoded); diff != "" {
 			t.Fatalf("StageTelemetry mismatch (-want +got):\n%s", diff)
+		}
+		for _, key := range []string{`"worker_pods":{"current":3,"desired":5,"max":5,"available":true}`, `"actor_count":50`} {
+			if !strings.Contains(string(data), key) {
+				t.Errorf("StageTelemetry JSON lacks %s: %s", key, data)
+			}
 		}
 	})
 }

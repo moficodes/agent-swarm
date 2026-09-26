@@ -208,6 +208,22 @@ type StageTelemetry struct {
 	MockLLM          bool                 `json:"mock_llm"`
 	ModelUsage       ModelUsage           `json:"model_usage"`
 	StatePollMs      int64                `json:"state_poll_ms"`
+	WorkerPods       WorkerPods           `json:"worker_pods"`
+	// ActorCount is how many attendee actors the install created.
+	ActorCount int `json:"actor_count"`
+}
+
+// WorkerPods is the worker pool's size as its autoscaler sees it.
+type WorkerPods struct {
+	// Current is how many worker pods the pool has.
+	Current int `json:"current"`
+	// Desired is how many the autoscaler wants; it equals Current when the
+	// pool is not scaling.
+	Desired int `json:"desired"`
+	// Max is the autoscaler's ceiling.
+	Max int `json:"max"`
+	// Available is false when the counts could not be read.
+	Available bool `json:"available"`
 }
 
 // WorkerStatus is one worker pod and the actor ateapi reports running on it.
