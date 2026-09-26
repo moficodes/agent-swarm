@@ -158,6 +158,19 @@ html, body {
   letter-spacing: 0.02em;
 }
 
+.spec-sub {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-shadow: none;
+}
+
+.spec-note {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--neon-amber);
+  letter-spacing: 0.04em;
+}
+
 .highlight-cyan {
   color: var(--neon-cyan);
   text-shadow: 0 0 10px rgba(0, 255, 204, 0.4);

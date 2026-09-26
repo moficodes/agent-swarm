@@ -188,3 +188,25 @@ func TestStatic_FailedRunsAreStyled(t *testing.T) {
 		}
 	}
 }
+
+// TestStatic_StageHeaderIsLive checks the header's pod count and ratio come
+// from telemetry, not fixed copy.
+func TestStatic_StageHeaderIsLive(t *testing.T) {
+	html := readStatic(t, "stage.html")
+	for _, fixed := range []string{"2 Physical Worker Pods", "50x Oversubscription"} {
+		if strings.Contains(html, fixed) {
+			t.Errorf("stage.html still has fixed copy %q", fixed)
+		}
+	}
+	for _, id := range []string{"worker-pods-current", "worker-pods-max", "worker-pods-scaling", "oversub-ratio", "oversub-waiting"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("stage.html lacks #%s", id)
+		}
+	}
+	js := readStatic(t, "stage.js")
+	for _, want := range []string{"data.worker_pods", "data.actor_count", "p.current > 0"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("stage.js lacks %q", want)
+		}
+	}
+}

@@ -47,11 +47,13 @@ limitations under the License.
       <div class="header-specs">
         <div class="spec-card">
           <span class="spec-label">HARDWARE CAPACITY</span>
-          <span class="spec-value highlight-cyan">2 Physical Worker Pods</span>
+          <span class="spec-value highlight-cyan"><span id="worker-pods-current">--</span> Physical Worker Pods <span id="worker-pods-max" class="spec-sub"></span></span>
+          <span id="worker-pods-scaling" class="spec-note" hidden></span>
         </div>
         <div class="spec-card">
           <span class="spec-label">OVERSUBSCRIPTION</span>
-          <span class="spec-value highlight-magenta">50x Oversubscription</span>
+          <span class="spec-value highlight-magenta"><span id="oversub-ratio">--</span> Oversubscription</span>
+          <span id="oversub-waiting" class="spec-note" hidden></span>
         </div>
         <div class="spec-card">
           <span class="spec-label">ISOLATION</span>

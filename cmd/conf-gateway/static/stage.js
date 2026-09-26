@@ -18,6 +18,11 @@
   // DOM Elements
   const el = {
     mockBanner: document.getElementById('mock-banner'),
+    workerPodsCurrent: document.getElementById('worker-pods-current'),
+    workerPodsMax: document.getElementById('worker-pods-max'),
+    workerPodsScaling: document.getElementById('worker-pods-scaling'),
+    oversubRatio: document.getElementById('oversub-ratio'),
+    oversubWaiting: document.getElementById('oversub-waiting'),
     qrCode: document.getElementById('qr-code'),
     qrLink: document.getElementById('qr-link'),
     qrUrlText: document.getElementById('qr-url-text'),
@@ -404,6 +409,29 @@
 
     // 5. Update Mock LLM Banner
     updateMockBanner(!!data.mock_llm);
+
+    // 6. Update the live pod count and oversubscription header
+    updateWorkerPods(data.worker_pods, data.actor_count || 0, data.parked_requests || 0, data.parking_available);
+  }
+
+  // updateWorkerPods fills the header's pod count and ratio. Both show '--'
+  // when the pool's size is unknown or zero, so the ratio never divides by 0.
+  function updateWorkerPods(pods, actorCount, parkedCount, parkingAvailable) {
+    if (!el.workerPodsCurrent) return;
+    const p = pods || {};
+    const ok = !!p.available && p.current > 0;
+
+    el.workerPodsCurrent.textContent = ok ? String(p.current) : '--';
+    el.workerPodsMax.textContent = ok && p.max > 0 ? 'of ' + p.max : '';
+    el.oversubRatio.textContent = ok && actorCount > 0 ? Math.round(actorCount / p.current) + 'x' : '--';
+
+    const scaling = ok && p.desired > 0 && p.desired !== p.current;
+    el.workerPodsScaling.hidden = !scaling;
+    el.workerPodsScaling.textContent = scaling ? 'scaling ' + p.current + ' → ' + p.desired : '';
+
+    const waiting = !!parkingAvailable && parkedCount > 0;
+    el.oversubWaiting.hidden = !waiting;
+    el.oversubWaiting.textContent = waiting ? parkedCount + ' waiting' : '';
   }
 
   function updateParkingMeter(parkedCount, parkingAvailable) {
