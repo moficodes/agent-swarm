@@ -181,6 +181,82 @@ if ! jq -e '[.. | .prometheusQuery? // empty, .logsPanel?.filter // empty] | len
   fail=1
 fi
 
+# expect_range checks conf_workers_range_ok.
+expect_range() {
+  local want="$1" min="$2" max="$3" got=0
+  conf_workers_range_ok "${min}" "${max}" || got=$?
+  if [[ "${want}" == ok && "${got}" != 0 ]] || [[ "${want}" == bad && "${got}" == 0 ]]; then
+    echo "FAIL: conf_workers_range_ok ${min} ${max}: want ${want}" >&2
+    fail=1
+  fi
+}
+expect_range ok  2 5
+expect_range ok  1 1
+expect_range ok  08 09   # leading zeros are decimal, not octal
+expect_range bad 0 5
+expect_range bad 3 2
+expect_range bad "" 5
+expect_range bad 2 ""
+expect_range bad abc 5
+expect_range bad -1 5
+
+# expect_replicas checks conf_worker_replicas: a re-deploy keeps the pool's
+# current size, clamped to the range; a new pool starts at the minimum.
+expect_replicas() {
+  local want="$1" got
+  got="$(conf_worker_replicas "$2" "$3" "$4")"
+  if [[ "${got}" != "${want}" ]]; then
+    echo "FAIL: conf_worker_replicas '$2' $3 $4 = '${got}', want ${want}" >&2
+    fail=1
+  fi
+}
+expect_replicas 2 ""  2 5
+expect_replicas 4 4   2 5
+expect_replicas 2 1   2 5
+expect_replicas 3 7   2 3
+expect_replicas 2 abc 2 5
+
+# expect_apiservice checks conf_apiservice_ok against an APIService JSON.
+expect_apiservice() {
+  local want="$1" json="$2" got=0
+  conf_apiservice_ok "${json}" || got=$?
+  if [[ "${want}" == ok && "${got}" != 0 ]] || [[ "${want}" == bad && "${got}" == 0 ]]; then
+    echo "FAIL: conf_apiservice_ok ${json}: want ${want}" >&2
+    fail=1
+  fi
+}
+expect_apiservice ok  ''
+expect_apiservice ok  '{"spec":{"service":{"namespace":"ate-demo-conf","name":"conf-prometheus-adapter"}}}'
+expect_apiservice bad '{"spec":{"service":{"namespace":"custom-metrics","name":"custom-metrics-stackdriver-adapter"}}}'
+expect_apiservice bad '{"spec":{}}'   # served locally by kube-apiserver
+
+# The autoscaling manifest carries the configured range; the WorkerPool
+# carries the replicas deploy.sh chose and the pod requests.
+auto="$(DEMO_CONF_MIN_WORKERS=3 DEMO_CONF_MAX_WORKERS=4 conf_render manifests/autoscaling.yaml.tmpl)"
+for want in "minReplicas: 3" "maxReplicas: 4" "name: conf-workers" "kind: WorkerPool" 'averageValue: "1"' \
+            'ate_worker_state="assigned"' "atenet_router_parking_active" "conf_worker_demand"; do
+  if ! grep -qF -- "${want}" <<<"${auto}"; then
+    echo "FAIL: rendered autoscaling manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+pool_yaml="$(DEMO_CONF_WORKER_REPLICAS=4 conf_render manifests/workerpool.yaml.tmpl)"
+for want in "replicas: 4" "cpu: 500m" "memory: 768Mi"; do
+  if ! grep -qF -- "${want}" <<<"${pool_yaml}"; then
+    echo "FAIL: rendered workerpool manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+if grep -qE '^[[:space:]]+limits:' <<<"${pool_yaml}"; then
+  echo "FAIL: workerpool manifest sets limits; ateom would report them as capacity" >&2
+  fail=1
+fi
+# Without a chosen replica count (the delete path), the pool renders at the minimum.
+if ! DEMO_CONF_MIN_WORKERS=3 conf_render manifests/workerpool.yaml.tmpl | grep -qF "replicas: 3"; then
+  echo "FAIL: workerpool manifest does not default to DEMO_CONF_MIN_WORKERS" >&2
+  fail=1
+fi
+
 # expect_cluster checks conf_gke_cluster_name.
 expect_cluster() {
   local want="$1" entry="$2" got

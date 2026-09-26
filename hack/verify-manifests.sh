@@ -25,6 +25,9 @@ cd "${ROOT}"
 GATEWAY_MANIFEST="manifests/gateway.yaml.tmpl"
 INGRESS_MANIFEST="manifests/gateway-ingress.yaml.tmpl"
 ACTOR_TEMPLATE="manifests/actortemplate.yaml.tmpl"
+WORKERPOOL_MANIFEST="manifests/workerpool.yaml.tmpl"
+AUTOSCALING_MANIFEST="manifests/autoscaling.yaml.tmpl"
+APISERVICE_MANIFEST="manifests/autoscaling-apiservice.yaml.tmpl"
 
 # render substitutes every install-script placeholder in $1, using $2 for
 # ${DEMO_DOMAIN}. Callers exercise the ingress template with both an empty
@@ -40,6 +43,9 @@ render() {
       -e "s|\${DEMO_DOMAIN}|$2|g" \
       -e "s|\${BUCKET_NAME}|b|g" \
       -e "s|\${TEMPLATE_REVISION}|1|g" \
+      -e "s|\${WORKER_REPLICAS}|2|g" \
+      -e "s|\${MIN_WORKERS}|2|g" \
+      -e "s|\${MAX_WORKERS}|5|g" \
       "$1"
 }
 
@@ -52,7 +58,8 @@ check_objects() {
 }
 
 status=0
-for f in "${GATEWAY_MANIFEST}" "${INGRESS_MANIFEST}" "${ACTOR_TEMPLATE}"; do
+for f in "${GATEWAY_MANIFEST}" "${INGRESS_MANIFEST}" "${ACTOR_TEMPLATE}" \
+         "${WORKERPOOL_MANIFEST}" "${AUTOSCALING_MANIFEST}" "${APISERVICE_MANIFEST}"; do
   out="$(render "${f}" "demo.example.com")"
   # shellcheck disable=SC2016 # matches a literal, unrendered ${
   if grep -n '\${' <<<"${out}"; then
@@ -111,5 +118,12 @@ if ! check_objects "${out_empty_domain}"; then
   echo "error: ${INGRESS_MANIFEST} failed offline object validation (empty domain)" >&2
   status=1
 fi
+
+for f in "${WORKERPOOL_MANIFEST}" "${AUTOSCALING_MANIFEST}" "${APISERVICE_MANIFEST}"; do
+  if ! check_objects "$(render "${f}" "")"; then
+    echo "error: ${f} failed offline object validation" >&2
+    status=1
+  fi
+done
 
 exit "${status}"

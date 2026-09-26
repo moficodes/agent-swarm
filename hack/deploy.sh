@@ -22,6 +22,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 DEMO_CONF_PATCH_ROUTER="${DEMO_CONF_PATCH_ROUTER:-false}"
 DEMO_CONF_ACTORS="${DEMO_CONF_ACTORS:-50}"
+DEMO_CONF_MIN_WORKERS="${DEMO_CONF_MIN_WORKERS:-2}"
+DEMO_CONF_MAX_WORKERS="${DEMO_CONF_MAX_WORKERS:-5}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
@@ -159,6 +161,53 @@ conf_check_router() {
   run_kubectl_fatal rollout status deployment/atenet-router -n ate-system --timeout=120s
 }
 
+# conf_workers_range_ok returns 0 if MIN and MAX are whole numbers with
+# 1 <= MIN <= MAX.
+conf_workers_range_ok() {
+  local min="$1" max="$2"
+  [[ "${min}" =~ ^[0-9]+$ && "${max}" =~ ^[0-9]+$ ]] || return 1
+  ((10#${min} >= 1 && 10#${min} <= 10#${max}))
+}
+
+# conf_worker_replicas prints the replicas to apply to conf-workers: CURRENT
+# (the pool's spec.replicas, empty for a new pool) clamped to [MIN, MAX], so
+# a re-deploy keeps the size the HPA chose.
+conf_worker_replicas() {
+  local current="$1" min="$2" max="$3"
+  if [[ ! "${current}" =~ ^[0-9]+$ ]] || ((10#${current} < 10#${min})); then
+    echo "$((10#${min}))"
+  elif ((10#${current} > 10#${max})); then
+    echo "$((10#${max}))"
+  else
+    echo "$((10#${current}))"
+  fi
+}
+
+# conf_apiservice_ok returns 0 if APISERVICE_JSON (the
+# v1beta1.external.metrics.k8s.io APIService, empty when it does not exist)
+# is absent or already served by this demo's adapter.
+conf_apiservice_ok() {
+  local json="$1"
+  [[ -z "${json}" ]] && return 0
+  jq -e '(.spec.service // {}) | .namespace == "ate-demo-conf" and .name == "conf-prometheus-adapter"' \
+    <<<"${json}" >/dev/null
+}
+
+# conf_check_apiservice refuses to take over the cluster's external metrics
+# API from another adapter.
+conf_check_apiservice() {
+  local json
+  if ! json="$(run_kubectl get apiservice v1beta1.external.metrics.k8s.io -o json --ignore-not-found)"; then
+    echo "error: cannot read APIService v1beta1.external.metrics.k8s.io" >&2
+    exit 1
+  fi
+  if ! conf_apiservice_ok "${json}"; then
+    echo "error: v1beta1.external.metrics.k8s.io is served by $(jq -r '(.spec.service // {}) | "\(.namespace // "kube-apiserver")/\(.name // "local")"' <<<"${json}")." >&2
+    echo "  The conference demo installs its own prometheus-adapter there; remove the other adapter first." >&2
+    exit 1
+  fi
+}
+
 # conf_iam_retry runs an IAM-binding gcloud command, retrying it
 # a few times with a short sleep when CREATED is true: IAM's view of a
 # service account lags its creation by a few seconds, so the first binding
@@ -226,6 +275,9 @@ conf_render() {
       -e "s|\${DEMO_DOMAIN}|${DEMO_DOMAIN:-}|g" \
       -e "s|\${TEMPLATE_REVISION}|${DEMO_CONF_TEMPLATE_REVISION}|g" \
       -e "s|\${CLUSTER}|${DEMO_CONF_CLUSTER:-}|g" \
+      -e "s|\${WORKER_REPLICAS}|${DEMO_CONF_WORKER_REPLICAS:-${DEMO_CONF_MIN_WORKERS}}|g" \
+      -e "s|\${MIN_WORKERS}|${DEMO_CONF_MIN_WORKERS}|g" \
+      -e "s|\${MAX_WORKERS}|${DEMO_CONF_MAX_WORKERS}|g" \
       "$1"
 }
 
@@ -390,6 +442,10 @@ conf_deploy() {
     exit 1
   fi
   conf_check_substrate
+  if ! conf_workers_range_ok "${DEMO_CONF_MIN_WORKERS}" "${DEMO_CONF_MAX_WORKERS}"; then
+    echo "error: need 1 <= DEMO_CONF_MIN_WORKERS (${DEMO_CONF_MIN_WORKERS}) <= DEMO_CONF_MAX_WORKERS (${DEMO_CONF_MAX_WORKERS})" >&2
+    exit 1
+  fi
 
   if [[ -n "${PROJECT_ID:-}" ]]; then
     DEMO_CONF_VERTEX_PROJECT="${PROJECT_ID}"
@@ -404,14 +460,29 @@ conf_deploy() {
   # Read-only and cheap: run before the router check so a stale conf-agent
   # aborts the deploy before atenet-router is ever patched.
   conf_check_template
+  conf_check_apiservice
   conf_check_router
   if [[ -n "${PROJECT_ID:-}" ]]; then
     conf_ensure_gsa
   fi
 
+  local current_workers
+  if ! current_workers="$(run_kubectl get workerpools.ate.dev conf-workers -n ate-demo-conf \
+      -o jsonpath='{.spec.replicas}' --ignore-not-found)"; then
+    echo "error: cannot read WorkerPool conf-workers" >&2
+    exit 1
+  fi
+  DEMO_CONF_WORKER_REPLICAS="$(conf_worker_replicas "${current_workers}" \
+    "${DEMO_CONF_MIN_WORKERS}" "${DEMO_CONF_MAX_WORKERS}")"
   conf_render manifests/workerpool.yaml.tmpl | ko resolve -f - | run_kubectl_fatal apply -f -
   log_step "Waiting for the conf-workers worker pool rollout..."
   wait_for_pool_rollout_fatal conf-workers ate-demo-conf
+
+  log_step "Installing Prometheus, prometheus-adapter and the conf-workers HPA..."
+  conf_render manifests/autoscaling.yaml.tmpl | run_kubectl_fatal apply -f -
+  conf_render manifests/autoscaling-apiservice.yaml.tmpl | run_kubectl_fatal apply -f -
+  run_kubectl_fatal rollout status deployment/conf-prometheus -n ate-demo-conf --timeout=180s
+  run_kubectl_fatal rollout status deployment/conf-prometheus-adapter -n ate-demo-conf --timeout=180s
   ensure_atespace ate-demo-conf
   create_actor_template conf_render manifests/actortemplate.yaml.tmpl ate-demo-conf conf-agent 300
 
@@ -458,6 +529,14 @@ conf_delete() {
   delete_actor_template ate-demo-conf conf-agent
   run_kubectl_ate delete atespace ate-demo-conf 2>/dev/null \
     || log_step "atespace ate-demo-conf not deleted (may not exist or is not empty)"
+  local apiservice
+  apiservice="$(run_kubectl get apiservice v1beta1.external.metrics.k8s.io -o json --ignore-not-found 2>/dev/null)" || apiservice=""
+  if conf_apiservice_ok "${apiservice}"; then
+    run_kubectl delete -f <(conf_render manifests/autoscaling-apiservice.yaml.tmpl) --ignore-not-found
+  else
+    log_step "v1beta1.external.metrics.k8s.io belongs to another adapter; leaving it."
+  fi
+  run_kubectl delete -f <(conf_render manifests/autoscaling.yaml.tmpl) --ignore-not-found
   conf_render manifests/workerpool.yaml.tmpl | run_kubectl delete --ignore-not-found -f -
   log_step "atenet-router flags are left as they are."
   if [[ -n "${PROJECT_ID:-}" ]]; then
@@ -491,6 +570,7 @@ conf_main() {
       echo "  Required env: KO_DOCKER_REPO, BUCKET_NAME"
       echo "  Optional env: PROJECT_ID (enables Vertex AI; unset runs mock replies), VERTEX_LOCATION,"
       echo "                DEMO_DOMAIN, DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO,"
+      echo "                DEMO_CONF_MIN_WORKERS (default 2), DEMO_CONF_MAX_WORKERS (default 5),"
       echo "                KUBECTL_CONTEXT (defaults to the current kube context),"
       echo "                DEMO_CONF_CLUSTER (dashboard cluster label; defaults to the GKE context's cluster),"
       echo "                DEMO_CONF_ALLOW_DIRTY_SUBSTRATE (accept a cluster labeled <pin>-dirty),"

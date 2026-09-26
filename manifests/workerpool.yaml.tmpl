@@ -27,5 +27,15 @@ metadata:
   labels:
     workload: conference
 spec:
-  replicas: 2
+  # hack/deploy.sh keeps the size the conf-workers HPA chose on a re-deploy
+  # (manifests/autoscaling.yaml.tmpl).
+  replicas: ${WORKER_REPLICAS}
   workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  template:
+    # Requests let the scheduler spread workers across nodes. No limits:
+    # ateom reports its limits as the worker's capacity, and a limit below
+    # an actor's 1 CPU would leave actors unschedulable.
+    resources:
+      requests:
+        cpu: 500m
+        memory: 768Mi
