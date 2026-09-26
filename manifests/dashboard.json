@@ -1,0 +1,328 @@
+{
+  "displayName": "Conference demo (${CLUSTER})",
+  "mosaicLayout": {
+    "columns": 12,
+    "tiles": [
+      {
+        "xPos": 0,
+        "yPos": 0,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Workers by state (conf-workers)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.ate.worker.state}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "max by (\"ate.worker.state\") ({\"ate.workerpool.workers\", cluster=\"${CLUSTER}\", \"ate.workerpool.name\"=\"conf-workers\"})"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "workers",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 0,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Resumes and suspends / s",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.ate.actor.operation.name}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (\"ate.actor.operation.name\") (rate({\"ate.actor.lifecycle.operation.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[2m]))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "ops/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 4,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Lifecycle P95 by operation",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.ate.actor.operation.name}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.actor.operation.name\") (rate({\"ate.actor.lifecycle.operation.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[5m])))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "seconds",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 4,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Failed lifecycle operations (5m)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_BAR",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.ate.actor.operation.name} ${metric.labels.error.type}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (\"ate.actor.operation.name\", \"error.type\") (increase({\"ate.actor.lifecycle.operation.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\", \"error.type\"!=\"\"}[5m]))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "failures",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 8,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Scheduler assignments / s by outcome (no_free_worker = pool full)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_BAR",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.ate.scheduler.outcome}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (\"ate.scheduler.outcome\") (rate({\"ate.scheduler.assignment.duration_count\", cluster=\"${CLUSTER}\", \"ate.workerpool.name\"=\"conf-workers\"}[2m]))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "assignments/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 8,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Router requests / s: warm vs resumed",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_BAR",
+                "targetAxis": "Y1",
+                "legendTemplate": "resume=${metric.labels.ate.router.resume} ${metric.labels.ate.router.outcome}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (\"ate.router.resume\", \"ate.router.outcome\") (rate({\"atenet.router.route.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\", top_level_controller_name=\"atenet-router\"}[2m]))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "requests/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 12,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Router P95 (includes resume and parking)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "resume=${metric.labels.ate.router.resume}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.router.resume\") (rate({\"atenet.router.route.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\", top_level_controller_name=\"atenet-router\"}[5m])))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "seconds",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 12,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Parked requests (whole cluster: parking has no template label)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "parked now",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "max({\"atenet.router.parking.active\", cluster=\"${CLUSTER}\"})"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "rejected (5m)",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(increase({\"atenet.router.parking.rejected\", cluster=\"${CLUSTER}\"}[5m])) or vector(0)"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "requests",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 16,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Restore P95 by phase (where a cold start goes)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.ate.snapshot.phase}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.snapshot.phase\") (rate({\"ate.actor.restore.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[5m])))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "seconds",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 16,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Restores / s by snapshot kind",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_BAR",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.ate.snapshot.kind}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (\"ate.snapshot.kind\") (rate({\"ate.actor.restore.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\", \"ate.snapshot.phase\"=\"total\"}[5m]))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "restores/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 20,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Actor CPU (conf-agent)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "cpu",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(rate({\"ate.actor.stats.cpu.time\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[5m]))"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "cores",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 20,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Actor crashes (15m)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "crashes",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(increase({\"ate.actor.crashes\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[15m])) or vector(0)"
+                }
+              }
+            ],
+            "yAxis": {
+              "label": "crashes",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 24,
+        "width": 12,
+        "height": 6,
+        "widget": {
+          "title": "Actor state changes (ate-demo-conf)",
+          "logsPanel": {
+            "filter": "resource.type=\"k8s_container\"\nresource.labels.cluster_name=\"${CLUSTER}\"\njsonPayload.msg=\"Actor state changed\"\njsonPayload.\"ate.atespace\"=\"ate-demo-conf\""
+          }
+        }
+      }
+    ]
+  }
+}

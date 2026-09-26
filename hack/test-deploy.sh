@@ -15,7 +15,8 @@
 # limitations under the License.
 
 # Tests the router flag/grace-period checks, the router patch builder, the
-# stale actor template check, the template render and the duration parser in
+# stale actor template check, the template and dashboard renders, the GKE
+# cluster name parser and the duration parser in
 # hack/deploy.sh without a cluster.
 set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
@@ -162,6 +163,39 @@ if ! DEMO_CONF_ACTORS=7 conf_render manifests/gateway.yaml.tmpl | grep -A1 'name
   echo "FAIL: rendered gateway manifest lacks ACTOR_COUNT from DEMO_CONF_ACTORS" >&2
   fail=1
 fi
+
+# The dashboard renders to valid JSON for one cluster, and every query and
+# the logs panel filter on that cluster.
+dash="$(DEMO_CONF_CLUSTER=poc-1 conf_render manifests/dashboard.json)"
+if ! jq -e '.displayName == "Conference demo (poc-1)"' <<<"${dash}" >/dev/null; then
+  echo "FAIL: rendered dashboard is not JSON named for cluster poc-1" >&2
+  fail=1
+fi
+if [[ "${dash}" == *"\${CLUSTER}"* ]]; then
+  echo "FAIL: rendered dashboard still contains \${CLUSTER}" >&2
+  fail=1
+fi
+if ! jq -e '[.. | .prometheusQuery? // empty, .logsPanel?.filter // empty] | length > 0 and all(test("cluster=\\\"poc-1\\\"|cluster_name=\\\"poc-1\\\""))' \
+    <<<"${dash}" >/dev/null; then
+  echo "FAIL: a dashboard query does not filter on cluster poc-1" >&2
+  fail=1
+fi
+
+# expect_cluster checks conf_gke_cluster_name.
+expect_cluster() {
+  local want="$1" entry="$2" got
+  got="$(conf_gke_cluster_name "${entry}")"
+  if [[ "${got}" != "${want}" ]]; then
+    echo "FAIL: conf_gke_cluster_name '${entry}' = '${got}', want '${want}'" >&2
+    fail=1
+  fi
+}
+
+expect_cluster substrate-poc gke_mofilabs_us-west1-c_substrate-poc
+# Only the first three underscores separate fields; the name keeps the rest.
+expect_cluster my_cluster gke_proj_us-central1_my_cluster
+expect_cluster "" kind-kind
+expect_cluster "" ""
 
 # expect_labels checks substrate_labels_match: every labeled node must run
 # the pinned commit, and at least one node must be labeled.

@@ -225,6 +225,7 @@ conf_render() {
       -e "s|\${ACTOR_COUNT}|${DEMO_CONF_ACTORS}|g" \
       -e "s|\${DEMO_DOMAIN}|${DEMO_DOMAIN:-}|g" \
       -e "s|\${TEMPLATE_REVISION}|${DEMO_CONF_TEMPLATE_REVISION}|g" \
+      -e "s|\${CLUSTER}|${DEMO_CONF_CLUSTER:-}|g" \
       "$1"
 }
 
@@ -325,6 +326,56 @@ conf_check_substrate() {
   fi
 }
 
+# conf_gke_cluster_name prints the cluster name from a GKE kubeconfig
+# cluster entry (gke_<project>_<location>_<name>), or nothing for any other
+# kind of entry.
+conf_gke_cluster_name() {
+  if [[ "$1" =~ ^gke_[^_]+_[^_]+_(.+)$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  fi
+}
+
+# conf_apply_dashboard creates or updates the "Conference demo (<cluster>)"
+# Cloud Monitoring dashboard from manifests/dashboard.json, matched by
+# display name so a re-run updates it in place. Its queries filter on the
+# cluster label, taken from DEMO_CONF_CLUSTER or the GKE kube context. A
+# failure only warns: the demo runs without its dashboard.
+conf_apply_dashboard() {
+  if [[ -z "${DEMO_CONF_CLUSTER:-}" ]]; then
+    DEMO_CONF_CLUSTER="$(conf_gke_cluster_name \
+      "$(run_kubectl config view --minify -o jsonpath='{.contexts[0].context.cluster}')")"
+  fi
+  if [[ -z "${DEMO_CONF_CLUSTER}" ]]; then
+    log_step "Skipping the dashboard: not a GKE context; set DEMO_CONF_CLUSTER to the cluster name."
+    return 0
+  fi
+  local display="Conference demo (${DEMO_CONF_CLUSTER})" name etag config
+  log_step "Applying the \"${display}\" dashboard..."
+  config="$(mktemp)"
+  if ! name="$(gcloud monitoring dashboards list --project "${PROJECT_ID}" \
+      --filter="displayName=\"${display}\"" --format='value(name)' | head -n1)"; then
+    echo "warning: cannot list dashboards in ${PROJECT_ID}; the dashboard was not applied." >&2
+  elif [[ -n "${name}" ]]; then
+    # An update must carry the current etag, or Cloud Monitoring rejects it.
+    if ! { etag="$(gcloud monitoring dashboards describe "${name}" --format='value(etag)')" &&
+        conf_render manifests/dashboard.json | jq --arg etag "${etag}" '.etag = $etag' >"${config}" &&
+        gcloud monitoring dashboards update "${name}" --config-from-file="${config}" >/dev/null; }; then
+      echo "warning: failed to update dashboard ${name}." >&2
+    fi
+  else
+    conf_render manifests/dashboard.json >"${config}"
+    if ! name="$(gcloud monitoring dashboards create --project "${PROJECT_ID}" \
+        --config-from-file="${config}" --format='value(name)')"; then
+      echo "warning: failed to create the dashboard." >&2
+      name=""
+    fi
+  fi
+  rm -f "${config}"
+  if [[ -n "${name}" ]]; then
+    echo "Dashboard: https://console.cloud.google.com/monitoring/dashboards/builder/${name##*/}?project=${PROJECT_ID}"
+  fi
+}
+
 conf_deploy() {
   log_step "Deploying the conference demo"
   log_target_context
@@ -386,6 +437,10 @@ conf_deploy() {
     fi
   done
 
+  if [[ -n "${PROJECT_ID:-}" ]]; then
+    conf_apply_dashboard
+  fi
+
   log_step "Conference demo deployed."
   echo "Presenter: kubectl port-forward -n ate-demo-conf svc/conf-gateway 8090:80"
   echo "  then open http://localhost:8090/stage?key=\$(kubectl get secret conf-gateway -n ate-demo-conf -o jsonpath='{.data.PRESENTER_TOKEN}' | base64 -d)"
@@ -411,6 +466,7 @@ conf_delete() {
     echo "  Remove them with:"
     echo "    gcloud iam service-accounts delete ${gsa} --project ${PROJECT_ID}"
     echo "    gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member serviceAccount:${gsa} --role roles/aiplatform.user"
+    log_step "The \"Conference demo (<cluster>)\" dashboard is left in place; delete it in Cloud Monitoring."
   fi
 }
 
@@ -436,6 +492,7 @@ conf_main() {
       echo "  Optional env: PROJECT_ID (enables Vertex AI; unset runs mock replies), VERTEX_LOCATION,"
       echo "                DEMO_DOMAIN, DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO,"
       echo "                KUBECTL_CONTEXT (defaults to the current kube context),"
+      echo "                DEMO_CONF_CLUSTER (dashboard cluster label; defaults to the GKE context's cluster),"
       echo "                DEMO_CONF_ALLOW_DIRTY_SUBSTRATE (accept a cluster labeled <pin>-dirty),"
       echo "                KO_DEFAULTPLATFORMS=linux/amd64 (skip the arm64 build)"
       echo "  This script sources no dev-env file; export the variables above yourself."
