@@ -91,9 +91,13 @@ The busy term uses `max` because every `ate-api-server` replica (two on
 `substrate-poc`) reports the same pool-wide count; the parked term uses
 `sum` because each router replica counts only its own parked requests.
 
-`atenet_router_parking_active` carries no pool label. That is acceptable
-because only this demo sends traffic through the router on these
-clusters.
+`atenet_router_parking_active` carries no pool label, and the router is
+shared: `substrate-poc` also runs the `swarm` (`ate-demo-swarm`) and
+`agents` (`workshop`) pools behind the same `atenet-router`. Their parked
+requests count toward `conf_worker_demand` too. This is accepted as a
+known limitation: those demos are idle during the talk, and the ceiling
+caps the cost of a false signal at 3 extra pods. A per-pool parking label
+is a Substrate gap (see below).
 
 ### Monitoring stack
 
@@ -110,7 +114,9 @@ after the WorkerPool:
   `ate-demo-conf`) registered as `APIService v1beta1.external.metrics.k8s.io`,
   with the standard auth-delegator and extension-apiserver-authentication
   bindings. One external rule publishing `conf_worker_demand` from the
-  query above.
+  query above, with each term wrapped in `or vector(0)`. Its series query
+  keys on `ate_workerpool_workers` for `conf-workers`, so the metric stays
+  listed while the router reports no parking series.
 - **HPA** `conf-workers` in `ate-demo-conf`, `scaleTargetRef` the
   WorkerPool (`apiVersion: ate.dev/v1alpha1`, `kind: WorkerPool`),
   `minReplicas: ${MIN_WORKERS}`, `maxReplicas: ${MAX_WORKERS}`, one
@@ -126,10 +132,12 @@ Reaction time: 5s scrape plus up to 15s HPA sync (not configurable on
 GKE), so about 20s from a burst to a new desired count. A new worker was
 Ready within about 1s in the experiment.
 
-The APIService is cluster-scoped. `deploy.sh` refuses to install when
-`v1beta1.external.metrics.k8s.io` already exists and points at something
-other than `ate-demo-conf/conf-prometheus-adapter`, rather than taking
-over another adapter.
+The APIService is cluster-scoped and lives in its own file,
+`manifests/autoscaling-apiservice.yaml.tmpl`. `deploy.sh` refuses to
+install when `v1beta1.external.metrics.k8s.io` already exists and points at
+something other than `ate-demo-conf/conf-prometheus-adapter`, rather than
+taking over another adapter, and the delete path removes the APIService
+only when it is this demo's.
 
 ### WorkerPool changes
 
@@ -137,10 +145,15 @@ over another adapter.
   pool's current `spec.replicas` if the pool exists and to `MIN_WORKERS`
   otherwise, so a re-run of `make deploy` does not reset what the HPA
   chose.
-- Add a pod template with a topology spread constraint on
-  `kubernetes.io/hostname`, `maxSkew: 1`, `whenUnsatisfiable:
-  ScheduleAnyway`, so workers alternate across nodes instead of piling
-  onto one (the experiment's third pod landed next to an existing one).
+- Add a pod template with resource requests of `cpu: 500m` and
+  `memory: 768Mi` (no limits). The experiment's third pod landed next to
+  an existing one; with requests, the scheduler's least-allocated scoring
+  prefers the emptier node. It is a preference, not a guarantee:
+  `WorkerPoolPodTemplate` has no `topologySpreadConstraints` field (see
+  "Substrate gap"). Limits stay unset because ateom derives its reported
+  capacity from `limits.cpu`/`limits.memory`, and a limit below an actor's
+  1 CPU would make actors unschedulable. Changing the template restarts
+  the worker pods once, on the first deploy with this change.
 
 New `deploy.sh` settings, documented in the README's prerequisites:
 `DEMO_CONF_MIN_WORKERS` (default 2) and `DEMO_CONF_MAX_WORKERS`
@@ -153,16 +166,18 @@ before the WorkerPool.
 New package `cmd/conf-gateway/internal/workerscale`, next to
 `routerstatus`:
 
-- `Snapshot{Current, Desired, Max int; Available bool}`.
+- It returns `types.WorkerPods{Current, Desired, Max int; Available bool}`
+  (in `pkg/types`, next to `StageTelemetry`).
 - A poller that every 2s reads `HorizontalPodAutoscaler/conf-workers`
   (`autoscaling/v2`) in the gateway's namespace: `status.currentReplicas`,
   `status.desiredReplicas`, `spec.maxReplicas`. If the HPA does not
   exist, it falls back to `WorkerPool/conf-workers` `spec.replicas`, with
-  Desired = Current = Max = that value. On any other error the snapshot is
-  unavailable.
-- It uses the client-go client `main.go` already builds for EndpointSlice
-  discovery, plus a dynamic client for the WorkerPool. In local mode
-  (no cluster), it reports unavailable.
+  Desired = Current = Max = that value. A just-created HPA with no status
+  yet also takes Current from the WorkerPool. On any other error the
+  result is unavailable.
+- `main.go` builds its own in-cluster client-go and dynamic clients for it
+  (the EndpointSlice client exists only in `endpointslices` mode). In local
+  mode, or outside a cluster, it reports unavailable.
 - RBAC in `manifests/gateway.yaml.tmpl`: a Role in `ate-demo-conf`
   allowing `get` on `horizontalpodautoscalers` (`autoscaling`) and
   `workerpools` (`ate.dev`).
@@ -170,8 +185,13 @@ New package `cmd/conf-gateway/internal/workerscale`, next to
 The telemetry payload gains:
 
 ```json
-"worker_pods": {"current": 3, "desired": 4, "max": 5, "available": true}
+"worker_pods": {"current": 3, "desired": 4, "max": 5, "available": true},
+"actor_count": 50
 ```
+
+`actor_count` is the gateway's `ACTOR_COUNT`. The stage cannot count the
+`actors` map instead, because that map is empty while ateapi is
+unreachable.
 
 ### Stage header
 
@@ -180,8 +200,8 @@ The telemetry payload gains:
 - "**N** Physical Worker Pods" shows `worker_pods.current`, with
   "of MAX" in smaller type.
 - "**X**x Oversubscription" shows `ACTOR_COUNT ÷ current`, rounded to a
-  whole number (25x at 2 pods, 10x at 5). The actor count comes from the
-  existing fleet data.
+  whole number (25x at 2 pods, 10x at 5), from `actor_count`. With 0 pods
+  it shows `--`.
 - When `desired ≠ current`, a line under the pod count reads
   "scaling N → M" (up or down).
 - "K waiting" reuses `parked_requests` next to the ratio.
@@ -195,10 +215,16 @@ section explains the signal, the 2-5 range and how to watch it
 
 ### Substrate gap
 
-Add to `substrate-gaps.md`: each gVisor worker reports the whole node's
-allocatable CPU and memory as its capacity, so several workers on one
-node each believe they own it. It is harmless at 5 workers with 1-CPU
-actors, but Substrate should report the pod's own limits.
+Add to `substrate-gaps.md`:
+
+- Each gVisor worker without resource limits reports the whole node's
+  allocatable CPU and memory as its capacity, so several workers on one
+  node each believe they own it. It is harmless at 5 workers with 1-CPU
+  actors.
+- `WorkerPoolPodTemplate` has no `topologySpreadConstraints`, so a pool
+  cannot require its workers to spread across nodes.
+- `atenet.router.parking.active` has no pool or template label, so a
+  shared router's parked requests cannot drive one pool's autoscaling.
 
 ## Error handling
 
@@ -219,8 +245,8 @@ actors, but Substrate should report the pod's own limits.
 - `hack/test-deploy.sh`: the autoscaling manifest renders with the pool
   name, namespace, min and max; the WorkerPool renders the replicas
   `deploy.sh` chose; invalid min/max are rejected.
-- `hack/verify.sh` (boilerplate and manifest checks) passes on the new
-  template.
+- `make verify` (boilerplate, `hack/verify-manifests.sh`, shellcheck)
+  passes on the new templates.
 - Live on `substrate-poc`:
   1. `kubectl get --raw` on the external metric returns a value.
   2. Run the audience simulation at 50. The HPA reaches 5 within about
