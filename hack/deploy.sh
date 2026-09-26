@@ -193,6 +193,14 @@ conf_apiservice_ok() {
     <<<"${json}" >/dev/null
 }
 
+# conf_apiservice_deletable returns 0 if teardown may delete the APIService:
+# GET_RC (the exit status of reading it) is 0 and APISERVICE_JSON is absent
+# or ours. A failed read leaves the owner unknown, so it is kept.
+conf_apiservice_deletable() {
+  local rc="$1" json="$2"
+  [[ "${rc}" == 0 ]] && conf_apiservice_ok "${json}"
+}
+
 # conf_check_apiservice refuses to take over the cluster's external metrics
 # API from another adapter.
 conf_check_apiservice() {
@@ -480,9 +488,11 @@ conf_deploy() {
 
   log_step "Installing Prometheus, prometheus-adapter and the conf-workers HPA..."
   conf_render manifests/autoscaling.yaml.tmpl | run_kubectl_fatal apply -f -
-  conf_render manifests/autoscaling-apiservice.yaml.tmpl | run_kubectl_fatal apply -f -
   run_kubectl_fatal rollout status deployment/conf-prometheus -n ate-demo-conf --timeout=180s
   run_kubectl_fatal rollout status deployment/conf-prometheus-adapter -n ate-demo-conf --timeout=180s
+  # Register the aggregated API only once the adapter serves it; an
+  # unavailable APIService breaks discovery for the whole cluster.
+  conf_render manifests/autoscaling-apiservice.yaml.tmpl | run_kubectl_fatal apply -f -
   ensure_atespace ate-demo-conf
   create_actor_template conf_render manifests/actortemplate.yaml.tmpl ate-demo-conf conf-agent 300
 
@@ -529,10 +539,12 @@ conf_delete() {
   delete_actor_template ate-demo-conf conf-agent
   run_kubectl_ate delete atespace ate-demo-conf 2>/dev/null \
     || log_step "atespace ate-demo-conf not deleted (may not exist or is not empty)"
-  local apiservice
-  apiservice="$(run_kubectl get apiservice v1beta1.external.metrics.k8s.io -o json --ignore-not-found 2>/dev/null)" || apiservice=""
-  if conf_apiservice_ok "${apiservice}"; then
+  local apiservice apiservice_rc=0
+  apiservice="$(run_kubectl get apiservice v1beta1.external.metrics.k8s.io -o json --ignore-not-found)" || apiservice_rc=$?
+  if conf_apiservice_deletable "${apiservice_rc}" "${apiservice}"; then
     run_kubectl delete -f <(conf_render manifests/autoscaling-apiservice.yaml.tmpl) --ignore-not-found
+  elif [[ "${apiservice_rc}" != 0 ]]; then
+    log_step "cannot read v1beta1.external.metrics.k8s.io; leaving it."
   else
     log_step "v1beta1.external.metrics.k8s.io belongs to another adapter; leaving it."
   fi

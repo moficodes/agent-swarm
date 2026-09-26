@@ -230,6 +230,30 @@ expect_apiservice ok  '{"spec":{"service":{"namespace":"ate-demo-conf","name":"c
 expect_apiservice bad '{"spec":{"service":{"namespace":"custom-metrics","name":"custom-metrics-stackdriver-adapter"}}}'
 expect_apiservice bad '{"spec":{}}'   # served locally by kube-apiserver
 
+# expect_apiservice_delete checks conf_apiservice_deletable: delete only
+# when the read succeeded and the APIService is absent or ours.
+expect_apiservice_delete() {
+  local want="$1" rc="$2" json="$3" got=0
+  conf_apiservice_deletable "${rc}" "${json}" || got=$?
+  if [[ "${want}" == delete && "${got}" != 0 ]] || [[ "${want}" == keep && "${got}" == 0 ]]; then
+    echo "FAIL: conf_apiservice_deletable ${rc} ${json}: want ${want}" >&2
+    fail=1
+  fi
+}
+expect_apiservice_delete delete 0 '{"spec":{"service":{"namespace":"ate-demo-conf","name":"conf-prometheus-adapter"}}}'
+expect_apiservice_delete delete 0 ''
+expect_apiservice_delete keep   0 '{"spec":{"service":{"namespace":"custom-metrics","name":"custom-metrics-stackdriver-adapter"}}}'
+expect_apiservice_delete keep   1 ''   # the read failed: owner unknown
+
+# The APIService is registered only after the adapter is ready, so a broken
+# adapter never leaves an unavailable aggregated API on the cluster.
+adapter_ready="$(grep -n 'rollout status deployment/conf-prometheus-adapter' hack/deploy.sh | head -1 | cut -d: -f1)"
+apiservice_apply="$(grep -n 'autoscaling-apiservice.yaml.tmpl | run_kubectl_fatal apply' hack/deploy.sh | head -1 | cut -d: -f1)"
+if [[ -z "${adapter_ready}" || -z "${apiservice_apply}" || "${apiservice_apply}" -le "${adapter_ready}" ]]; then
+  echo "FAIL: deploy.sh applies the APIService (line ${apiservice_apply}) before the adapter is ready (line ${adapter_ready})" >&2
+  fail=1
+fi
+
 # The autoscaling manifest carries the configured range; the WorkerPool
 # carries the replicas deploy.sh chose and the pod requests.
 auto="$(DEMO_CONF_MIN_WORKERS=3 DEMO_CONF_MAX_WORKERS=4 conf_render manifests/autoscaling.yaml.tmpl)"
