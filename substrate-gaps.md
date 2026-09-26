@@ -57,3 +57,32 @@ and exact values in the README's "Deploy" section. The fix belongs in
 `atenet-router`'s own defaults, or in a Substrate-level profile for
 long-running backends, so a deploy that fronts an LLM does not need an
 external patch step at all.
+
+## Workers without limits each report the whole node as capacity
+
+ateom sets a worker's capacity from its container's `limits.cpu` and
+`limits.memory`. Without limits it reports the node's allocatable CPU and
+memory, so several workers on one node each believe they own it. The
+autoscaled `conf-workers` pool puts up to 5 workers on 2 nodes and sets
+requests but no limits (`manifests/workerpool.yaml.tmpl`), which is harmless
+while each worker holds one 1-CPU actor. The fix belongs in ateom's capacity
+reporting, which should use requests, or the node's share, when no limit is
+set.
+
+## WorkerPools cannot spread their workers across nodes
+
+`WorkerPoolPodTemplate` has no `topologySpreadConstraints` field, so a pool
+cannot require its workers to land on different nodes. The demo sets
+resource requests so the scheduler prefers the emptier node, which is a
+preference, not a guarantee. The fix belongs in the WorkerPool API and its
+controller, which should pass topology spread constraints through to the
+pod template.
+
+## The router's parking gauge has no pool label
+
+`atenet.router.parking.active` counts parked requests per router replica
+with no WorkerPool or template label, so on a shared router one pool's
+autoscaler sees every pool's queue. The demo accepts this and caps the
+effect with `DEMO_CONF_MAX_WORKERS` (`manifests/autoscaling.yaml.tmpl`).
+The fix belongs in atenet-router's metrics, which should label parked
+requests with the target pool.

@@ -27,7 +27,9 @@ limitations under the License.
 - Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.
   `PROJECT_ID` is optional and enables Vertex AI; leave it unset to run with
   mock replies. Also optional: `VERTEX_LOCATION`, `DEMO_DOMAIN`,
-  `DEMO_CONF_ACTORS` (default 50), `SUBSTRATE_REPO` (a substrate checkout
+  `DEMO_CONF_ACTORS` (default 50), `DEMO_CONF_MIN_WORKERS` (default 2) and
+  `DEMO_CONF_MAX_WORKERS` (default 5), the `conf-workers` autoscaling range,
+  `SUBSTRATE_REPO` (a substrate checkout
   at the pin; `hack/deploy.sh` installs Substrate from it when the
   `ate-system` namespace is missing), `KUBECTL_CONTEXT` (which kube context
   to target; defaults to the current one), `DEMO_CONF_ALLOW_DIRTY_SUBSTRATE`
@@ -39,7 +41,7 @@ limitations under the License.
 ## What it shows
 
 50 attendee actors (`attendee-01` .. `attendee-50`, one `conf-agent` actor
-each) multiplexed onto a `WorkerPool` of 2 Kubernetes pods
+each) multiplexed onto a `WorkerPool` of 2 to 5 Kubernetes pods
 (`manifests/workerpool.yaml.tmpl`). Each attendee's conversation
 history lives in the actor's own process memory
 (`internal/workload/server/server.go`); the actor's
@@ -50,14 +52,35 @@ pod. A stage reset, or handing an `attendee-NN` slot to a new visitor, has
 the gateway clear that history through the actor's `/api/history/clear`
 endpoint.
 
-The `/stage` header's "2 Physical Worker Pods" and "50x Oversubscription"
-copy (`cmd/conf-gateway/static/stage.html`) states the
-default `WorkerPool` size and attendee count
-(`manifests/workerpool.yaml.tmpl`'s `replicas: 2`,
-`hack/deploy.sh`'s `DEMO_CONF_ACTORS=50`); it is fixed
-header copy, not a live count read from the cluster. The gateway itself
-learns the attendee count from `ACTOR_COUNT`, which the deploy script sets
-from `DEMO_CONF_ACTORS`, and caps the audience simulation at it.
+The `/stage` header is live. The pod count is the `conf-workers` HPA's
+current replicas ("3 of 5"), or the WorkerPool's replicas when there is no
+HPA, and reads "scaling N → M" while the HPA wants a different size. The
+oversubscription ratio is the attendee count (`ACTOR_COUNT`, set from
+`DEMO_CONF_ACTORS`) divided by the current pod count, rounded, next to the
+number of turns parked at the router. The gateway reads these every 2s
+(`cmd/conf-gateway/internal/workerscale`); when it can't, the header shows
+`--`.
+
+## Autoscaling
+
+`conf-workers` scales between `DEMO_CONF_MIN_WORKERS` and
+`DEMO_CONF_MAX_WORKERS` (2 and 5 by default) on worker demand: busy workers
+plus requests parked at the router, one worker per turn. A Prometheus in
+`ate-demo-conf` scrapes `atenet-router` and `ate-api-server` every 5s,
+prometheus-adapter serves the sum as the external metric
+`conf_worker_demand`, and an HPA writes the WorkerPool's replicas
+(`manifests/autoscaling.yaml.tmpl`). The pool grows within about 20s of a
+burst and shrinks 5 minutes after it ends. Five workers fit on two
+c3-standard-4 nodes, so no node autoscaling is involved.
+
+Watch it with:
+
+    kubectl -n ate-demo-conf get hpa conf-workers -w
+    kubectl get --raw /apis/external.metrics.k8s.io/v1beta1/namespaces/ate-demo-conf/conf_worker_demand
+
+The install owns the cluster's `v1beta1.external.metrics.k8s.io` APIService
+and refuses to run if another adapter (for example the Stackdriver adapter)
+already serves it.
 
 ## Architecture
 
@@ -253,6 +276,10 @@ Gemini reply carries no tag.
 - Deleting the demo does not revert the `atenet-router` flags `--patch-router`
   applied, and does not remove the `conf-gateway` GCP service account or its
   IAM bindings; see Deploy above.
+- The router's parking gauge has no pool label, and `atenet-router` is
+  shared with every pool on the cluster. Parked requests for other demos
+  (`ate-demo-swarm`, `workshop`) also scale `conf-workers`, capped at
+  `DEMO_CONF_MAX_WORKERS`.
 
 See also `substrate-gaps.md` for the Substrate limitations this demo works
 around.
