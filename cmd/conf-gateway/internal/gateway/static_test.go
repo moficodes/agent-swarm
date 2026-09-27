@@ -210,3 +210,23 @@ func TestStatic_StageHeaderIsLive(t *testing.T) {
 		}
 	}
 }
+
+func TestStatic_StageWorkerSectionScales(t *testing.T) {
+	html := readStatic(t, "stage.html")
+	if strings.Contains(html, "2 Replicas") {
+		t.Error(`stage.html still has fixed copy "2 Replicas"`)
+	}
+	if !strings.Contains(html, `id="worker-pool-replicas"`) {
+		t.Error("stage.html lacks #worker-pool-replicas")
+	}
+	js := readStatic(t, "stage.js")
+	for _, want := range []string{"workerPoolReplicas", "gridTemplateColumns", "'compact'"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("stage.js lacks %q", want)
+		}
+	}
+	css := readStatic(t, "stage.css")
+	if !strings.Contains(css, ".workers-grid.compact") {
+		t.Error("stage.css lacks .workers-grid.compact")
+	}
+}

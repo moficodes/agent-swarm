@@ -565,6 +565,36 @@ html, body {
   box-sizing: border-box;
 }
 
+.workers-grid.compact {
+  gap: 0.6rem;
+}
+
+.workers-grid.compact .worker-card {
+  padding: 0.6rem 0.75rem;
+}
+
+.workers-grid.compact .worker-card-header {
+  margin-bottom: 0.4rem;
+  gap: 0.4rem;
+}
+
+.workers-grid.compact .worker-title {
+  font-size: 0.85rem;
+}
+
+.workers-grid.compact .worker-status-badge {
+  font-size: 0.55rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.workers-grid.compact .worker-body {
+  grid-template-columns: 1fr;
+}
+
+.workers-grid.compact .stat-name {
+  display: none;
+}
+
 .worker-card.active {
   border-color: var(--neon-green);
   box-shadow: 0 0 24px rgba(16, 185, 129, 0.3);

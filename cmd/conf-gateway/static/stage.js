@@ -32,6 +32,7 @@
     parkingProgressBar: document.getElementById('parking-progress-bar'),
     parkingPulseDot: document.getElementById('parking-pulse-dot'),
     workerList: document.getElementById('worker-list'),
+    workerPoolReplicas: document.getElementById('worker-pool-replicas'),
     fleetGrid: document.getElementById('fleet-grid'),
     fleetSub: document.getElementById('fleet-sub'),
     eventTicker: document.getElementById('event-ticker'),
@@ -424,6 +425,10 @@
     el.workerPodsCurrent.textContent = ok ? String(p.current) : '--';
     el.workerPodsMax.textContent = ok && p.max > 0 ? 'of ' + p.max : '';
     el.oversubRatio.textContent = ok && actorCount > 0 ? Math.round(actorCount / p.current) + 'x' : '--';
+    if (el.workerPoolReplicas) {
+      el.workerPoolReplicas.textContent = (ok ? p.current + (p.current === 1 ? ' Replica' : ' Replicas') + ' // ' : '') +
+        'Active Execution Seats';
+    }
 
     const scaling = ok && p.desired > 0 && p.desired !== p.current;
     el.workerPodsScaling.hidden = !scaling;
@@ -483,8 +488,12 @@
 
   // renderWorkerCardHTML renders one real worker pod: its name, the actor it
   // is running (if any), and the actor's substrate state.
-  function renderWorkerCardHTML(w) {
+  function renderWorkerCardHTML(w, compact) {
     const activeActor = w.active_actor || '';
+    const podName = w.pod_name || 'worker';
+    // Compact cards keep only the pod name's random suffix, the part that
+    // tells workers apart.
+    const title = compact ? podName.split('-').pop() : podName;
     const isBusy = !!activeActor;
     const s = window.ActorView.state({ state: w.state });
     return `
@@ -492,7 +501,7 @@
         <div class="worker-card-header">
           <div class="worker-id">
             <span class="worker-dot${isBusy ? ' active' : ''}"></span>
-            <span class="worker-title">${escapeHTML(w.pod_name || 'worker')}</span>
+            <span class="worker-title" title="${escapeHTML(podName)}">${escapeHTML(title)}</span>
           </div>
           <span class="worker-status-badge ${s.cls}">${escapeHTML(s.label)}</span>
         </div>
@@ -512,7 +521,12 @@
       el.workerList.innerHTML = '<p class="workers-empty">No actors running</p>';
       return;
     }
-    el.workerList.innerHTML = workers.map(renderWorkerCardHTML).join('');
+    // One row however many workers the pool has, so the fleet grid below
+    // keeps its space; past two, cards switch to a compact layout.
+    const compact = workers.length > 2;
+    el.workerList.classList.toggle('compact', compact);
+    el.workerList.style.gridTemplateColumns = 'repeat(' + Math.max(2, workers.length) + ', minmax(0, 1fr))';
+    el.workerList.innerHTML = workers.map((w) => renderWorkerCardHTML(w, compact)).join('');
   }
 
   function formatActorName(id) {
