@@ -21,12 +21,31 @@ limitations under the License.
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
   at the version pinned in `go.mod` (currently the `v0.2.0` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
-  version; see "Bumping Substrate" below to move the pin. On GKE 1.37,
-  enable the ClusterTrustBundle beta API first, or the Substrate install
-  stalls waiting for trust bundles (see `substrate-gaps.md`):
+  version; see "Bumping Substrate" below to move the pin. Substrate needs
+  GKE 1.37 or later, which is only in the RAPID channel in some zones. To
+  create a cluster for it:
 
-      gcloud container clusters update CLUSTER --location LOCATION \
+      gcloud beta container clusters create CLUSTER --project PROJECT_ID \
+        --location us-west1-c --release-channel rapid \
+        --cluster-version 1.37.0-gke.3503000 \
+        --num-nodes 2 --machine-type c3-standard-4 \
+        --enable-nested-virtualization \
+        --workload-pool PROJECT_ID.svc.id.goog \
+        --managed-otel-scope COLLECTION_AND_INSTRUMENTATION_COMPONENTS \
         --enable-kubernetes-unstable-apis=certificates.k8s.io/v1beta1/clustertrustbundles
+      gcloud container clusters update CLUSTER --project PROJECT_ID \
+        --location us-west1-c \
+        --add-maintenance-exclusion-name=substrate-no-node-upgrades \
+        --add-maintenance-exclusion-scope=no_minor_or_node_upgrades \
+        --add-maintenance-exclusion-until-end-of-support
+
+  The ClusterTrustBundle beta API is off by default on 1.37, and without it
+  the Substrate install stalls waiting for trust bundles (see
+  `substrate-gaps.md`). A channel cluster auto-upgrades its nodes, which
+  recreates the worker pods mid-demo, so the second command blocks node and
+  minor-version upgrades until the version's end of support; `gcloud`
+  cannot set the exclusion on `create`. Patch upgrades to the control plane
+  still apply.
 - `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, and `gcloud` (only needed
   for Vertex AI).
 - Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.
