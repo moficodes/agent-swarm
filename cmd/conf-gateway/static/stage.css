@@ -587,12 +587,12 @@ html, body {
   padding: 0.15rem 0.4rem;
 }
 
-.workers-grid.compact .worker-body {
-  grid-template-columns: 1fr;
+.workers-grid.compact .worker-seat {
+  padding: 0.2rem 0.35rem;
 }
 
-.workers-grid.compact .stat-name {
-  display: none;
+.workers-grid.compact .seat-actor {
+  font-size: 0.78rem;
 }
 
 .worker-card.active {
@@ -641,39 +641,58 @@ html, body {
   color: var(--text-muted);
 }
 
-.worker-body {
-  display: grid;
-  grid-template-columns: 1.2fr 2fr 1fr;
-  gap: 0.75rem;
-  align-items: center;
-  min-width: 0;
+.worker-seat-count {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: var(--text-muted);
 }
 
-.worker-stat {
+.worker-seat-count.full {
+  color: var(--neon-green);
+}
+
+.worker-seats {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
+  gap: 0.3rem;
   min-width: 0;
-  overflow: hidden;
 }
 
-.stat-name {
-  font-size: 0.65rem;
-  font-weight: 700;
-  color: var(--text-muted);
-  letter-spacing: 0.05em;
-  margin-bottom: 0.15rem;
+.worker-seat {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(100, 116, 139, 0.12);
+  min-width: 0;
 }
 
-.stat-value {
+.worker-seat.empty {
+  background: transparent;
+  border: 1px dashed rgba(100, 116, 139, 0.35);
+}
+
+.seat-actor {
   font-size: 0.88rem;
   font-weight: 600;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
-.active-actor-val.running {
+.worker-seat.empty .seat-actor {
+  color: var(--text-muted);
+}
+
+.seat-actor.running {
   color: var(--neon-green);
   font-weight: 800;
 }

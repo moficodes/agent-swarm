@@ -53,12 +53,24 @@ A worker hosts actors until its capacity runs out or it reaches ateom's
 `--max-actors` (default 1000), and a WorkerPool cannot set that flag. The
 capacity comes from the ateom container's `limits.cpu` and `limits.memory`;
 without limits it is the node's allocatable CPU and memory, so a worker on a
-4-vCPU node would take several of this demo's 1-CPU actors. The demo relies
-on one actor per worker, so the `conf-workers` pool sets a 1500m CPU limit,
-which fits one actor but not two, and leaves memory unlimited so a sandbox
-cannot OOM-kill its worker (`manifests/workerpool.yaml.tmpl`). The fix
-belongs in the WorkerPool API: a field for the actors per worker, passed to
-ateom as `--max-actors`.
+4-vCPU node would take as many of this demo's 1-CPU actors as the node has
+CPUs. The demo wants exactly 4 actors per worker, so `hack/deploy.sh` sets
+the `conf-workers` CPU limit to 4500m, which fits four actors but not five,
+and leaves memory unlimited so a sandbox cannot OOM-kill its worker
+(`manifests/workerpool.yaml.tmpl`). The seat count is then a side effect of
+the actor template's CPU limit: raising an actor to 2 CPUs would quietly
+halve it. The fix belongs in the WorkerPool API: a field for the actors per
+worker, passed to ateom as `--max-actors`.
+
+## Worker metrics do not count actors
+
+`ate_workerpool_workers` counts workers by occupancy (`idle`, `partial`,
+`at_capacity`, `unschedulable`), and no metric reports how many actors a
+worker or pool hosts. The `conf-workers` HPA therefore counts a worker with
+one of its 4 seats taken as fully busy
+(`manifests/autoscaling.yaml.tmpl`), and scales up earlier than seat usage
+calls for. A per-pool gauge of hosted actors, next to the pool's seat
+capacity, would let the demand be actors over seats.
 
 ## WorkerPools cannot spread their workers across nodes
 

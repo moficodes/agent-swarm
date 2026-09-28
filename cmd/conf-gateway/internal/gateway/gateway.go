@@ -127,6 +127,15 @@ func WithMaxActors(max int) Option {
 	}
 }
 
+// WithSeatsPerWorker sets how many actors one worker pod hosts at once.
+func WithSeatsPerWorker(n int) Option {
+	return func(g *Gateway) {
+		if n > 0 {
+			g.seatsPerWorker = n
+		}
+	}
+}
+
 // WithHTTPClient sets the HTTP client used for background polling and upstream requests.
 func WithHTTPClient(client *http.Client) Option {
 	return func(g *Gateway) {
@@ -208,6 +217,7 @@ type Gateway struct {
 	httpClient          *http.Client
 	staticFS            fs.FS
 	maxActors           int
+	seatsPerWorker      int
 	broker              *feed.Broker
 	actions             *feed.Log
 
@@ -280,6 +290,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		turnSeq:             make(map[string]uint64),
 		historyClears:       make(map[string]*historyClear),
 		maxActors:           50,
+		seatsPerWorker:      1,
 	}
 
 	for _, opt := range opts {

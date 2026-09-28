@@ -24,6 +24,9 @@ DEMO_CONF_PATCH_ROUTER="${DEMO_CONF_PATCH_ROUTER:-false}"
 DEMO_CONF_ACTORS="${DEMO_CONF_ACTORS:-50}"
 DEMO_CONF_MIN_WORKERS="${DEMO_CONF_MIN_WORKERS:-2}"
 DEMO_CONF_MAX_WORKERS="${DEMO_CONF_MAX_WORKERS:-5}"
+# Each conf-worker hosts this many 1-CPU actors at once
+# (manifests/workerpool.yaml.tmpl).
+DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
@@ -273,6 +276,7 @@ conf_build_gateway() {
 }
 
 conf_render() {
+  local seats="${DEMO_CONF_ACTORS_PER_WORKER}"
   sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME:-placeholder}|g" \
       -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
       -e "s|\${GATEWAY_GSA}|${DEMO_CONF_GATEWAY_GSA:-}|g" \
@@ -286,6 +290,9 @@ conf_render() {
       -e "s|\${WORKER_REPLICAS}|${DEMO_CONF_WORKER_REPLICAS:-${DEMO_CONF_MIN_WORKERS}}|g" \
       -e "s|\${MIN_WORKERS}|${DEMO_CONF_MIN_WORKERS}|g" \
       -e "s|\${MAX_WORKERS}|${DEMO_CONF_MAX_WORKERS}|g" \
+      -e "s|\${ACTORS_PER_WORKER}|${seats}|g" \
+      -e "s|\${WORKER_CPU_LIMIT}|$((10#${seats} * 1000 + 500))m|g" \
+      -e "s|\${WORKER_MEMORY_REQUEST}|$((10#${seats} * 512 + 256))Mi|g" \
       "$1"
 }
 
@@ -458,6 +465,10 @@ conf_deploy() {
     echo "error: need 1 <= DEMO_CONF_MIN_WORKERS (${DEMO_CONF_MIN_WORKERS}) <= DEMO_CONF_MAX_WORKERS (${DEMO_CONF_MAX_WORKERS})" >&2
     exit 1
   fi
+  if ! conf_workers_range_ok "${DEMO_CONF_ACTORS_PER_WORKER}" "${DEMO_CONF_ACTORS_PER_WORKER}"; then
+    echo "error: DEMO_CONF_ACTORS_PER_WORKER (${DEMO_CONF_ACTORS_PER_WORKER}) must be a whole number >= 1" >&2
+    exit 1
+  fi
 
   if [[ -n "${PROJECT_ID:-}" ]]; then
     DEMO_CONF_VERTEX_PROJECT="${PROJECT_ID}"
@@ -587,6 +598,7 @@ conf_main() {
       echo "  Optional env: PROJECT_ID (enables Vertex AI; unset runs mock replies), VERTEX_LOCATION,"
       echo "                DEMO_DOMAIN, DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO,"
       echo "                DEMO_CONF_MIN_WORKERS (default 2), DEMO_CONF_MAX_WORKERS (default 5),"
+      echo "                DEMO_CONF_ACTORS_PER_WORKER (default 4),"
       echo "                KUBECTL_CONTEXT (defaults to the current kube context),"
       echo "                DEMO_CONF_CLUSTER (dashboard cluster label; defaults to the GKE context's cluster),"
       echo "                DEMO_CONF_ALLOW_DIRTY_SUBSTRATE (accept a cluster labeled <pin>-dirty),"

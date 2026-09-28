@@ -28,6 +28,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
+	"github.com/google/go-cmp/cmp"
 )
 
 // fakeControl serves a fixed listing and records suspends.
@@ -291,17 +292,25 @@ func TestState_TelemetryWorkersComeFromRealPods(t *testing.T) {
 		actorstate.Status{Name: "attendee-03", State: types.StateSuspended},
 		actorstate.Status{Name: "attendee-04", State: types.StateSuspending, WorkerPod: "pool-a"},
 	)
-	gw := newTestGateway(t, "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
+	gw := newTestGateway(t, "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond), gateway.WithSeatsPerWorker(4))
 	sc := openEvents(t, gw, "attendee-01")
 	waitView(t, sc, func(v types.ActorView) bool { return v.WorkerPod == "pool-b" })
 
 	tel := getTelemetry(t, gw)
 	want := []types.WorkerStatus{
-		{PodName: "pool-a", ActiveActor: "attendee-02", State: types.StateRunning},
-		{PodName: "pool-b", ActiveActor: "attendee-01", State: types.StateRunning},
+		{PodName: "pool-a", Actors: []types.WorkerActor{
+			{ActorID: "attendee-02", State: types.StateRunning},
+			{ActorID: "attendee-04", State: types.StateSuspending},
+		}},
+		{PodName: "pool-b", Actors: []types.WorkerActor{
+			{ActorID: "attendee-01", State: types.StateRunning},
+		}},
 	}
-	if len(tel.Workers) != len(want) || tel.Workers[0] != want[0] || tel.Workers[1] != want[1] {
-		t.Errorf("Workers = %+v, want %+v", tel.Workers, want)
+	if diff := cmp.Diff(want, tel.Workers); diff != "" {
+		t.Errorf("Workers mismatch (-want +got):\n%s", diff)
+	}
+	if tel.SeatsPerWorker != 4 {
+		t.Errorf("SeatsPerWorker = %d, want 4", tel.SeatsPerWorker)
 	}
 	if tel.Actors["attendee-03"].State != types.StateSuspended {
 		t.Errorf("Actors = %+v", tel.Actors)

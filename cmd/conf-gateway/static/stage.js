@@ -33,6 +33,7 @@
     parkingPulseDot: document.getElementById('parking-pulse-dot'),
     workerList: document.getElementById('worker-list'),
     workerPoolReplicas: document.getElementById('worker-pool-replicas'),
+    workerPodsSeats: document.getElementById('worker-pods-seats'),
     fleetGrid: document.getElementById('fleet-grid'),
     fleetSub: document.getElementById('fleet-sub'),
     eventTicker: document.getElementById('event-ticker'),
@@ -400,7 +401,8 @@
     updateParkingMeter(data.parked_requests || 0, data.parking_available);
 
     // 2. Update Worker Pod Cards
-    updateWorkerCards(data.workers || []);
+    const seats = data.seats_per_worker > 0 ? data.seats_per_worker : 1;
+    updateWorkerCards(data.workers || [], seats);
 
     // 3. Update Attendee Fleet Badges
     renderFleetGrid(data.actors || {});
@@ -412,22 +414,37 @@
     updateMockBanner(!!data.mock_llm);
 
     // 6. Update the live pod count and oversubscription header
-    updateWorkerPods(data.worker_pods, data.actor_count || 0, data.parked_requests || 0, data.parking_available);
+    const busySeats = (data.workers || []).reduce((n, w) => n + (w.actors || []).length, 0);
+    updateWorkerPods(data.worker_pods, data.actor_count || 0, seats, busySeats,
+      data.parked_requests || 0, data.parking_available);
   }
 
-  // updateWorkerPods fills the header's pod count and ratio. Both show '--'
-  // when the pool's size is unknown or zero, so the ratio never divides by 0.
-  function updateWorkerPods(pods, actorCount, parkedCount, parkingAvailable) {
+  // formatRatio shows one decimal below 10x, so 50 actors on 20 seats reads
+  // 2.5x rather than rounding to 3x.
+  function formatRatio(r) {
+    return (r < 10 ? String(Math.round(r * 10) / 10) : String(Math.round(r))) + 'x';
+  }
+
+  // updateWorkerPods fills the header's pod count, seat count and ratio.
+  // They show '--' when the pool's size is unknown or zero, so the ratio
+  // never divides by 0. Each pod hosts seatsPerWorker actors at once, so the
+  // ratio is actors per seat, not per pod.
+  function updateWorkerPods(pods, actorCount, seatsPerWorker, busySeats, parkedCount, parkingAvailable) {
     if (!el.workerPodsCurrent) return;
     const p = pods || {};
     const ok = !!p.available && p.current > 0;
+    const totalSeats = ok ? p.current * seatsPerWorker : 0;
 
     el.workerPodsCurrent.textContent = ok ? String(p.current) : '--';
     el.workerPodsMax.textContent = ok && p.max > 0 ? 'of ' + p.max : '';
-    el.oversubRatio.textContent = ok && actorCount > 0 ? Math.round(actorCount / p.current) + 'x' : '--';
+    if (el.workerPodsSeats) {
+      el.workerPodsSeats.textContent = ok ? totalSeats + ' seats (' + seatsPerWorker + ' per pod)' : '';
+    }
+    el.oversubRatio.textContent = ok && actorCount > 0 ? formatRatio(actorCount / totalSeats) : '--';
     if (el.workerPoolReplicas) {
-      el.workerPoolReplicas.textContent = (ok ? p.current + (p.current === 1 ? ' Replica' : ' Replicas') + ' // ' : '') +
-        'Active Execution Seats';
+      el.workerPoolReplicas.textContent = ok
+        ? p.current + (p.current === 1 ? ' Replica' : ' Replicas') + ' // ' + busySeats + ' of ' + totalSeats + ' Execution Seats Busy'
+        : 'Execution Seats';
     }
 
     const scaling = ok && p.desired > 0 && p.desired !== p.current;
@@ -486,16 +503,33 @@
     if (el.mockBanner) el.mockBanner.hidden = !mockLLM;
   }
 
-  // renderWorkerCardHTML renders one real worker pod: its name, the actor it
-  // is running (if any), and the actor's substrate state.
-  function renderWorkerCardHTML(w, compact) {
-    const activeActor = w.active_actor || '';
+  // renderSeatHTML renders one of a worker's seats: the actor holding it and
+  // the actor's substrate state, or an idle placeholder.
+  function renderSeatHTML(a) {
+    if (!a) {
+      return '<li class="worker-seat empty"><span class="seat-actor">idle</span></li>';
+    }
+    const s = window.ActorView.state({ state: a.state });
+    const running = s.cls === 'running';
+    return `
+      <li class="worker-seat">
+        <span class="seat-actor${running ? ' running' : ''}" title="${escapeHTML(a.actor_id || '')}">${escapeHTML(formatActorName(a.actor_id))}</span>
+        <span class="worker-status-badge ${s.cls}">${escapeHTML(s.label)}</span>
+      </li>
+    `;
+  }
+
+  // renderWorkerCardHTML renders one real worker pod: its name, how many of
+  // its seats are taken, and one row per seat.
+  function renderWorkerCardHTML(w, seats, compact) {
+    const actors = w.actors || [];
     const podName = w.pod_name || 'worker';
     // Compact cards keep only the pod name's random suffix, the part that
     // tells workers apart.
     const title = compact ? podName.split('-').pop() : podName;
-    const isBusy = !!activeActor;
-    const s = window.ActorView.state({ state: w.state });
+    const isBusy = actors.length > 0;
+    const rows = [];
+    for (let i = 0; i < Math.max(seats, actors.length); i++) rows.push(renderSeatHTML(actors[i]));
     return `
       <div class="card worker-card${isBusy ? ' active' : ''}">
         <div class="worker-card-header">
@@ -503,19 +537,14 @@
             <span class="worker-dot${isBusy ? ' active' : ''}"></span>
             <span class="worker-title" title="${escapeHTML(podName)}">${escapeHTML(title)}</span>
           </div>
-          <span class="worker-status-badge ${s.cls}">${escapeHTML(s.label)}</span>
+          <span class="worker-seat-count${actors.length >= seats ? ' full' : ''}">${actors.length}/${seats}</span>
         </div>
-        <div class="worker-body">
-          <div class="worker-stat">
-            <span class="stat-name">ACTIVE ACTOR</span>
-            <span class="stat-value active-actor-val${isBusy ? ' running' : ''}">${escapeHTML(isBusy ? formatActorName(activeActor) : 'idle')}</span>
-          </div>
-        </div>
+        <ul class="worker-seats">${rows.join('')}</ul>
       </div>
     `;
   }
 
-  function updateWorkerCards(workers) {
+  function updateWorkerCards(workers, seats) {
     if (!el.workerList) return;
     if (!workers || workers.length === 0) {
       el.workerList.innerHTML = '<p class="workers-empty">No actors running</p>';
@@ -526,7 +555,7 @@
     const compact = workers.length > 2;
     el.workerList.classList.toggle('compact', compact);
     el.workerList.style.gridTemplateColumns = 'repeat(' + Math.max(2, workers.length) + ', minmax(0, 1fr))';
-    el.workerList.innerHTML = workers.map((w) => renderWorkerCardHTML(w, compact)).join('');
+    el.workerList.innerHTML = workers.map((w) => renderWorkerCardHTML(w, seats, compact)).join('');
   }
 
   function formatActorName(id) {

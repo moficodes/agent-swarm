@@ -34,12 +34,14 @@ spec:
   template:
     # Requests let the scheduler spread workers across nodes. ateom reports
     # its limits as the worker's capacity and hosts actors until it runs
-    # out, so the 1500m CPU limit fits exactly one 1-CPU actor per worker
-    # (without it, a worker would take the node's whole CPU and several
-    # actors). No memory limit, so a busy sandbox cannot OOM-kill a worker.
+    # out. hack/deploy.sh sets the CPU limit to DEMO_CONF_ACTORS_PER_WORKER
+    # CPUs plus 500m, which fits exactly that many 1-CPU actors and not one
+    # more (without a limit, a worker would take the node's whole CPU). The
+    # memory request covers each actor's 512Mi; there is no memory limit, so
+    # a busy sandbox cannot OOM-kill a worker.
     resources:
       requests:
         cpu: 500m
-        memory: 768Mi
+        memory: ${WORKER_MEMORY_REQUEST}
       limits:
-        cpu: 1500m
+        cpu: ${WORKER_CPU_LIMIT}

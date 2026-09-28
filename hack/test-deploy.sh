@@ -258,25 +258,43 @@ fi
 # carries the replicas deploy.sh chose and the pod requests.
 auto="$(DEMO_CONF_MIN_WORKERS=3 DEMO_CONF_MAX_WORKERS=4 conf_render manifests/autoscaling.yaml.tmpl)"
 for want in "minReplicas: 3" "maxReplicas: 4" "name: conf-workers" "kind: WorkerPool" 'averageValue: "1"' \
-            'ate_worker_state="assigned"' "atenet_router_parking_active" "conf_worker_demand"; do
+            'ate_worker_state="partial"' 'ate_worker_state="at_capacity"' \
+            "ceil((sum(atenet_router_parking_active) or vector(0)) / 4)" "conf_worker_demand"; do
   if ! grep -qF -- "${want}" <<<"${auto}"; then
     echo "FAIL: rendered autoscaling manifest lacks ${want}" >&2
     fail=1
   fi
 done
+# Substrate v0.2.0 removed the "assigned" worker state; a query on it reads 0.
+if grep -qF 'ate_worker_state="assigned"' <<<"${auto}"; then
+  echo "FAIL: rendered autoscaling manifest queries the removed assigned worker state" >&2
+  fail=1
+fi
+if ! DEMO_CONF_ACTORS_PER_WORKER=2 conf_render manifests/autoscaling.yaml.tmpl | grep -qF "or vector(0)) / 2)"; then
+  echo "FAIL: autoscaling manifest does not divide parked turns by DEMO_CONF_ACTORS_PER_WORKER" >&2
+  fail=1
+fi
+if ! conf_render manifests/gateway.yaml.tmpl | grep -A1 -F "name: ACTORS_PER_WORKER" | grep -qF 'value: "4"'; then
+  echo "FAIL: gateway manifest does not pass ACTORS_PER_WORKER=4" >&2
+  fail=1
+fi
 pool_yaml="$(DEMO_CONF_WORKER_REPLICAS=4 conf_render manifests/workerpool.yaml.tmpl)"
-for want in "replicas: 4" "cpu: 500m" "memory: 768Mi"; do
+for want in "replicas: 4" "cpu: 500m" "memory: 2304Mi"; do
   if ! grep -qF -- "${want}" <<<"${pool_yaml}"; then
     echo "FAIL: rendered workerpool manifest lacks ${want}" >&2
     fail=1
   fi
 done
 # ateom reports its limits as capacity and hosts actors until it runs out:
-# the CPU limit must fit one 1-CPU conf-agent actor but not two, and there
-# must be no memory limit for a sandbox to OOM-kill the worker against.
+# the CPU limit must fit four 1-CPU conf-agent actors but not five, and
+# there must be no memory limit for a sandbox to OOM-kill the worker against.
 pool_limits="$(sed -n '/^[[:space:]]*limits:/,$p' <<<"${pool_yaml}")"
-if ! grep -qF "cpu: 1500m" <<<"${pool_limits}"; then
-  echo "FAIL: workerpool manifest lacks the 1500m CPU limit that caps it at one actor" >&2
+if ! grep -qF "cpu: 4500m" <<<"${pool_limits}"; then
+  echo "FAIL: workerpool manifest lacks the 4500m CPU limit that caps it at four actors" >&2
+  fail=1
+fi
+if ! DEMO_CONF_ACTORS_PER_WORKER=1 conf_render manifests/workerpool.yaml.tmpl | grep -qF "cpu: 1500m"; then
+  echo "FAIL: workerpool CPU limit does not follow DEMO_CONF_ACTORS_PER_WORKER" >&2
   fail=1
 fi
 if grep -qF "memory:" <<<"${pool_limits}"; then

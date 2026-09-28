@@ -29,6 +29,8 @@ limitations under the License.
   mock replies. Also optional: `VERTEX_LOCATION`, `DEMO_DOMAIN`,
   `DEMO_CONF_ACTORS` (default 50), `DEMO_CONF_MIN_WORKERS` (default 2) and
   `DEMO_CONF_MAX_WORKERS` (default 5), the `conf-workers` autoscaling range,
+  `DEMO_CONF_ACTORS_PER_WORKER` (default 4, the actors each worker hosts at
+  once),
   `SUBSTRATE_REPO` (a clean substrate checkout
   at the pin; `hack/deploy.sh` installs Substrate from it when the
   `ate-system` namespace is missing), `KUBECTL_CONTEXT` (which kube context
@@ -54,24 +56,37 @@ endpoint.
 
 The `/stage` header is live. The pod count is the `conf-workers` HPA's
 current replicas ("3 of 5"), or the WorkerPool's replicas when there is no
-HPA, and reads "scaling N → M" while the HPA wants a different size. The
-oversubscription ratio is the attendee count (`ACTOR_COUNT`, set from
-`DEMO_CONF_ACTORS`) divided by the current pod count, rounded, next to the
-number of turns parked at the router. The gateway reads these every 2s
+HPA, and reads "scaling N → M" while the HPA wants a different size. Each
+pod hosts `DEMO_CONF_ACTORS_PER_WORKER` actors at once (4 by default), so
+the header also shows the seat count, pods × seats per pod: 5 pods give 20
+seats. The oversubscription ratio is the attendee count (`ACTOR_COUNT`, set
+from `DEMO_CONF_ACTORS`) divided by the seat count (one decimal below 10x),
+next to the number of turns parked at the router. Each worker card lists
+its seats and the actor in each. The gateway reads these every 2s
 (`cmd/conf-gateway/internal/workerscale`); when it can't, the header shows
 `--`.
 
 ## Autoscaling
 
 `conf-workers` scales between `DEMO_CONF_MIN_WORKERS` and
-`DEMO_CONF_MAX_WORKERS` (2 and 5 by default) on worker demand: busy workers
-plus requests parked at the router, one worker per turn. A Prometheus in
+`DEMO_CONF_MAX_WORKERS` (2 and 5 by default) on worker demand: workers
+hosting at least one actor, plus one worker per `DEMO_CONF_ACTORS_PER_WORKER`
+requests parked at the router. A worker counts as busy even with a free
+seat, because Substrate reports how many workers are partly or fully
+occupied but not how many actors each hosts. A Prometheus in
 `ate-demo-conf` scrapes `atenet-router` and `ate-api-server` every 5s,
 prometheus-adapter serves the sum as the external metric
 `conf_worker_demand`, and an HPA writes the WorkerPool's replicas
 (`manifests/autoscaling.yaml.tmpl`). The pool grows within about 20s of a
-burst and shrinks 5 minutes after it ends. Five workers fit on two
-c3-standard-4 nodes, so no node autoscaling is involved.
+burst and shrinks 5 minutes after it ends. At the maximum, 5 workers run
+up to 20 actors at once. Five workers fit on two c3-standard-4 nodes, so no
+node autoscaling is involved.
+
+A worker's seats come from its CPU limit, which `hack/deploy.sh` sets to
+`DEMO_CONF_ACTORS_PER_WORKER` CPUs plus 500m, so it fits that many 1-CPU
+actors and not one more. The limit is not a reservation: the sandboxes
+share the node's CPU, and 4 busy actors on one worker are slower than 4 on
+separate workers.
 
 Watch it with:
 

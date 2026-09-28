@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Autoscales conf-workers on worker demand: turns running plus turns parked.
+# Autoscales conf-workers on worker demand: workers hosting actors plus the
+# workers parked turns would fill.
 # Adapted from Substrate's demos/autoscaled-workerpool.
 #
 # Flow: atenet-router and ate-api-server :9090/metrics --5s scrape-->
@@ -166,10 +167,13 @@ metadata:
   name: conf-prometheus-adapter
   namespace: ate-demo-conf
 ---
-# conf_worker_demand = busy conf-workers + parked requests. max() because
-# every ate-api-server replica reports the same pool-wide count; sum()
-# because each router replica counts only its own parked requests. Each term
-# falls back to 0 when its series is missing. The series query keys on
+# conf_worker_demand = conf-workers hosting at least one actor (partial or
+# at_capacity) + ceil(parked requests / ACTORS_PER_WORKER), in workers.
+# Substrate exports no per-worker actor count, so a partly filled worker
+# counts as a whole one. max() because every ate-api-server replica reports
+# the same pool-wide count; sum() because each router replica counts only
+# its own parked requests. Each term falls back to 0 when its series is
+# missing. The series query keys on
 # ate_workerpool_workers, which exists whenever the pool does, so the metric
 # stays listed while the router reports nothing. The router is shared with
 # other pools; see the spec's shared-router note.
@@ -187,7 +191,7 @@ data:
       name:
         matches: "^ate_workerpool_workers$"
         as: "conf_worker_demand"
-      metricsQuery: '(max(ate_workerpool_workers{ate_workerpool_namespace="ate-demo-conf",ate_workerpool_name="conf-workers",ate_worker_state="assigned"}) or vector(0)) + (sum(atenet_router_parking_active) or vector(0))'
+      metricsQuery: '(max(ate_workerpool_workers{ate_workerpool_namespace="ate-demo-conf",ate_workerpool_name="conf-workers",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="ate-demo-conf",ate_workerpool_name="conf-workers",ate_worker_state="at_capacity"}) or vector(0)) + ceil((sum(atenet_router_parking_active) or vector(0)) / ${ACTORS_PER_WORKER})'
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -331,8 +335,8 @@ subjects:
 ---
 # GKE's HPA controller can already read external metrics and scale any
 # /scale subresource, so no extra binding is needed for it.
-# replicas = ceil(conf_worker_demand / 1): one worker per running or waiting
-# turn, between MIN_WORKERS and MAX_WORKERS.
+# replicas = ceil(conf_worker_demand / 1): one replica per busy worker or
+# ACTORS_PER_WORKER waiting turns, between MIN_WORKERS and MAX_WORKERS.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

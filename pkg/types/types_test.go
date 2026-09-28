@@ -258,9 +258,11 @@ func TestAuxiliaryTypesSerialization(t *testing.T) {
 
 	t.Run("WorkerStatus", func(t *testing.T) {
 		status := types.WorkerStatus{
-			PodName:     "worker-pod-42",
-			ActiveActor: "actor-analysis-1",
-			State:       types.StateRunning,
+			PodName: "worker-pod-42",
+			Actors: []types.WorkerActor{
+				{ActorID: "actor-analysis-1", State: types.StateRunning},
+				{ActorID: "actor-analysis-2", State: types.StateSuspending},
+			},
 		}
 
 		data, err := json.Marshal(status)
@@ -284,20 +286,20 @@ func TestAuxiliaryTypesSerialization(t *testing.T) {
 			ParkingAvailable: true,
 			Workers: []types.WorkerStatus{
 				{
-					PodName:     "worker-pod-1",
-					ActiveActor: "actor-planner",
-					State:       types.StateRunning,
+					PodName: "worker-pod-1",
+					Actors:  []types.WorkerActor{{ActorID: "actor-planner", State: types.StateRunning}},
 				},
 			},
 			Actors: map[string]types.ActorView{
 				"actor-planner":  {ActorID: "actor-planner", State: types.StateRunning, WorkerPod: "worker-pod-1"},
 				"actor-executor": {ActorID: "actor-executor", State: types.StateSuspended, Activity: types.ActivityAwaitingApproval},
 			},
-			MockLLM:     true,
-			ModelUsage:  types.ModelUsage{Calls: 2, PromptTokens: 10},
-			StatePollMs: 40,
-			WorkerPods:  types.WorkerPods{Current: 3, Desired: 5, Max: 5, Available: true},
-			ActorCount:  50,
+			MockLLM:        true,
+			ModelUsage:     types.ModelUsage{Calls: 2, PromptTokens: 10},
+			StatePollMs:    40,
+			WorkerPods:     types.WorkerPods{Current: 3, Desired: 5, Max: 5, Available: true},
+			ActorCount:     50,
+			SeatsPerWorker: 4,
 			RecentEvents: []string{
 				"Actor actor-planner resumed",
 				"Approval requested for actor-executor",

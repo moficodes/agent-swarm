@@ -35,14 +35,19 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	views := g.board.Views()
 	names := slices.Sorted(maps.Keys(views))
 	var workers []types.WorkerStatus
-	seenPods := make(map[string]bool)
+	podIndex := make(map[string]int)
 	for _, name := range names {
 		v := views[name]
-		if v.WorkerPod == "" || seenPods[v.WorkerPod] {
+		if v.WorkerPod == "" {
 			continue
 		}
-		seenPods[v.WorkerPod] = true
-		workers = append(workers, types.WorkerStatus{PodName: v.WorkerPod, ActiveActor: v.ActorID, State: v.State})
+		i, ok := podIndex[v.WorkerPod]
+		if !ok {
+			i = len(workers)
+			podIndex[v.WorkerPod] = i
+			workers = append(workers, types.WorkerStatus{PodName: v.WorkerPod})
+		}
+		workers[i].Actors = append(workers[i].Actors, types.WorkerActor{ActorID: v.ActorID, State: v.State})
 	}
 	slices.SortFunc(workers, func(a, b types.WorkerStatus) int { return strings.Compare(a.PodName, b.PodName) })
 
@@ -71,6 +76,7 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		StatePollMs:      g.statePollMs.Load(),
 		WorkerPods:       pods,
 		ActorCount:       g.maxActors,
+		SeatsPerWorker:   g.seatsPerWorker,
 	}
 	if g.usage != nil {
 		telem.ModelUsage = g.usage.TotalUsage()

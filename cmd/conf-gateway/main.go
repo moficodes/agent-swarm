@@ -98,6 +98,8 @@ type Config struct {
 	ModelAllowlist []string
 	// ActorCount is how many attendee actors the install created.
 	ActorCount int
+	// ActorsPerWorker is how many actors one worker pod hosts at once.
+	ActorsPerWorker int
 }
 
 // LoadConfig loads the configuration from environment variables with defaults.
@@ -152,6 +154,7 @@ func LoadConfig() Config {
 		VertexLocation:        vertexLocation,
 		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
 		ActorCount:            envPositiveInt("ACTOR_COUNT", 50),
+		ActorsPerWorker:       envPositiveInt("ACTORS_PER_WORKER", 1),
 	}
 }
 
@@ -305,6 +308,7 @@ func main() {
 		gateway.WithPresenterKey(cfg.PresenterKey),
 		gateway.WithPollInterval(cfg.StatePollInterval),
 		gateway.WithMaxActors(cfg.ActorCount),
+		gateway.WithSeatsPerWorker(cfg.ActorsPerWorker),
 		gateway.WithSuspendAfter(cfg.SuspendAfter),
 		gateway.WithUsage(proxy),
 		gateway.WithModel(proxy),

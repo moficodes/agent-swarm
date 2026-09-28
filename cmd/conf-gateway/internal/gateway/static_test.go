@@ -198,13 +198,13 @@ func TestStatic_StageHeaderIsLive(t *testing.T) {
 			t.Errorf("stage.html still has fixed copy %q", fixed)
 		}
 	}
-	for _, id := range []string{"worker-pods-current", "worker-pods-max", "worker-pods-scaling", "oversub-ratio", "oversub-waiting"} {
+	for _, id := range []string{"worker-pods-current", "worker-pods-max", "worker-pods-scaling", "oversub-ratio", "oversub-waiting", "worker-pods-seats"} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("stage.html lacks #%s", id)
 		}
 	}
 	js := readStatic(t, "stage.js")
-	for _, want := range []string{"data.worker_pods", "data.actor_count", "p.current > 0"} {
+	for _, want := range []string{"data.worker_pods", "data.actor_count", "p.current > 0", "data.seats_per_worker", "p.current * seatsPerWorker", "w.actors"} {
 		if !strings.Contains(js, want) {
 			t.Errorf("stage.js lacks %q", want)
 		}

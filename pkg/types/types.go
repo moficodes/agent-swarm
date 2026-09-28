@@ -211,6 +211,8 @@ type StageTelemetry struct {
 	WorkerPods       WorkerPods           `json:"worker_pods"`
 	// ActorCount is how many attendee actors the install created.
 	ActorCount int `json:"actor_count"`
+	// SeatsPerWorker is how many actors one worker pod hosts at once.
+	SeatsPerWorker int `json:"seats_per_worker"`
 }
 
 // WorkerPods is the worker pool's size as its autoscaler sees it.
@@ -226,11 +228,16 @@ type WorkerPods struct {
 	Available bool `json:"available"`
 }
 
-// WorkerStatus is one worker pod and the actor ateapi reports running on it.
+// WorkerStatus is one worker pod and the actors ateapi reports on it.
 type WorkerStatus struct {
-	PodName     string         `json:"pod_name"`
-	ActiveActor string         `json:"active_actor"`
-	State       SubstrateState `json:"state"`
+	PodName string        `json:"pod_name"`
+	Actors  []WorkerActor `json:"actors"`
+}
+
+// WorkerActor is one actor holding a seat on a worker pod.
+type WorkerActor struct {
+	ActorID string         `json:"actor_id"`
+	State   SubstrateState `json:"state"`
 }
 
 // ActorDetails is everything the inspector drawer shows about one actor.
