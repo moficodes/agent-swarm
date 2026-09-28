@@ -21,7 +21,12 @@ limitations under the License.
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
   at the version pinned in `go.mod` (currently the `v0.2.0` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
-  version; see "Bumping Substrate" below to move the pin.
+  version; see "Bumping Substrate" below to move the pin. On GKE 1.37,
+  enable the ClusterTrustBundle beta API first, or the Substrate install
+  stalls waiting for trust bundles (see `substrate-gaps.md`):
+
+      gcloud container clusters update CLUSTER --location LOCATION \
+        --enable-kubernetes-unstable-apis=certificates.k8s.io/v1beta1/clustertrustbundles
 - `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, and `gcloud` (only needed
   for Vertex AI).
 - Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.
