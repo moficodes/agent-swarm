@@ -52,31 +52,54 @@ run_kubectl_ate() {
   go tool kubectl-ate ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} "$@"
 }
 
-# substrate_pin prints the 12-character commit of the substrate module
-# pinned in go.mod, taken from its pseudo-version.
+# substrate_pin prints the substrate version pinned in go.mod: the release
+# tag (e.g. v0.2.0) when go.mod names one, or the 12-character commit taken
+# from a pseudo-version otherwise.
 substrate_pin() {
   local v
   v="$(go list -m -f '{{.Version}}' "${SUBSTRATE_MODULE}")" || return 1
-  echo "${v##*-}"
+  if [[ "${v}" =~ [-.][0-9]{14}-([0-9a-f]{12})$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "${v}"
+  fi
+}
+
+# substrate_label_is_pin succeeds if one node's clean (non-"-dirty")
+# ate.dev/substrate-version LABEL names PIN. Substrate labels nodes with
+# `git describe --tags --always` of the checkout it was installed from, so a
+# tag PIN must match the label exactly, and a commit PIN matches a label that
+# is a prefix of it, either bare ("c7a1be17") or in describe form after a
+# tag ("v0.1.0-12-gc7a1be17").
+substrate_label_is_pin() {
+  local pin="$1" label="$2"
+  [[ -n "${label}" ]] || return 1
+  if [[ ! "${pin}" =~ ^[0-9a-f]{12}$ ]]; then
+    [[ "${label}" == "${pin}" ]]
+    return
+  fi
+  if [[ "${label}" =~ ^.+-[0-9]+-g([0-9a-f]+)$ ]]; then
+    label="${BASH_REMATCH[1]}"
+  fi
+  [[ "${pin}" == "${label}"* ]]
 }
 
 # substrate_labels_match succeeds if at least one line of LABELS is set and
-# every set line is a prefix of PIN. LABELS holds one node's
-# ate.dev/substrate-version per line; unlabeled nodes are empty lines.
+# every set line names PIN (see substrate_label_is_pin). LABELS holds one
+# node's ate.dev/substrate-version per line; unlabeled nodes are empty lines.
 # ALLOW_DIRTY (default false; pass "true", e.g. from
-# DEMO_CONF_ALLOW_DIRTY_SUBSTRATE) also accepts a label of the form
-# "<prefix-of-PIN>-dirty", which Substrate stamps on nodes when installed
-# from a modified checkout.
+# DEMO_CONF_ALLOW_DIRTY_SUBSTRATE) also accepts "<label>-dirty", which
+# Substrate stamps on nodes when installed from a modified checkout.
 substrate_labels_match() {
   local pin="$1" labels="$2" allow_dirty="${3:-false}" label seen=false
   while IFS= read -r label; do
     [[ -z "${label}" ]] && continue
-    if [[ "${pin}" == "${label}"* ]]; then
+    if substrate_label_is_pin "${pin}" "${label}"; then
       seen=true
       continue
     fi
-    if [[ "${allow_dirty}" == true && "${label}" == *-dirty \
-        && "${pin}" == "${label%-dirty}"* ]]; then
+    if [[ "${allow_dirty}" == true && "${label}" == *-dirty ]] \
+        && substrate_label_is_pin "${pin}" "${label%-dirty}"; then
       seen=true
       continue
     fi
@@ -90,15 +113,15 @@ substrate_labels_match() {
 # message that fits the actual cause instead of always suggesting a pin
 # bump. Prints one of:
 #   unlabeled  no node carries ate.dev/substrate-version at all
-#   dirty      every set label is "<prefix-of-PIN>-dirty": the cluster runs
-#              the pinned commit, but from a modified checkout
-#   mismatch   otherwise: at least one node runs a different commit
+#   dirty      every set label is "<PIN's label>-dirty": the cluster runs
+#              the pinned version, but from a modified checkout
+#   mismatch   otherwise: at least one node runs a different version
 substrate_label_mismatch_kind() {
   local pin="$1" labels="$2" label seen=false all_dirty=true
   while IFS= read -r label; do
     [[ -z "${label}" ]] && continue
     seen=true
-    if [[ "${label}" == *-dirty && "${pin}" == "${label%-dirty}"* ]]; then
+    if [[ "${label}" == *-dirty ]] && substrate_label_is_pin "${pin}" "${label%-dirty}"; then
       continue
     fi
     all_dirty=false

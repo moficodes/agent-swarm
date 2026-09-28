@@ -19,9 +19,9 @@ limitations under the License.
 ## Prerequisites
 
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
-  at the commit pinned in `go.mod`. `hack/deploy.sh` refuses to deploy against
-  a cluster running any other commit; see "Bumping Substrate" below to move
-  the pin.
+  at the version pinned in `go.mod` (currently the `v0.2.0` release).
+  `hack/deploy.sh` refuses to deploy against a cluster running any other
+  version; see "Bumping Substrate" below to move the pin.
 - `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, and `gcloud` (only needed
   for Vertex AI).
 - Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.
@@ -29,7 +29,7 @@ limitations under the License.
   mock replies. Also optional: `VERTEX_LOCATION`, `DEMO_DOMAIN`,
   `DEMO_CONF_ACTORS` (default 50), `DEMO_CONF_MIN_WORKERS` (default 2) and
   `DEMO_CONF_MAX_WORKERS` (default 5), the `conf-workers` autoscaling range,
-  `SUBSTRATE_REPO` (a substrate checkout
+  `SUBSTRATE_REPO` (a clean substrate checkout
   at the pin; `hack/deploy.sh` installs Substrate from it when the
   `ate-system` namespace is missing), `KUBECTL_CONTEXT` (which kube context
   to target; defaults to the current one), `DEMO_CONF_ALLOW_DIRTY_SUBSTRATE`
@@ -316,20 +316,25 @@ export PRESENTER_TOKEN="$(kubectl get secret conf-gateway -n ate-demo-conf -o js
 
 ## Bumping Substrate
 
-`hack/deploy.sh` compares the cluster nodes' `ate.dev/substrate-version`
-label against the commit `go.mod` pins substrate at, and refuses to deploy
-on a mismatch. The label is matched as a prefix of the pinned commit, so the
-cluster must be installed from an untagged, clean checkout of that commit —
-a tagged build labels nodes `v...` and will not match. To move the pin to a
-new commit:
+`go.mod` pins substrate at a release tag, or at a commit (a pseudo-version)
+between releases. `hack/deploy.sh` compares every cluster node's
+`ate.dev/substrate-version` label against that pin and refuses to deploy on a
+mismatch. Substrate stamps that label with `git describe --tags` of the
+checkout it was installed from, so install from a clean checkout of exactly
+the pinned version: a tag pin needs a label equal to the tag (`v0.2.0`), and
+a commit pin accepts the commit or the describe form after a tag
+(`v0.2.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
 
 ```bash
-go get -tool github.com/agent-substrate/substrate/cmd/kubectl-ate@<commit>
-go get -tool github.com/agent-substrate/substrate/cmd/ateom-gvisor@<commit>
+go get -tool github.com/agent-substrate/substrate/cmd/kubectl-ate@<tag-or-commit>
+go get -tool github.com/agent-substrate/substrate/cmd/ateom-gvisor@<tag-or-commit>
 ```
 
 then copy substrate's `go` directive and its `k8s.io/apimachinery` `replace`
-into this repo's `go.mod` and run `go mod tidy`.
+into this repo's `go.mod` and run `go mod tidy`. Check the release's
+ActorTemplate and WorkerPool API changes against `manifests/` (bump
+`DEMO_CONF_TEMPLATE_REVISION` if the template changes), then reinstall
+Substrate on the cluster from a checkout at the new pin.
 
 ## Teardown
 

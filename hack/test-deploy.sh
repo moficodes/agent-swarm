@@ -271,8 +271,16 @@ for want in "replicas: 4" "cpu: 500m" "memory: 768Mi"; do
     fail=1
   fi
 done
-if grep -qE '^[[:space:]]+limits:' <<<"${pool_yaml}"; then
-  echo "FAIL: workerpool manifest sets limits; ateom would report them as capacity" >&2
+# ateom reports its limits as capacity and hosts actors until it runs out:
+# the CPU limit must fit one 1-CPU conf-agent actor but not two, and there
+# must be no memory limit for a sandbox to OOM-kill the worker against.
+pool_limits="$(sed -n '/^[[:space:]]*limits:/,$p' <<<"${pool_yaml}")"
+if ! grep -qF "cpu: 1500m" <<<"${pool_limits}"; then
+  echo "FAIL: workerpool manifest lacks the 1500m CPU limit that caps it at one actor" >&2
+  fail=1
+fi
+if grep -qF "memory:" <<<"${pool_limits}"; then
+  echo "FAIL: workerpool manifest sets a memory limit" >&2
   fail=1
 fi
 # Without a chosen replica count (the delete path), the pool renders at the minimum.
@@ -313,6 +321,28 @@ expect_labels bad $'c7a1be17\n0123abcd'   # one node on another version
 expect_labels bad ''                      # no labeled nodes at all
 expect_labels bad $'\n\n'
 expect_labels bad 'c7a1be177d0f99'        # longer than the pin is not a match
+expect_labels ok  'v0.1.0-12-gc7a1be17'   # git describe form after a tag
+expect_labels bad 'v0.1.0-12-g0123abcd'
+expect_labels bad 'v0.1.0'                # a tag is not a commit pin
+
+# expect_tag_labels checks substrate_labels_match against a release tag pin,
+# which a node label must equal exactly.
+expect_tag_labels() {
+  local want="$1" labels="$2" allow="${3:-false}" got=0
+  substrate_labels_match v0.2.0 "${labels}" "${allow}" || got=$?
+  if [[ "${want}" == ok && "${got}" != 0 ]] || [[ "${want}" == bad && "${got}" == 0 ]]; then
+    echo "FAIL: tag labels ${want} for '${labels//$'\n'/,}' allow=${allow}" >&2
+    fail=1
+  fi
+}
+expect_tag_labels ok  $'v0.2.0\nv0.2.0'
+expect_tag_labels ok  $'v0.2.0\n'
+expect_tag_labels bad 'v0.2'              # a prefix of the tag is not a match
+expect_tag_labels bad 'v0.2.0-rc.1'
+expect_tag_labels bad 'v0.2.0-3-g0123abcd' # commits after the tag
+expect_tag_labels bad 'v0.2.0-dirty'
+expect_tag_labels ok  'v0.2.0-dirty' true
+expect_tag_labels bad $'v0.2.0\nv0.1.0'
 
 # expect_dirty checks substrate_labels_match's third, dirty-accepting
 # argument: a "-dirty" label whose prefix (before "-dirty") is a prefix of
@@ -350,6 +380,11 @@ expect_kind dirty $'c7a1be17-dirty\nc7a1be17-dirty'
 expect_kind mismatch $'c7a1be17\n0123abcd'
 expect_kind mismatch '0123abcd-dirty'
 expect_kind mismatch $'c7a1be17-dirty\n0123abcd'
+expect_kind dirty 'v0.1.0-12-gc7a1be17-dirty'
+if [[ "$(substrate_label_mismatch_kind v0.2.0 'v0.2.0-dirty')" != dirty ]]; then
+  echo "FAIL: mismatch kind for tag pin 'v0.2.0-dirty' should be dirty" >&2
+  fail=1
+fi
 
 # substrate_repo_clean flags an uncommitted change in SUBSTRATE_REPO before
 # conf_check_substrate installs from it: install-ate.sh would stamp nodes
@@ -385,10 +420,27 @@ if [[ "${out}" != *"Target cluster context: my-ctx"* ]]; then
   fail=1
 fi
 
-# substrate_pin reads the pinned commit from go.mod.
-if [[ "$(substrate_pin)" != "c7a1be177d0f" ]]; then
-  echo "FAIL: substrate_pin = '$(substrate_pin)', want c7a1be177d0f" >&2
+# substrate_pin reads the pinned tag (or commit) from go.mod.
+if [[ "$(substrate_pin)" != "v0.2.0" ]]; then
+  echo "FAIL: substrate_pin = '$(substrate_pin)', want v0.2.0" >&2
   fail=1
 fi
+
+# expect_pin checks substrate_pin's parsing of go.mod versions, with go
+# stubbed to report VERSION: a pseudo-version yields its commit, whether it
+# follows no tag, a release tag, or a pre-release tag.
+expect_pin() {
+  local version="$1" want="$2" got
+  got="$(go() { echo "${version}"; }; substrate_pin)"
+  if [[ "${got}" != "${want}" ]]; then
+    echo "FAIL: substrate_pin for ${version} = '${got}', want '${want}'" >&2
+    fail=1
+  fi
+}
+expect_pin v0.0.0-20260918213005-c7a1be177d0f c7a1be177d0f
+expect_pin v0.2.1-0.20260926230214-ed6d2a1fc8ae ed6d2a1fc8ae
+expect_pin v0.3.0-rc.1.0.20260926230214-ed6d2a1fc8ae ed6d2a1fc8ae
+expect_pin v0.2.0 v0.2.0
+expect_pin v0.3.0-rc.1 v0.3.0-rc.1
 
 exit "${fail}"

@@ -27,7 +27,7 @@ DEMO_CONF_MAX_WORKERS="${DEMO_CONF_MAX_WORKERS:-5}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
-DEMO_CONF_TEMPLATE_REVISION=2
+DEMO_CONF_TEMPLATE_REVISION=3
 
 # conf_seconds converts a Go duration made of h/m/s parts to
 # whole seconds, or prints nothing if it cannot parse it.
@@ -344,14 +344,18 @@ conf_check_substrate() {
   if ! run_kubectl get namespace ate-system >/dev/null 2>&1; then
     if [[ -z "${SUBSTRATE_REPO:-}" ]]; then
       echo "error: Substrate is not installed (no ate-system namespace)." >&2
-      echo "Install it from a substrate checkout at commit ${pin}:" >&2
+      echo "Install it from a clean substrate checkout at ${pin}:" >&2
       echo "  hack/install-ate.sh --deploy-ate-system" >&2
       echo "or set SUBSTRATE_REPO to that checkout and run this again." >&2
       exit 1
     fi
-    local head
+    local head want
     head="$(git -C "${SUBSTRATE_REPO}" rev-parse HEAD)"
-    if [[ "${head}" != "${pin}"* ]]; then
+    if ! want="$(git -C "${SUBSTRATE_REPO}" rev-parse --verify -q "${pin}^{commit}")"; then
+      echo "error: SUBSTRATE_REPO has no ${pin}. Run git fetch --tags there first." >&2
+      exit 1
+    fi
+    if [[ "${head}" != "${want}" ]]; then
       echo "error: SUBSTRATE_REPO is at ${head:0:12}, not the pinned ${pin}. Check out ${pin} there first." >&2
       exit 1
     fi
@@ -371,14 +375,14 @@ conf_check_substrate() {
         echo "error: no node carries ate.dev/substrate-version; is Substrate installed at a version that labels nodes?" >&2
         ;;
       dirty)
-        echo "error: the cluster's nodes run the pinned commit ${pin}, but Substrate was installed from a modified checkout ($(sort -u <<<"${labels}" | tr '\n' ' ')):" >&2
+        echo "error: the cluster's nodes run the pinned ${pin}, but Substrate was installed from a modified checkout ($(sort -u <<<"${labels}" | tr '\n' ' ')):" >&2
         echo "Reinstall Substrate from a clean checkout at ${pin}, or set DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true to accept it." >&2
         ;;
       *)
         echo "error: the cluster's nodes run Substrate $(sort -u <<<"${labels}" | tr '\n' ' ')but go.mod pins ${pin}." >&2
-        echo "Bump the pin to the cluster's commit:" >&2
-        echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/kubectl-ate@<commit>" >&2
-        echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/ateom-gvisor@<commit>" >&2
+        echo "Bump the pin to the cluster's tag or commit:" >&2
+        echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/kubectl-ate@<tag-or-commit>" >&2
+        echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/ateom-gvisor@<tag-or-commit>" >&2
         echo "  then copy substrate's go directive and k8s.io/apimachinery replace into go.mod and run go mod tidy." >&2
         ;;
     esac

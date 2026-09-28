@@ -29,22 +29,11 @@ have one; instead it runs as root inside gVisor and grants itself
 `CHOWN`, `SETUID`, `SETGID` and `DAC_OVERRIDE` so its executor can `setuid`
 down to `nobody` per sandboxed run
 (`manifests/actortemplate.yaml.tmpl`). The fix belongs in substrate's atelet
-([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/c7a1be177d0f1391c38a3b77f333d10ce8ec324a/cmd/atelet/oci.go),
+([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/v0.2.0/cmd/atelet/oci.go),
 which builds the overlay) and ateom
-([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/c7a1be177d0f1391c38a3b77f333d10ce8ec324a/internal/imagecache/bundle_linux.go),
+([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/v0.2.0/internal/imagecache/bundle_linux.go),
 which lays out the bundle), so the overlay is traversable by whatever user
 the image specifies.
-
-## `kubectl-ate` cannot manage egress policies
-
-`kubectl-ate` has no verb to create, read or update an actor's egress
-policy, so `hack/deploy.sh` cannot restrict `conf-workload`'s egress from the
-deploy script. Actors already have no egress by default, which happens to be
-what this demo wants (see "Actor to model" in the Architecture section of the
-README), but a demo that needed to *allow* one specific destination would
-have no scriptable way to do it. The fix belongs in `kubectl-ate` itself: an
-`egress-policy` resource verb alongside its existing `actor` and
-`actor-template` ones.
 
 ## `atenet-router`'s defaults are too short for LLM turns
 
@@ -58,16 +47,18 @@ and exact values in the README's "Deploy" section. The fix belongs in
 long-running backends, so a deploy that fronts an LLM does not need an
 external patch step at all.
 
-## Workers without limits each report the whole node as capacity
+## WorkerPools cannot cap how many actors a worker hosts
 
-ateom sets a worker's capacity from its container's `limits.cpu` and
-`limits.memory`. Without limits it reports the node's allocatable CPU and
-memory, so several workers on one node each believe they own it. The
-autoscaled `conf-workers` pool puts up to 5 workers on 2 nodes and sets
-requests but no limits (`manifests/workerpool.yaml.tmpl`), which is harmless
-while each worker holds one 1-CPU actor. The fix belongs in ateom's capacity
-reporting, which should use requests, or the node's share, when no limit is
-set.
+A worker hosts actors until its capacity runs out or it reaches ateom's
+`--max-actors` (default 1000), and a WorkerPool cannot set that flag. The
+capacity comes from the ateom container's `limits.cpu` and `limits.memory`;
+without limits it is the node's allocatable CPU and memory, so a worker on a
+4-vCPU node would take several of this demo's 1-CPU actors. The demo relies
+on one actor per worker, so the `conf-workers` pool sets a 1500m CPU limit,
+which fits one actor but not two, and leaves memory unlimited so a sandbox
+cannot OOM-kill its worker (`manifests/workerpool.yaml.tmpl`). The fix
+belongs in the WorkerPool API: a field for the actors per worker, passed to
+ateom as `--max-actors`.
 
 ## WorkerPools cannot spread their workers across nodes
 
