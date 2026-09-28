@@ -46,6 +46,9 @@ render() {
       -e "s|\${WORKER_REPLICAS}|2|g" \
       -e "s|\${MIN_WORKERS}|2|g" \
       -e "s|\${MAX_WORKERS}|5|g" \
+      -e "s|\${ACTORS_PER_WORKER}|4|g" \
+      -e "s|\${WORKER_CPU_LIMIT}|4500m|g" \
+      -e "s|\${WORKER_MEMORY_REQUEST}|2304Mi|g" \
       "$1"
 }
 
