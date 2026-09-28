@@ -22,30 +22,23 @@ limitations under the License.
   at the version pinned in `go.mod` (currently the `v0.2.0` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
   version; see "Bumping Substrate" below to move the pin. Substrate needs
-  GKE 1.37 or later, which is only in the RAPID channel in some zones. To
-  create a cluster for it:
+  GKE 1.37 or later, which some zones offer only in the RAPID channel.
+  `hack/create-cluster.sh` creates one:
 
-      gcloud beta container clusters create CLUSTER --project PROJECT_ID \
-        --location us-west1-c --release-channel rapid \
-        --cluster-version 1.37.0-gke.3503000 \
-        --num-nodes 2 --machine-type c3-standard-4 \
-        --enable-nested-virtualization \
-        --workload-pool PROJECT_ID.svc.id.goog \
-        --managed-otel-scope COLLECTION_AND_INSTRUMENTATION_COMPONENTS \
-        --enable-kubernetes-unstable-apis=certificates.k8s.io/v1beta1/clustertrustbundles
-      gcloud container clusters update CLUSTER --project PROJECT_ID \
-        --location us-west1-c \
-        --add-maintenance-exclusion-name=substrate-no-node-upgrades \
-        --add-maintenance-exclusion-scope=no_minor_or_node_upgrades \
-        --add-maintenance-exclusion-until-end-of-support
+      PROJECT_ID=my-project CLUSTER_NAME=substrate-poc hack/create-cluster.sh
 
-  The ClusterTrustBundle beta API is off by default on 1.37, and without it
-  the Substrate install stalls waiting for trust bundles (see
-  `substrate-gaps.md`). A channel cluster auto-upgrades its nodes, which
-  recreates the worker pods mid-demo, so the second command blocks node and
-  minor-version upgrades until the version's end of support; `gcloud`
-  cannot set the exclusion on `create`. Patch upgrades to the control plane
-  still apply.
+  It takes the newest 1.37 release in RAPID, enables the ClusterTrustBundle
+  beta API that the Substrate install needs on 1.37 (see
+  `substrate-gaps.md`), and adds a maintenance exclusion against node and
+  minor upgrades until the version's end of support, since a node upgrade
+  recreates the worker pods mid-demo. Control-plane patches still apply.
+  It reads the variable names Substrate's `tools/setup-gcp` writes to
+  `.ate-dev-env.sh` (`CLUSTER_LOCATION`, `NODE_MACHINE_TYPE`, ...), so you
+  can source that file instead; `--help` lists them and `--dry-run` prints
+  the gcloud commands. Run on an existing cluster, it adds the beta API
+  and exclusion if missing. The GCS bucket, image registry and IAM
+  bindings belong to the project, not the cluster; create them once with
+  `tools/setup-gcp`.
 - `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, and `gcloud` (only needed
   for Vertex AI).
 - Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.

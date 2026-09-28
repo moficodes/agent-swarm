@@ -17,12 +17,15 @@
 # Tests the router flag/grace-period checks, the router patch builder, the
 # stale actor template check, the template and dashboard renders, the GKE
 # cluster name parser and the duration parser in
-# hack/deploy.sh without a cluster.
+# hack/deploy.sh, and hack/create-cluster.sh's version pick and gcloud
+# arguments, without a cluster.
 set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
 # shellcheck source=hack/deploy.sh
 source "${ROOT}/hack/deploy.sh"
+# shellcheck source=hack/create-cluster.sh
+source "${ROOT}/hack/create-cluster.sh"
 
 fail=0
 
@@ -460,5 +463,39 @@ expect_pin v0.2.1-0.20260926230214-ed6d2a1fc8ae ed6d2a1fc8ae
 expect_pin v0.3.0-rc.1.0.20260926230214-ed6d2a1fc8ae ed6d2a1fc8ae
 expect_pin v0.2.0 v0.2.0
 expect_pin v0.3.0-rc.1 v0.3.0-rc.1
+
+# cc_pick_version takes the newest release of the minor version from gcloud's
+# newest-first list, and fails when the channel has none.
+versions="1.37.1-gke.100;1.37.0-gke.3503000;1.36.4-gke.1495000"
+if [[ "$(cc_pick_version 1.37 "${versions}")" != 1.37.1-gke.100 ]]; then
+  echo "FAIL: cc_pick_version 1.37 did not pick 1.37.1-gke.100" >&2
+  fail=1
+fi
+if [[ "$(cc_pick_version 1.36 "${versions}")" != 1.36.4-gke.1495000 ]]; then
+  echo "FAIL: cc_pick_version 1.36 did not pick 1.36.4-gke.1495000" >&2
+  fail=1
+fi
+if cc_pick_version 1.3 "${versions}" >/dev/null || cc_pick_version 1.38 "${versions}" >/dev/null; then
+  echo "FAIL: cc_pick_version matched a minor version the list lacks" >&2
+  fail=1
+fi
+# The cluster gets the beta API Substrate needs on 1.37, and the exclusion
+# that keeps GKE from upgrading worker nodes.
+create_args="$(PROJECT_ID=p CLUSTER_NAME=c cc_create_args 1.37.0-gke.1)"
+for want in c "--project p" "--release-channel rapid" "--cluster-version 1.37.0-gke.1" \
+            "--workload-pool p.svc.id.goog" "--enable-nested-virtualization" \
+            "--enable-kubernetes-unstable-apis=certificates.k8s.io/v1beta1/clustertrustbundles"; do
+  if ! tr '\n' ' ' <<<"${create_args}" | grep -qF -- "${want}"; then
+    echo "FAIL: cc_create_args lacks ${want}" >&2
+    fail=1
+  fi
+done
+exclusion_args="$(PROJECT_ID=p CLUSTER_NAME=c cc_exclusion_args)"
+for want in --add-maintenance-exclusion-scope=no_minor_or_node_upgrades --add-maintenance-exclusion-until-end-of-support; do
+  if ! grep -qxF -- "${want}" <<<"${exclusion_args}"; then
+    echo "FAIL: cc_exclusion_args lacks ${want}" >&2
+    fail=1
+  fi
+done
 
 exit "${fail}"
