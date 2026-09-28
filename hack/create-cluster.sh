@@ -17,7 +17,7 @@
 # Creates a GKE cluster that can run Substrate and this demo. It reads the
 # variable names substrate's tools/setup-gcp writes to .ate-dev-env.sh, so
 # sourcing that file works. The bucket, image registry and IAM bindings are
-# per project, not per cluster; set them up once with setup-gcp. Sourced by
+# per project, not per cluster; README.md's Prerequisites set them up. Sourced by
 # hack/test-deploy.sh for its cluster-free tests.
 
 # shellcheck source=hack/lib.sh

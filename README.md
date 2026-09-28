@@ -36,9 +36,40 @@ limitations under the License.
   `.ate-dev-env.sh` (`CLUSTER_LOCATION`, `NODE_MACHINE_TYPE`, ...), so you
   can source that file instead; `--help` lists them and `--dry-run` prints
   the gcloud commands. Run on an existing cluster, it adds the beta API
-  and exclusion if missing. The GCS bucket, image registry and IAM
-  bindings belong to the project, not the cluster; create them once with
-  `tools/setup-gcp`.
+  and exclusion if missing.
+- One-time project setup: APIs, a snapshot bucket, an image registry and
+  IAM bindings. These belong to the project, not the cluster, so they
+  survive recreating it. Nothing in this repo creates them. From a
+  substrate checkout, with `PROJECT_ID` and `BUCKET_NAME` exported:
+
+      go run ./tools/setup-gcp enable apis     # before hack/create-cluster.sh
+      go run ./tools/setup-gcp create bucket   # the snapshot bucket, BUCKET_NAME
+      go run ./tools/setup-gcp create iam      # after the cluster exists
+
+  Don't run `setup-gcp bootstrap`: it also creates a cluster, and it can't
+  choose GKE 1.37. `create iam` grants the node service account
+  `roles/artifactregistry.reader` and `roles/storage.objectViewer`, and
+  gives atelet and the ate-api-server snapshot bucket access through
+  Workload Identity (atelet also gets registry access). Those principals
+  live in the cluster's Workload Identity pool, which is why it runs after
+  the cluster. The table in substrate's `tools/setup-gcp/README.md` lists
+  every binding.
+
+  setup-gcp enables the Artifact Registry API but creates no repository.
+  `KO_DOCKER_REPO` must name one in the project, so the node service
+  account can pull from it: either `gcr.io/PROJECT_ID/<prefix>`, which
+  pushes to the project's `gcr.io` repository (GCP creates it on the first
+  push if your account may create repositories), or one you create:
+
+      gcloud artifacts repositories create ate-images --project PROJECT_ID \
+        --repository-format docker --location us-west1
+      gcloud auth configure-docker us-west1-docker.pkg.dev
+      export KO_DOCKER_REPO=us-west1-docker.pkg.dev/PROJECT_ID/ate-images
+
+  For Vertex AI replies (`PROJECT_ID` set for `hack/deploy.sh`), also run
+  `gcloud services enable aiplatform.googleapis.com`; setup-gcp doesn't
+  enable it. `hack/deploy.sh` creates the `conf-gateway` service account
+  and its Vertex AI binding itself.
 - `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, and `gcloud` (only needed
   for Vertex AI).
 - Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.
@@ -64,7 +95,7 @@ each) multiplexed onto a `WorkerPool` of 2 to 5 Kubernetes pods
 (`manifests/workerpool.yaml.tmpl`). Each attendee's conversation
 history lives in the actor's own process memory
 (`internal/workload/server/server.go`); the actor's
-`snapshotsConfig` captures full content on pause and commit
+`snapshotConfig` captures full content on pause and commit
 (`manifests/actortemplate.yaml.tmpl`), so the conversation
 survives Substrate suspending and resuming the actor on a different worker
 pod. A stage reset, or handing an `attendee-NN` slot to a new visitor, has
