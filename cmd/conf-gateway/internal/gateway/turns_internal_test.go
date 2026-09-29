@@ -39,6 +39,8 @@ func (c *recordingControl) Suspend(_ context.Context, name string) error {
 	return nil
 }
 
+func (c *recordingControl) Revert(context.Context, string) error { return nil }
+
 // heldActor answers each chat once the test releases it. Every request
 // announces itself on reached with the message it carries, then waits on
 // that message's release channel.
@@ -173,6 +175,8 @@ func TestFiredSuspendTimerRemovesItself(t *testing.T) {
 type blockingControl struct{ started chan struct{} }
 
 func (c *blockingControl) List(context.Context) ([]actorstate.Status, error) { return nil, nil }
+
+func (c *blockingControl) Revert(context.Context, string) error { return nil }
 
 func (c *blockingControl) Suspend(ctx context.Context, _ string) error {
 	c.started <- struct{}{}

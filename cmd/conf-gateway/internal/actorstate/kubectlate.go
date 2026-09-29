@@ -85,6 +85,15 @@ func (k *KubectlATE) Suspend(ctx context.Context, name string) error {
 	return err
 }
 
+// Revert asks ateapi to roll one actor back to its last good snapshot.
+func (k *KubectlATE) Revert(ctx context.Context, name string) error {
+	if !actorName.MatchString(name) {
+		return fmt.Errorf("invalid actor name %q", name)
+	}
+	_, err := k.run(ctx, k.bin, k.args("revert", "actor", name, "-a", k.atespace)...)
+	return err
+}
+
 // ParseActorList decodes `kubectl-ate get actors -o json` output.
 func ParseActorList(data []byte) ([]Status, error) {
 	var list struct {

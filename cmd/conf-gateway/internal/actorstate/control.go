@@ -31,8 +31,11 @@ type Status struct {
 	SnapshotURI           string
 }
 
-// ActorControl lists and suspends the demo's actors.
+// ActorControl lists, suspends and reverts the demo's actors.
 type ActorControl interface {
 	List(ctx context.Context) ([]Status, error)
 	Suspend(ctx context.Context, name string) error
+	// Revert rolls a CRASHED actor back to its last good snapshot, leaving
+	// it SUSPENDED. Anything since that snapshot is lost.
+	Revert(ctx context.Context, name string) error
 }

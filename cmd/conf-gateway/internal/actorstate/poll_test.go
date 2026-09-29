@@ -46,6 +46,8 @@ func (s *scriptedControl) List(ctx context.Context) ([]actorstate.Status, error)
 
 func (s *scriptedControl) Suspend(context.Context, string) error { return nil }
 
+func (s *scriptedControl) Revert(context.Context, string) error { return nil }
+
 func TestPoll_UpdatesBoardAndReportsErrors(t *testing.T) {
 	ctrl := &scriptedControl{results: make(chan listResult)}
 	board := actorstate.NewBoard(func(types.ActorView) {})

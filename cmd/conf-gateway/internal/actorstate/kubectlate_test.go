@@ -107,6 +107,29 @@ func TestKubectlATE_SuspendRejectsBadName(t *testing.T) {
 	}
 }
 
+func TestKubectlATE_RevertArgs(t *testing.T) {
+	run, calls := recorder(nil, nil)
+	k := actorstate.NewKubectlATEWithRunner("kubectl-ate", "api.ate-system.svc:443", "ate-demo-conf", run)
+	if err := k.Revert(context.Background(), "attendee-22"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--endpoint", "api.ate-system.svc:443", "revert", "actor", "attendee-22", "-a", "ate-demo-conf"}
+	if got := (*calls)[0].args; !slices.Equal(got, want) {
+		t.Errorf("args = %v, want %v", got, want)
+	}
+}
+
+func TestKubectlATE_RevertRejectsBadName(t *testing.T) {
+	run, calls := recorder(nil, nil)
+	k := actorstate.NewKubectlATEWithRunner("kubectl-ate", "", "ate-demo-conf", run)
+	if err := k.Revert(context.Background(), "--endpoint=evil"); err == nil {
+		t.Error("Revert accepted a flag-shaped name")
+	}
+	if len(*calls) != 0 {
+		t.Errorf("runner called %d times", len(*calls))
+	}
+}
+
 func TestKubectlATE_ListPropagatesErrors(t *testing.T) {
 	run, _ := recorder([]byte("boom"), errors.New("exit status 1"))
 	k := actorstate.NewKubectlATEWithRunner("kubectl-ate", "", "ate-demo-conf", run)

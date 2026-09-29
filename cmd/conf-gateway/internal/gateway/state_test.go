@@ -43,10 +43,14 @@ type fakeControl struct {
 	// recording the suspend.
 	holdSuspend bool
 	suspended   chan string
+
+	// revertErr is returned by every Revert.
+	revertErr error
+	reverted  chan string
 }
 
 func newFakeControl(statuses ...actorstate.Status) *fakeControl {
-	return &fakeControl{statuses: statuses, suspended: make(chan string, 64)}
+	return &fakeControl{statuses: statuses, suspended: make(chan string, 64), reverted: make(chan string, 64)}
 }
 
 func (f *fakeControl) set(statuses ...actorstate.Status) {
@@ -67,6 +71,11 @@ func (f *fakeControl) Suspend(ctx context.Context, name string) error {
 	}
 	f.suspended <- name
 	return f.suspendErr
+}
+
+func (f *fakeControl) Revert(_ context.Context, name string) error {
+	f.reverted <- name
+	return f.revertErr
 }
 
 // waitSuspended returns the next suspended actor, failing after a generous
@@ -264,6 +273,105 @@ func TestState_ResetSuspendsOnlyRunningActors(t *testing.T) {
 	}
 	if len(got) != 2 || !got["attendee-01"] || !got["attendee-03"] {
 		t.Errorf("suspended %v, want attendee-01 and attendee-03", got)
+	}
+}
+
+type resetBody struct {
+	ActorsReset    int `json:"actors_reset"`
+	SuspendErrors  int `json:"suspend_errors"`
+	ActorsReverted int `json:"actors_reverted"`
+	RevertErrors   int `json:"revert_errors"`
+}
+
+func postReset(t *testing.T, gw *gateway.Gateway) resetBody {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	gw.Handler().ServeHTTP(rec, presenterRequest(gw, httptest.NewRequest(http.MethodPost, "/api/reset", nil)))
+	var body resetBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding reset response %q: %v", rec.Body.String(), err)
+	}
+	return body
+}
+
+func drain(ch chan string) map[string]bool {
+	got := map[string]bool{}
+	for len(ch) > 0 {
+		got[<-ch] = true
+	}
+	return got
+}
+
+func TestState_ResetRevertsCrashedActors(t *testing.T) {
+	ctrl := newFakeControl(
+		actorstate.Status{Name: "attendee-01", State: types.StateRunning, WorkerPod: "p1"},
+		actorstate.Status{Name: "attendee-02", State: types.StateSuspended},
+		actorstate.Status{Name: "attendee-04", State: types.StateCrashed},
+	)
+	gw := newTestGateway(t, "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
+	sc := openEvents(t, gw, "attendee-04")
+	waitView(t, sc, func(v types.ActorView) bool { return v.State == types.StateCrashed })
+
+	body := postReset(t, gw)
+	if body.ActorsReverted != 1 || body.RevertErrors != 0 {
+		t.Errorf("reset = %+v, want 1 actor reverted and no errors", body)
+	}
+	if got := drain(ctrl.reverted); len(got) != 1 || !got["attendee-04"] {
+		t.Errorf("reverted %v, want only attendee-04", got)
+	}
+	if got := drain(ctrl.suspended); len(got) != 1 || !got["attendee-01"] {
+		t.Errorf("suspended %v, want only attendee-01", got)
+	}
+}
+
+func TestState_ResetReportsRevertFailures(t *testing.T) {
+	ctrl := newFakeControl(actorstate.Status{Name: "attendee-04", State: types.StateCrashed})
+	ctrl.revertErr = context.DeadlineExceeded
+	gw := newTestGateway(t, "", gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
+	sc := openEvents(t, gw, "attendee-04")
+	waitView(t, sc, func(v types.ActorView) bool { return v.State == types.StateCrashed })
+
+	body := postReset(t, gw)
+	if body.ActorsReverted != 0 || body.RevertErrors != 1 {
+		t.Errorf("reset = %+v, want 0 reverted and 1 revert error", body)
+	}
+}
+
+func TestState_ResetRevertsBeforeClearingHistory(t *testing.T) {
+	ctrl := newFakeControl()
+	// revertedFirst records, for each history clear, whether the actor had
+	// already been reverted when the clear reached it.
+	revertedFirst := make(chan bool, 4)
+	actor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == types.ClearHistoryPath {
+			revertedFirst <- len(ctrl.reverted) > 0
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{Sender: types.SenderAssistant, Content: "ok"})
+	}))
+	t.Cleanup(actor.Close)
+	gw := newTestGateway(t, actor.URL, gateway.WithActorControl(ctrl), gateway.WithPollInterval(time.Millisecond))
+
+	// The attendee chats, then their actor crashes.
+	if rec := postJSON(gw, "attendee-04", "/api/chat", types.ChatRequest{Message: "hi"}); rec.Code != http.StatusOK {
+		t.Fatalf("chat status = %d", rec.Code)
+	}
+	waitSuspended(t, ctrl) // post-turn suspend
+	ctrl.set(actorstate.Status{Name: "attendee-04", State: types.StateCrashed})
+	sc := openEvents(t, gw, "attendee-04")
+	waitView(t, sc, func(v types.ActorView) bool { return v.State == types.StateCrashed })
+
+	if body := postReset(t, gw); body.ActorsReverted != 1 || body.ActorsReset != 1 {
+		t.Errorf("reset = %+v, want 1 reverted and 1 reset", body)
+	}
+	select {
+	case ok := <-revertedFirst:
+		if !ok {
+			t.Error("history clear reached the actor before it was reverted")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("history was never cleared")
 	}
 }
 

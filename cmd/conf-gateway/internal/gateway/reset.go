@@ -46,13 +46,24 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 		sc.Stop()
 	}
 
-	var active []string
+	var active, crashed []string
 	for name, v := range g.board.Views() {
-		if v.State == types.StateRunning || v.State == types.StateResuming {
+		switch v.State {
+		case types.StateRunning, types.StateResuming:
 			active = append(active, name)
+		case types.StateCrashed:
+			crashed = append(crashed, name)
 		}
 	}
 	slices.Sort(active)
+	slices.Sort(crashed)
+
+	// A crashed actor refuses every request, including the history clear
+	// below, so roll it back to its last good snapshot first. What it loses
+	// is its chat, which the reset clears anyway.
+	revertErrors := g.forEachActor(r.Context(), crashed, "revert", func(ctx context.Context, name string) error {
+		return g.control.Revert(ctx, name)
+	})
 
 	g.mu.Lock()
 	// Actors that held a conversation get their history cleared; the clear
@@ -82,34 +93,46 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 			toSuspend = append(toSuspend, name)
 		}
 	}
-
-	var failed atomic.Int64
-	if g.control != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		sem := make(chan struct{}, 8)
-		var wg sync.WaitGroup
-		for _, name := range toSuspend {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem; wg.Done() }()
-				if err := g.control.Suspend(ctx, name); err != nil {
-					log.Printf("[gateway] reset: suspend %s: %v", name, err)
-					failed.Add(1)
-					g.mu.Lock()
-					g.addEventLocked(fmt.Sprintf("Warning: reset suspend actor %s failed: %v", name, err))
-					g.mu.Unlock()
-				}
-			}()
-		}
-		wg.Wait()
-	}
+	suspendErrors := g.forEachActor(r.Context(), toSuspend, "suspend", func(ctx context.Context, name string) error {
+		return g.control.Suspend(ctx, name)
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":         "ok",
-		"actors_reset":   len(toSuspend) + len(cleared),
-		"suspend_errors": failed.Load(),
+		"status":          "ok",
+		"actors_reset":    len(toSuspend) + len(cleared),
+		"suspend_errors":  suspendErrors,
+		"actors_reverted": len(crashed) - int(revertErrors),
+		"revert_errors":   revertErrors,
 	})
+}
+
+// forEachActor runs op for every named actor, eight at a time, within 30s,
+// and returns how many failed. Each failure is logged and shown as a stage
+// event. It does nothing without actor control.
+func (g *Gateway) forEachActor(ctx context.Context, names []string, verb string, op func(context.Context, string) error) int64 {
+	if g.control == nil || len(names) == 0 {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var failed atomic.Int64
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, name := range names {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			if err := op(ctx, name); err != nil {
+				log.Printf("[gateway] reset: %s %s: %v", verb, name, err)
+				failed.Add(1)
+				g.mu.Lock()
+				g.addEventLocked(fmt.Sprintf("Warning: reset %s actor %s failed: %v", verb, name, err))
+				g.mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return failed.Load()
 }
