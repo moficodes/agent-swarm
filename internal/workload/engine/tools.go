@@ -19,9 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -38,9 +41,26 @@ const (
 	sandboxGID = 65534
 )
 
+// defaultScriptMemoryMiB caps the address space of each script process.
+//
+// The actor's 512Mi memory limit applies to its whole gVisor sandbox, so a
+// script that goes over it gets the sandbox OOM-killed by the host. Substrate
+// does not notice that: the actor stays RUNNING, requests to it hang, and its
+// next suspend crashes it. With the cap the script fails on its own with a
+// MemoryError (or ENOMEM) and the actor stays healthy. The cap leaves room
+// under 512Mi for this server and the sandbox itself.
+const defaultScriptMemoryMiB = 320
+
+// scriptMemoryEnv overrides defaultScriptMemoryMiB; 0 turns the cap off.
+const scriptMemoryEnv = "SCRIPT_MEMORY_LIMIT_MIB"
+
 // SandboxExecutor manages isolated execution of code scripts inside a workspace directory.
 type SandboxExecutor struct {
 	WorkspaceDir string
+	// MemoryLimitMiB caps the virtual memory (RLIMIT_AS) of every process a
+	// script starts; 0 means no cap. The cap is per process, so a script
+	// that starts several processes can still use more in total.
+	MemoryLimitMiB int
 
 	// mu ensures only one script runs at a time, since runs share the workspace.
 	mu sync.Mutex
@@ -53,7 +73,14 @@ func NewSandboxExecutor(workspaceDir string) *SandboxExecutor {
 	if workspaceDir == "" {
 		workspaceDir = "/tmp/workspace"
 	}
-	s := &SandboxExecutor{WorkspaceDir: workspaceDir}
+	s := &SandboxExecutor{WorkspaceDir: workspaceDir, MemoryLimitMiB: defaultScriptMemoryMiB}
+	if v, ok := os.LookupEnv(scriptMemoryEnv); ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			s.MemoryLimitMiB = n
+		} else {
+			log.Printf("[executor] ignoring %s=%q, want a whole number of MiB", scriptMemoryEnv, v)
+		}
+	}
 	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
 		s.initErr = fmt.Errorf("failed to create workspace: %w", err)
 	} else if os.Geteuid() == 0 {
@@ -91,6 +118,21 @@ func sandboxEnv(workspace string) []string {
 		"HOME=" + workspace,
 		"LANG=C.UTF-8",
 	}
+}
+
+// memoryCapScript sets the address-space limit ($1, in KiB) and then
+// becomes the real command, so the script keeps the PID Execute started.
+const memoryCapScript = `ulimit -v "$1" && shift && exec "$@"`
+
+// limitMemory rewrites cmd to run under MemoryLimitMiB. Go cannot set
+// rlimits for a child directly, so a shell sets it and execs the command.
+func (s *SandboxExecutor) limitMemory(cmd *exec.Cmd) {
+	if s.MemoryLimitMiB <= 0 || runtime.GOOS != "linux" {
+		return
+	}
+	kib := strconv.Itoa(s.MemoryLimitMiB * 1024)
+	cmd.Args = append([]string{"/bin/sh", "-c", memoryCapScript, "sh", kib, cmd.Path}, cmd.Args[1:]...)
+	cmd.Path = "/bin/sh"
 }
 
 // clearWorkspace removes everything left in the workspace by earlier runs.
@@ -164,6 +206,7 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
+	s.limitMemory(cmd)
 
 	var stdoutBuf, stderrBuf limitWriter
 	cmd.Stdout = &stdoutBuf

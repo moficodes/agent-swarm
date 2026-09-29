@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -638,5 +639,74 @@ func TestMakeTraversable_LeavesTraversableDirAlone(t *testing.T) {
 	}
 	if got := fi.Mode().Perm(); got != 0o711 {
 		t.Errorf("mode = %o, want 711 unchanged", got)
+	}
+}
+
+func TestSandboxExecutor_MemoryCapFailsOnlyTheScript(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the memory cap is applied on linux only")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	executor := engine.NewSandboxExecutor(t.TempDir())
+	executor.MemoryLimitMiB = 100
+
+	// Allocates and writes 300 MiB, three times the cap.
+	res, err := executor.Execute(ctx, "python", "x = [b'\\x01' * (1 << 20) for _ in range(300)]\nprint('allocated')")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "MemoryError") {
+		t.Errorf("over-cap script: exit %d, stderr %q; want a MemoryError", res.ExitCode, res.Stderr)
+	}
+
+	// Scripts under the cap, in every language, still run.
+	for _, tc := range []struct{ lang, code, want string }{
+		{"python", "x = [b'\\x01' * (1 << 20) for _ in range(20)]\nprint('small ok')", "small ok"},
+		{"bash", "echo bash ok", "bash ok"},
+		{"sh", "echo sh ok", "sh ok"},
+	} {
+		res, err := executor.Execute(ctx, tc.lang, tc.code)
+		if err != nil || res.ExitCode != 0 || !strings.Contains(res.Stdout, tc.want) {
+			t.Errorf("%s under the cap: res %+v, err %v", tc.lang, res, err)
+		}
+	}
+}
+
+func TestSandboxExecutor_MemoryCapIsSet(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the memory cap is applied on linux only")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	executor := engine.NewSandboxExecutor(t.TempDir())
+	executor.MemoryLimitMiB = 64
+
+	res, err := executor.Execute(ctx, "sh", "ulimit -v")
+	if err != nil || strings.TrimSpace(res.Stdout) != "65536" {
+		t.Errorf("ulimit -v = %q (err %v), want 65536", res.Stdout, err)
+	}
+
+	executor.MemoryLimitMiB = 0
+	res, err = executor.Execute(ctx, "sh", "ulimit -v")
+	if err != nil || strings.TrimSpace(res.Stdout) != "unlimited" {
+		t.Errorf("with the cap off, ulimit -v = %q (err %v), want unlimited", res.Stdout, err)
+	}
+}
+
+func TestNewSandboxExecutor_MemoryLimitFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{
+		{"256", 256},
+		{"0", 0},
+		{"lots", 320}, // ignored, default kept
+		{"-5", 320},
+	} {
+		t.Setenv("SCRIPT_MEMORY_LIMIT_MIB", tc.env)
+		if got := engine.NewSandboxExecutor(t.TempDir()).MemoryLimitMiB; got != tc.want {
+			t.Errorf("SCRIPT_MEMORY_LIMIT_MIB=%q: MemoryLimitMiB = %d, want %d", tc.env, got, tc.want)
+		}
 	}
 }
