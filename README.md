@@ -19,7 +19,7 @@ limitations under the License.
 ## Prerequisites
 
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
-  at the version pinned in `go.mod` (currently the `v0.2.0` release).
+  at the version pinned in `go.mod` (currently the `v0.3.0` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
   version; see "Bumping Substrate" below to move the pin. Substrate needs
   GKE 1.37 or later, which some zones offer only in the RAPID channel.
@@ -70,8 +70,8 @@ limitations under the License.
   `gcloud services enable aiplatform.googleapis.com`; setup-gcp doesn't
   enable it. `hack/deploy.sh` creates the `conf-gateway` service account
   and its Vertex AI binding itself.
-- `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, and `gcloud` (only needed
-  for Vertex AI).
+- `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, `shellcheck` (for
+  `make verify`), and `gcloud` (only needed for Vertex AI).
 - Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.
   `PROJECT_ID` is optional and enables Vertex AI; leave it unset to run with
   mock replies. Also optional: `VERTEX_LOCATION`, `DEMO_DOMAIN`,
@@ -384,9 +384,9 @@ between releases. `hack/deploy.sh` compares every cluster node's
 `ate.dev/substrate-version` label against that pin and refuses to deploy on a
 mismatch. Substrate stamps that label with `git describe --tags` of the
 checkout it was installed from, so install from a clean checkout of exactly
-the pinned version: a tag pin needs a label equal to the tag (`v0.2.0`), and
+the pinned version: a tag pin needs a label equal to the tag (`v0.3.0`), and
 a commit pin accepts the commit or the describe form after a tag
-(`v0.2.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
+(`v0.3.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
 
 ```bash
 go get -tool github.com/agent-substrate/substrate/cmd/kubectl-ate@<tag-or-commit>
@@ -394,7 +394,8 @@ go get -tool github.com/agent-substrate/substrate/cmd/ateom-gvisor@<tag-or-commi
 ```
 
 then copy substrate's `go` directive and its `k8s.io/apimachinery` `replace`
-into this repo's `go.mod` and run `go mod tidy`. Check the release's
+into this repo's `go.mod`, run `go mod tidy`, and update the `substrate_pin`
+assertion in `hack/test-deploy.sh`. Check the release's
 ActorTemplate and WorkerPool API changes against `manifests/` (bump
 `DEMO_CONF_TEMPLATE_REVISION` if the template changes), then reinstall
 Substrate on the cluster from a checkout at the new pin.

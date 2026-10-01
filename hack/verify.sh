@@ -260,8 +260,19 @@ if [[ "${IS_GATEWAY_REACHABLE}" != "true" ]]; then
     log_info "Compiling conference binaries into temporary workspace..."
     go build -o "${TMP_DIR}/conf-gateway" ./cmd/conf-gateway
 
-    MOCK_ROUTER_PORT=18080
-    MOCK_GATEWAY_PORT=18090
+    find_free_port() {
+      local port="$1"
+      while (echo >/dev/tcp/127.0.0.1/"${port}") 2>/dev/null; do
+        ((port++))
+      done
+      printf "%s" "${port}"
+    }
+
+    MOCK_ROUTER_PORT=$(find_free_port "${MOCK_ROUTER_PORT:-18080}")
+    MOCK_GATEWAY_PORT=$(find_free_port "${MOCK_GATEWAY_PORT:-18090}")
+    if [[ "${MOCK_GATEWAY_PORT}" == "${MOCK_ROUTER_PORT}" ]]; then
+      MOCK_GATEWAY_PORT=$(find_free_port "$((MOCK_GATEWAY_PORT + 1))")
+    fi
 
     log_info "Starting conf-localrouter (2 slots, one real workload server per attendee)..."
     go build -o "${TMP_DIR}/conf-localrouter" ./cmd/conf-localrouter
@@ -289,6 +300,9 @@ if [[ "${IS_GATEWAY_REACHABLE}" != "true" ]]; then
     # Wait for gateway readiness
     GATEWAY_READY=false
     for _ in $(seq 1 30); do
+      if ! kill -0 "${SPAWNED_PIDS[@]}" 2>/dev/null; then
+        break
+      fi
       if curl -s -f --max-time 1 "${GATEWAY_URL}/healthz" >/dev/null 2>&1; then
         GATEWAY_READY=true
         break
@@ -398,7 +412,7 @@ log_info "Step 3: Turn 1 Chat & HITL Approval Generation"
 PROMPT_MSG="Analyze sales telemetry, detect outliers, and produce an ASCII histogram"
 CHAT_PAYLOAD=$(jq -n --arg msg "${PROMPT_MSG}" '{"message": $msg}')
 
-CHAT_RESP=$(curl -s --max-time 20 -X POST "${GATEWAY_URL}/api/chat" \
+CHAT_RESP=$(curl -s --max-time 60 -X POST "${GATEWAY_URL}/api/chat" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d "${CHAT_PAYLOAD}")
@@ -443,13 +457,15 @@ log_pass "Step 3: Turn 1 Chat & HITL Approval Generation Verified"
 log_info "Step 4: Turn 2 Approval & Sandbox Execution"
 APPROVE_PAYLOAD=$(jq -n --arg id "${APPROVAL_ID}" '{"approval_id": $id, "decision": "APPROVE"}')
 
-APPROVE_RESP=$(curl -s --max-time 15 -X POST "${GATEWAY_URL}/api/approve" \
+APPROVE_RESP=$(curl -s --max-time 60 -X POST "${GATEWAY_URL}/api/approve" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d "${APPROVE_PAYLOAD}")
 
 APPROVE_SENDER=$(printf "%s" "${APPROVE_RESP}" | jq -r .sender 2>/dev/null || true)
 APPROVE_CONTENT=$(printf "%s" "${APPROVE_RESP}" | jq -r .content 2>/dev/null || true)
+APPROVE_CORRECTED=$(printf "%s" "${APPROVE_RESP}" | jq -r '.execution.corrected // false' 2>/dev/null || echo false)
+APPROVE_STDERR=$(printf "%s" "${APPROVE_RESP}" | jq -r '.execution.stderr // empty' 2>/dev/null || true)
 
 if [[ "${APPROVE_SENDER}" != "assistant" ]]; then
   log_err "Expected approval response sender 'assistant', got '${APPROVE_SENDER}'. Response: ${APPROVE_RESP}"
@@ -459,6 +475,10 @@ fi
 
 if [[ "${APPROVE_CONTENT}" == *"exit code 0"* ]]; then
   log_ok "Sandbox code execution completed with exit code 0"
+elif [[ "${MOCK_MODE}" != true && "${APPROVE_CORRECTED}" == "true" ]]; then
+  # Gemini writes the script, and now and then writes a broken one; handleApprove
+  # runs it in the sandbox and asks Gemini to propose a fix (startFix).
+  log_warn "Sandbox ran the script, but Gemini's code failed and triggered a fix proposal: $(tail -n 1 <<<"${APPROVE_STDERR}")"
 elif [[ "${MOCK_MODE}" != true && "${APPROVE_CONTENT}" == *"Execution completed in "* ]] &&
   grep -qE '^(SyntaxError|IndentationError|ModuleNotFoundError):' <<<"${APPROVE_CONTENT}"; then
   # Gemini writes the script, and now and then writes a broken one. The

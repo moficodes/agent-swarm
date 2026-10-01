@@ -442,8 +442,8 @@ if [[ "${out}" != *"Target cluster context: my-ctx"* ]]; then
 fi
 
 # substrate_pin reads the pinned tag (or commit) from go.mod.
-if [[ "$(substrate_pin)" != "v0.2.0" ]]; then
-  echo "FAIL: substrate_pin = '$(substrate_pin)', want v0.2.0" >&2
+if [[ "$(substrate_pin)" != "v0.3.0" ]]; then
+  echo "FAIL: substrate_pin = '$(substrate_pin)', want v0.3.0" >&2
   fail=1
 fi
 
@@ -463,6 +463,7 @@ expect_pin v0.2.1-0.20260926230214-ed6d2a1fc8ae ed6d2a1fc8ae
 expect_pin v0.3.0-rc.1.0.20260926230214-ed6d2a1fc8ae ed6d2a1fc8ae
 expect_pin v0.2.0 v0.2.0
 expect_pin v0.3.0-rc.1 v0.3.0-rc.1
+expect_pin v0.3.0 v0.3.0
 
 # cc_pick_version takes the newest release of the minor version from gcloud's
 # newest-first list, and fails when the channel has none.

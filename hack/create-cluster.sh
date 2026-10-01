@@ -33,7 +33,7 @@ GKE_RELEASE_CHANNEL="${GKE_RELEASE_CHANNEL:-rapid}"
 GKE_MINOR_VERSION="${GKE_MINOR_VERSION:-1.37}"
 CC_DRY_RUN="${CC_DRY_RUN:-false}"
 
-# Substrate v0.2.0 creates ClusterTrustBundles through v1beta1, which GKE
+# Substrate v0.3.0 creates ClusterTrustBundles through v1beta1, which GKE
 # 1.37 leaves off (substrate-gaps.md).
 CC_BETA_API=certificates.k8s.io/v1beta1/clustertrustbundles
 # A channel cluster auto-upgrades its nodes, which recreates worker pods
