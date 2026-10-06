@@ -182,10 +182,18 @@ html, body {
 }
 
 .brand-glyph {
-  color: var(--neon-cyan);
-  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
   line-height: 1;
-  text-shadow: 0 0 8px rgba(0, 240, 255, 0.6);
+}
+
+.brand-logo {
+  display: block;
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
 }
 
 .brand-title {

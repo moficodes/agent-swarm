@@ -263,6 +263,13 @@ func TestStatic_LightModeTogglePresentAndStyled(t *testing.T) {
 			}
 		}
 	}
+	stageHTML := readStatic(t, "stage.html")
+	controlsIdx := strings.Index(stageHTML, `class="header-controls"`)
+	toggleIdx := strings.Index(stageHTML, `id="btn-theme-toggle"`)
+	specsIdx := strings.Index(stageHTML, `class="header-specs"`)
+	if controlsIdx < 0 || toggleIdx < 0 || specsIdx < 0 || !(controlsIdx < toggleIdx && toggleIdx < specsIdx) {
+		t.Errorf("stage.html must place #btn-theme-toggle inside .header-controls (top-right row) before .header-specs")
+	}
 	for _, sheet := range []string{"stage.css", "feed.css", "chat.css"} {
 		css := readStatic(t, sheet)
 		for _, want := range []string{`[data-theme="light"]`, `.theme-toggle`, `.theme-seg.active`} {
@@ -276,5 +283,21 @@ func TestStatic_LightModeTogglePresentAndStyled(t *testing.T) {
 		if !strings.Contains(js, want) {
 			t.Errorf("actorview.js lacks %q", want)
 		}
+	}
+}
+
+// TestStatic_SubstrateLogoPresentAndServed checks that every page displays the
+// Agent Substrate logo at the top-left and that the gateway serves ate-logo.svg.
+func TestStatic_SubstrateLogoPresentAndServed(t *testing.T) {
+	for _, page := range []string{"stage.html", "feed.html", "chat.html"} {
+		html := readStatic(t, page)
+		if !strings.Contains(html, `src="/static/ate-logo.svg"`) {
+			t.Errorf("%s does not reference /static/ate-logo.svg", page)
+		}
+	}
+	gw := newTestGateway(t, "")
+	rec := getPath(gw, "/static/ate-logo.svg")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<svg") {
+		t.Errorf("GET /static/ate-logo.svg = %d", rec.Code)
 	}
 }

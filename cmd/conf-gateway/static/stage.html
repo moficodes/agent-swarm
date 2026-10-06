@@ -29,7 +29,7 @@ limitations under the License.
     <header class="stage-header">
       <div class="header-brand">
         <span class="brand-glyph" aria-hidden="true">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 21 7 21 17 12 22 3 17 3 7 12 2"/></svg>
+          <img src="/static/ate-logo.svg" alt="" class="brand-logo" width="44" height="44">
         </span>
         <div class="brand-text">
           <h1 class="brand-title">AGENT SUBSTRATE</h1>
@@ -63,6 +63,14 @@ limitations under the License.
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
           Reset All
         </button>
+        <button id="btn-theme-toggle" class="theme-toggle" type="button" title="Toggle Projector Light Mode [T]" aria-label="Toggle Light Mode" aria-pressed="false">
+          <span id="theme-seg-dark" class="theme-seg active" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+          </span>
+          <span id="theme-seg-light" class="theme-seg" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+          </span>
+        </button>
       </div>
       <div class="header-specs">
         <div class="spec-card">
@@ -85,14 +93,6 @@ limitations under the License.
           <span class="spec-value highlight-green">Live from ateapi</span>
         </div>
         <span id="mock-banner" class="mock-banner" hidden>Mock LLM</span>
-        <button id="btn-theme-toggle" class="theme-toggle" type="button" title="Toggle Projector Light Mode [T]" aria-label="Toggle Light Mode" aria-pressed="false">
-          <span id="theme-seg-dark" class="theme-seg active" aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
-          </span>
-          <span id="theme-seg-light" class="theme-seg" aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
-          </span>
-        </button>
       </div>
     </header>
 
