@@ -28,7 +28,9 @@ limitations under the License.
     <!-- Top Presentation Header -->
     <header class="stage-header">
       <div class="header-brand">
-        <span class="brand-glyph" aria-hidden="true">⬡</span>
+        <span class="brand-glyph" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 21 7 21 17 12 22 3 17 3 7 12 2"/></svg>
+        </span>
         <div class="brand-text">
           <h1 class="brand-title">AGENT SUBSTRATE</h1>
           <span class="brand-subtitle">Interactive Conference Swarm Control Plane</span>
@@ -36,13 +38,31 @@ limitations under the License.
       </div>
       <div class="header-controls">
         <div class="view-switcher" role="toolbar" aria-label="Presentation view mode">
-          <button id="view-mode-grid" class="btn-view active" aria-pressed="true">⊞ Grid Matrix</button>
-          <button id="view-mode-stream" class="btn-view" aria-pressed="false">≡ Live Stream</button>
+          <button id="view-mode-grid" class="btn-view active" aria-pressed="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            Grid Matrix
+          </button>
+          <button id="view-mode-stream" class="btn-view" aria-pressed="false">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            Live Stream
+          </button>
         </div>
-        <button id="btn-sim-25" class="btn-ctrl">▶ Simulate 25</button>
-        <button id="btn-sim-50" class="btn-ctrl">▶ Simulate 50</button>
-        <button id="btn-sim-stop" class="btn-ctrl btn-stop" style="display:none">■ Stop</button>
-        <button id="btn-reset-all" class="btn-ctrl btn-reset">⟲ Reset All</button>
+        <button id="btn-sim-25" class="btn-ctrl">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Simulate 25
+        </button>
+        <button id="btn-sim-50" class="btn-ctrl">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Simulate 50
+        </button>
+        <button id="btn-sim-stop" class="btn-ctrl btn-stop" style="display:none">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+          Stop
+        </button>
+        <button id="btn-reset-all" class="btn-ctrl btn-reset">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          Reset All
+        </button>
       </div>
       <div class="header-specs">
         <div class="spec-card">
@@ -65,6 +85,14 @@ limitations under the License.
           <span class="spec-value highlight-green">Live from ateapi</span>
         </div>
         <span id="mock-banner" class="mock-banner" hidden>Mock LLM</span>
+        <button id="btn-theme-toggle" class="theme-toggle" type="button" title="Toggle Projector Light Mode [T]" aria-label="Toggle Light Mode" aria-pressed="false">
+          <span id="theme-seg-dark" class="theme-seg active" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+          </span>
+          <span id="theme-seg-light" class="theme-seg" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+          </span>
+        </button>
       </div>
     </header>
 
@@ -138,7 +166,36 @@ limitations under the License.
             <span id="worker-pool-replicas" class="section-sub">Execution Seats</span>
           </div>
           <div id="worker-list" class="workers-grid">
-            <p class="workers-empty">No actors running</p>
+            <div class="card worker-card">
+              <div class="worker-card-header">
+                <div class="worker-id">
+                  <span class="worker-dot"></span>
+                  <span class="worker-title">worker-1</span>
+                </div>
+                <span class="worker-seat-count">0/4</span>
+              </div>
+              <ul class="worker-seats">
+                <li class="worker-seat empty"><span class="seat-actor">idle</span></li>
+                <li class="worker-seat empty"><span class="seat-actor">idle</span></li>
+                <li class="worker-seat empty"><span class="seat-actor">idle</span></li>
+                <li class="worker-seat empty"><span class="seat-actor">idle</span></li>
+              </ul>
+            </div>
+            <div class="card worker-card">
+              <div class="worker-card-header">
+                <div class="worker-id">
+                  <span class="worker-dot"></span>
+                  <span class="worker-title">worker-2</span>
+                </div>
+                <span class="worker-seat-count">0/4</span>
+              </div>
+              <ul class="worker-seats">
+                <li class="worker-seat empty"><span class="seat-actor">idle</span></li>
+                <li class="worker-seat empty"><span class="seat-actor">idle</span></li>
+                <li class="worker-seat empty"><span class="seat-actor">idle</span></li>
+                <li class="worker-seat empty"><span class="seat-actor">idle</span></li>
+              </ul>
+            </div>
           </div>
         </div>
 
@@ -180,7 +237,9 @@ limitations under the License.
 
             <div class="toolbar-tools">
               <div class="search-box">
-                <span class="search-icon" aria-hidden="true">🔍</span>
+                <span class="search-icon" aria-hidden="true">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                </span>
                 <input type="search" id="stage-stream-search" placeholder="Search prompts, code, attendees..." autocomplete="off" spellcheck="false">
                 <button type="button" id="stage-stream-search-clear" class="btn-clear-search" aria-label="Clear search" style="display:none">✕</button>
               </div>
@@ -200,7 +259,9 @@ limitations under the License.
           <!-- Live Action Stream Container -->
           <div id="stage-action-stream" class="stage-action-stream" role="feed" aria-busy="false">
             <div id="stage-stream-empty" class="stream-empty-state">
-              <div class="empty-glyph" aria-hidden="true">⚡</div>
+              <div class="empty-glyph" aria-hidden="true">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              </div>
               <h4 class="empty-title">Stage Action Stream Active</h4>
               <p class="empty-desc">Awaiting real-time stream actions, prompts, and sandbox executions...</p>
             </div>
@@ -280,7 +341,8 @@ limitations under the License.
       <!-- Action Link -->
       <div class="drawer-section drawer-actions">
         <a id="spotlight-phone-link" class="drawer-phone-btn" href="/chat" target="_blank" rel="noopener">
-          📱 Open Phone View
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></svg>
+          Open Phone View
           <svg class="external-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
             <polyline points="15 3 21 3 21 9"></polyline>

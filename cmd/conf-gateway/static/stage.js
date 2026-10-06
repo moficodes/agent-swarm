@@ -341,8 +341,8 @@
 
     const viewBoxSize = size + 4;
     return `<svg viewBox="0 0 ${viewBoxSize} ${viewBoxSize}" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
-      <rect width="${viewBoxSize}" height="${viewBoxSize}" fill="#0a0e17" rx="1"/>
-      <path d="${path.trim()}" fill="#00ffcc"/>
+      <rect class="qr-bg" width="${viewBoxSize}" height="${viewBoxSize}" fill="#0a0e17" rx="1"/>
+      <path class="qr-fg" d="${path.trim()}" fill="#00ffcc"/>
     </svg>`;
   }
 
@@ -401,8 +401,8 @@
     updateParkingMeter(data.parked_requests || 0, data.parking_available);
 
     // 2. Update Worker Pod Cards
-    const seats = data.seats_per_worker > 0 ? data.seats_per_worker : 1;
-    updateWorkerCards(data.workers || [], seats);
+    const seats = data.seats_per_worker > 0 ? data.seats_per_worker : 4;
+    updateWorkerCards(data.workers || [], seats, data.worker_pods);
 
     // 3. Update Attendee Fleet Badges
     renderFleetGrid(data.actors || {});
@@ -544,18 +544,33 @@
     `;
   }
 
-  function updateWorkerCards(workers, seats) {
+  function updateWorkerCards(workers, seats, workerPods) {
     if (!el.workerList) return;
-    if (!workers || workers.length === 0) {
-      el.workerList.innerHTML = '<p class="workers-empty">No actors running</p>';
-      return;
+    const list = (workers || []).slice();
+    const podCount = (workerPods && workerPods.available && workerPods.current > 0) ? workerPods.current : 2;
+    const targetCount = Math.max(2, list.length, podCount);
+    const podNames = (workerPods && Array.isArray(workerPods.pod_names)) ? workerPods.pod_names : [];
+    const seen = new Set(list.map((w) => w.pod_name));
+    for (let i = 0; i < podNames.length && list.length < targetCount; i++) {
+      if (podNames[i] && !seen.has(podNames[i])) {
+        seen.add(podNames[i]);
+        list.push({ pod_name: podNames[i], actors: [] });
+      }
+    }
+    let idx = 1;
+    while (list.length < targetCount) {
+      const fallbackName = 'worker-' + idx++;
+      if (!seen.has(fallbackName)) {
+        seen.add(fallbackName);
+        list.push({ pod_name: fallbackName, actors: [] });
+      }
     }
     // One row however many workers the pool has, so the fleet grid below
     // keeps its space; past two, cards switch to a compact layout.
-    const compact = workers.length > 2;
+    const compact = list.length > 2;
     el.workerList.classList.toggle('compact', compact);
-    el.workerList.style.gridTemplateColumns = 'repeat(' + Math.max(2, workers.length) + ', minmax(0, 1fr))';
-    el.workerList.innerHTML = workers.map((w) => renderWorkerCardHTML(w, seats, compact)).join('');
+    el.workerList.style.gridTemplateColumns = 'repeat(' + list.length + ', minmax(0, 1fr))';
+    el.workerList.innerHTML = list.map((w) => renderWorkerCardHTML(w, seats, compact)).join('');
   }
 
   function formatActorName(id) {

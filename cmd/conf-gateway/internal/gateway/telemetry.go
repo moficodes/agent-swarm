@@ -32,10 +32,24 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var pods types.WorkerPods
+	if p := g.workerPods.Load(); p != nil {
+		pods = *p
+	}
+
 	views := g.board.Views()
 	names := slices.Sorted(maps.Keys(views))
 	var workers []types.WorkerStatus
 	podIndex := make(map[string]int)
+	for _, podName := range pods.PodNames {
+		if podName == "" {
+			continue
+		}
+		if _, ok := podIndex[podName]; !ok {
+			podIndex[podName] = len(workers)
+			workers = append(workers, types.WorkerStatus{PodName: podName})
+		}
+	}
 	for _, name := range names {
 		v := views[name]
 		if v.WorkerPod == "" {
@@ -59,11 +73,6 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	var parkingOK bool
 	if snap := g.parking.Load(); snap != nil {
 		parked, parkingOK = snap.Parked, snap.Available
-	}
-
-	var pods types.WorkerPods
-	if p := g.workerPods.Load(); p != nil {
-		pods = *p
 	}
 
 	telem := types.StageTelemetry{

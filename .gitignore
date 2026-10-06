@@ -1,5 +1,6 @@
 /bin/
 *.test
 .superpowers/
+docs/superpowers/
 *.env
 .worktrees/

@@ -215,7 +215,7 @@ type StageTelemetry struct {
 	SeatsPerWorker int `json:"seats_per_worker"`
 }
 
-// WorkerPods is the worker pool's size as its autoscaler sees it.
+// WorkerPods is the worker pool's size and pod names as its autoscaler and Kubernetes API see them.
 type WorkerPods struct {
 	// Current is how many worker pods the pool has.
 	Current int `json:"current"`
@@ -226,6 +226,8 @@ type WorkerPods struct {
 	Max int `json:"max"`
 	// Available is false when the counts could not be read.
 	Available bool `json:"available"`
+	// PodNames lists the names of non-terminating pods belonging to the worker pool.
+	PodNames []string `json:"pod_names,omitempty"`
 }
 
 // WorkerStatus is one worker pod and the actors ateapi reports on it.

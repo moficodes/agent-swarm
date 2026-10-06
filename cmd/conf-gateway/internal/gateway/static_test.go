@@ -230,3 +230,51 @@ func TestStatic_StageWorkerSectionScales(t *testing.T) {
 		t.Error("stage.css lacks .workers-grid.compact")
 	}
 }
+
+// TestStatic_StageWorkerSectionAlwaysVisible checks that the worker pool
+// section is always rendered with full worker cards (never collapsing to an
+// empty-state line when no actors are running).
+func TestStatic_StageWorkerSectionAlwaysVisible(t *testing.T) {
+	html := readStatic(t, "stage.html")
+	if strings.Contains(html, "No actors running") || strings.Contains(html, "workers-empty") {
+		t.Error("stage.html still contains empty-state placeholder for worker pool")
+	}
+	if !strings.Contains(html, `class="card worker-card"`) || !strings.Contains(html, `class="worker-seat empty"`) {
+		t.Error("stage.html does not pre-render initial idle worker cards")
+	}
+	js := readStatic(t, "stage.js")
+	if strings.Contains(js, "No actors running") || strings.Contains(js, "workers-empty") {
+		t.Error("stage.js still collapses worker pool when no actors are running")
+	}
+	if !strings.Contains(js, "updateWorkerCards(data.workers || [], seats, data.worker_pods)") {
+		t.Error("stage.js does not pass data.worker_pods to updateWorkerCards")
+	}
+}
+
+// TestStatic_LightModeTogglePresentAndStyled checks that every page includes
+// the top-right icon-only Projector Light Mode segmented toggle (Moon for dark,
+// Sun for light) and CSS token overrides for [data-theme="light"].
+func TestStatic_LightModeTogglePresentAndStyled(t *testing.T) {
+	for _, page := range []string{"stage.html", "feed.html", "chat.html"} {
+		html := readStatic(t, page)
+		for _, id := range []string{`id="btn-theme-toggle"`, `id="theme-seg-dark"`, `id="theme-seg-light"`} {
+			if !strings.Contains(html, id) {
+				t.Errorf("%s lacks %s", page, id)
+			}
+		}
+	}
+	for _, sheet := range []string{"stage.css", "feed.css", "chat.css"} {
+		css := readStatic(t, sheet)
+		for _, want := range []string{`[data-theme="light"]`, `.theme-toggle`, `.theme-seg.active`} {
+			if !strings.Contains(css, want) {
+				t.Errorf("%s lacks %s", sheet, want)
+			}
+		}
+	}
+	js := readStatic(t, "actorview.js")
+	for _, want := range []string{"conf_theme", "getTheme", "setTheme", "toggleTheme"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("actorview.js lacks %q", want)
+		}
+	}
+}

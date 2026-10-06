@@ -31,7 +31,9 @@ limitations under the License.
     <header class="feed-header">
       <div class="header-left">
         <div class="brand">
-          <span class="brand-glyph" aria-hidden="true">⬡</span>
+          <span class="brand-glyph" aria-hidden="true">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 21 7 21 17 12 22 3 17 3 7 12 2"/></svg>
+          </span>
           <div class="brand-info">
             <h1 class="brand-title">AGENT SUBSTRATE</h1>
             <span class="brand-subtitle">Live Stream // Action &amp; Reasoning Feed</span>
@@ -50,10 +52,22 @@ limitations under the License.
 
       <div class="header-actions">
         <a href="/stage" class="btn-ctrl btn-nav" title="Switch to 16:9 Presentation Stage Dashboard">
-          <span class="btn-icon" aria-hidden="true">⊞</span> Stage Dashboard
+          <span class="btn-icon" aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          </span> Stage Dashboard
         </a>
         <button id="btn-reset-all" class="btn-ctrl btn-reset" title="Suspend all actors to GCS and clear memory">
-          <span class="btn-icon" aria-hidden="true">⟲</span> Reset All
+          <span class="btn-icon" aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          </span> Reset All
+        </button>
+        <button id="btn-theme-toggle" class="theme-toggle" type="button" title="Toggle Projector Light Mode [T]" aria-label="Toggle Light Mode" aria-pressed="false">
+          <span id="theme-seg-dark" class="theme-seg active" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+          </span>
+          <span id="theme-seg-light" class="theme-seg" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+          </span>
         </button>
       </div>
     </header>
@@ -69,7 +83,9 @@ limitations under the License.
 
       <div class="toolbar-tools">
         <div class="search-box">
-          <span class="search-icon" aria-hidden="true">🔍</span>
+          <span class="search-icon" aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          </span>
           <input type="search" id="feed-search" placeholder="Search prompts, code, attendees..." autocomplete="off" spellcheck="false">
           <button type="button" id="feed-search-clear" class="btn-clear-search" aria-label="Clear search" style="display:none">✕</button>
         </div>
@@ -88,7 +104,9 @@ limitations under the License.
     <main id="action-stream" class="action-stream" role="feed" aria-busy="false">
       <!-- Empty state placeholder (cleared on first action card load) -->
       <div id="feed-empty-state" class="feed-empty-state">
-        <div class="empty-glyph" aria-hidden="true">⚡</div>
+        <div class="empty-glyph" aria-hidden="true">
+          <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
         <h2 class="empty-title">Fleet Action Stream Active</h2>
         <p class="empty-desc">Connecting to real-time event pipeline... Waiting for attendee interactions, AI reasoning, and gVisor container sandbox executions.</p>
         <div class="empty-specs">

@@ -19,6 +19,7 @@ package workerscale
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -51,9 +52,9 @@ func New(client kubernetes.Interface, dyn dynamic.Interface, namespace, name str
 	return &Reader{client: client, dyn: dyn, namespace: namespace, name: name}
 }
 
-// Fetch returns the pool's size. Without an HPA, Current, Desired and Max
-// all equal the WorkerPool's spec.replicas. Any other failure returns a
-// WorkerPods with Available false.
+// Fetch returns the pool's size and non-terminating pod names. Without an HPA,
+// Current, Desired and Max all equal the WorkerPool's spec.replicas. Any other
+// failure returns a WorkerPods with Available false.
 func (r *Reader) Fetch(ctx context.Context) types.WorkerPods {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
@@ -64,7 +65,7 @@ func (r *Reader) Fetch(ctx context.Context) types.WorkerPods {
 		if !ok {
 			return types.WorkerPods{}
 		}
-		return types.WorkerPods{Current: n, Desired: n, Max: n, Available: true}
+		return types.WorkerPods{Current: n, Desired: n, Max: n, Available: true, PodNames: r.poolPodNames(ctx)}
 	}
 	if err != nil {
 		return types.WorkerPods{}
@@ -82,7 +83,33 @@ func (r *Reader) Fetch(ctx context.Context) types.WorkerPods {
 	if desired == 0 {
 		desired = current
 	}
-	return types.WorkerPods{Current: current, Desired: desired, Max: int(hpa.Spec.MaxReplicas), Available: true}
+	return types.WorkerPods{
+		Current:   current,
+		Desired:   desired,
+		Max:       int(hpa.Spec.MaxReplicas),
+		Available: true,
+		PodNames:  r.poolPodNames(ctx),
+	}
+}
+
+// poolPodNames lists non-terminating pods belonging to the worker pool.
+func (r *Reader) poolPodNames(ctx context.Context) []string {
+	list, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "ate.dev/worker-pool=" + r.name,
+	})
+	if err != nil || len(list.Items) == 0 {
+		return nil
+	}
+	var names []string
+	for i := range list.Items {
+		p := &list.Items[i]
+		if p.DeletionTimestamp != nil || p.Name == "" {
+			continue
+		}
+		names = append(names, p.Name)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // poolReplicas returns the WorkerPool's spec.replicas.

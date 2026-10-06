@@ -106,5 +106,108 @@
     return { label: "Didn't run", cls: 'run-failed', detail: detail };
   }
 
-  window.ActorView = { state: state, activity: activity, source: source, badge: badge, fleetIDs: fleetIDs, run: run };
+  const THEME_KEY = 'conf_theme';
+
+  function getTheme() {
+    try {
+      if (typeof localStorage !== 'undefined' && localStorage.getItem(THEME_KEY) === 'light') {
+        return 'light';
+      }
+    } catch (_) {}
+    if (typeof document !== 'undefined' && document.documentElement &&
+        document.documentElement.getAttribute('data-theme') === 'light') {
+      return 'light';
+    }
+    return 'dark';
+  }
+
+  function syncThemeToggleUI(isLight) {
+    if (typeof document === 'undefined' || !document.getElementById) return;
+    const darkSeg = document.getElementById('theme-seg-dark');
+    const lightSeg = document.getElementById('theme-seg-light');
+    const btn = document.getElementById('btn-theme-toggle');
+    if (darkSeg) darkSeg.classList.toggle('active', !isLight);
+    if (lightSeg) lightSeg.classList.toggle('active', isLight);
+    if (btn) btn.setAttribute('aria-pressed', isLight ? 'true' : 'false');
+  }
+
+  function setTheme(theme) {
+    const isLight = theme === 'light';
+    if (typeof document !== 'undefined' && document.documentElement) {
+      if (isLight) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      } else {
+        document.documentElement.removeAttribute('data-theme');
+      }
+    }
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(THEME_KEY, isLight ? 'light' : 'dark');
+      }
+    } catch (_) {}
+    syncThemeToggleUI(isLight);
+    return isLight ? 'light' : 'dark';
+  }
+
+  function toggleTheme() {
+    return setTheme(getTheme() === 'light' ? 'dark' : 'light');
+  }
+
+  function bindThemeToggle() {
+    if (typeof document === 'undefined' || !document.getElementById) return;
+    syncThemeToggleUI(getTheme() === 'light');
+    const btn = document.getElementById('btn-theme-toggle');
+    if (btn && !btn.dataset.themeBound) {
+      btn.dataset.themeBound = '1';
+      btn.addEventListener('click', function() {
+        toggleTheme();
+      });
+    }
+  }
+
+  if (typeof document !== 'undefined' && document.documentElement) {
+    if (getTheme() === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', bindThemeToggle);
+    } else {
+      bindThemeToggle();
+    }
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('storage', function(e) {
+        if (e && e.key === THEME_KEY) {
+          const isLight = e.newValue === 'light';
+          if (isLight) {
+            document.documentElement.setAttribute('data-theme', 'light');
+          } else {
+            document.documentElement.removeAttribute('data-theme');
+          }
+          syncThemeToggleUI(isLight);
+        }
+      });
+      window.addEventListener('keydown', function(e) {
+        if (!e || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target && e.target.isContentEditable)) return;
+        if (e.key === 't' || e.key === 'T') {
+          toggleTheme();
+        }
+      });
+    }
+  }
+
+  window.ActorView = {
+    state: state,
+    activity: activity,
+    source: source,
+    badge: badge,
+    fleetIDs: fleetIDs,
+    run: run,
+    getTheme: getTheme,
+    setTheme: setTheme,
+    toggleTheme: toggleTheme
+  };
 })();

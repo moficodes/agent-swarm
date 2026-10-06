@@ -22,6 +22,7 @@ import (
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
+	"github.com/google/go-cmp/cmp"
 )
 
 // fakeWorkerScale reports whatever WorkerPods the test last stored.
@@ -37,7 +38,7 @@ func waitWorkerPods(t *testing.T, gw *gateway.Gateway, want types.WorkerPods) ty
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		tel := getTelemetry(t, gw)
-		if tel.WorkerPods == want {
+		if cmp.Equal(tel.WorkerPods, want) {
 			return tel
 		}
 		if time.Now().After(deadline) {
@@ -73,7 +74,7 @@ func TestStageTelemetry_WorkerPods(t *testing.T) {
 func TestStageTelemetry_WorkerPodsWithoutSource(t *testing.T) {
 	gw := newTestGateway(t, "http://localhost:8000")
 	tel := getTelemetry(t, gw)
-	if tel.WorkerPods != (types.WorkerPods{}) {
+	if !cmp.Equal(tel.WorkerPods, types.WorkerPods{}) {
 		t.Errorf("worker_pods = %+v, want unavailable zero value", tel.WorkerPods)
 	}
 	if tel.ActorCount != 50 {

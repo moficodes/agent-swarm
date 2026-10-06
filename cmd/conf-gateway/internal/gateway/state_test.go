@@ -425,6 +425,42 @@ func TestState_TelemetryWorkersComeFromRealPods(t *testing.T) {
 	}
 }
 
+func TestState_TelemetryIncludesIdleWorkerPods(t *testing.T) {
+	ctrl := newFakeControl(
+		actorstate.Status{Name: "attendee-01", State: types.StateRunning, WorkerPod: "pool-b"},
+		actorstate.Status{Name: "attendee-02", State: types.StateSuspended},
+	)
+	src := &fakeWorkerScale{}
+	pods := types.WorkerPods{
+		Current:   2,
+		Desired:   2,
+		Max:       5,
+		Available: true,
+		PodNames:  []string{"pool-a", "pool-b"},
+	}
+	src.pods.Store(&pods)
+	gw := newTestGateway(t, "",
+		gateway.WithActorControl(ctrl),
+		gateway.WithPollInterval(time.Millisecond),
+		gateway.WithWorkerScale(src),
+		gateway.WithWorkerScaleInterval(time.Millisecond),
+		gateway.WithSeatsPerWorker(4),
+	)
+	sc := openEvents(t, gw, "attendee-01")
+	waitView(t, sc, func(v types.ActorView) bool { return v.WorkerPod == "pool-b" })
+	tel := waitWorkerPods(t, gw, pods)
+
+	want := []types.WorkerStatus{
+		{PodName: "pool-a"},
+		{PodName: "pool-b", Actors: []types.WorkerActor{
+			{ActorID: "attendee-01", State: types.StateRunning},
+		}},
+	}
+	if diff := cmp.Diff(want, tel.Workers); diff != "" {
+		t.Errorf("Workers mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestState_NonChatReplyLeavesActivityIdle(t *testing.T) {
 	actor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("plain text"))
