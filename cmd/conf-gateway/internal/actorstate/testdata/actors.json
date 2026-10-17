@@ -10,7 +10,7 @@
       "actorTemplate": {"atespace": "ate-demo-conf", "name": "conf-workload"},
       "status": {
         "state": "ACTOR_STATE_RUNNING",
-        "workerAssignment": {"worker": {"name": "w-abc"}, "workerNamespace": "ate-demo-conf", "workerPool": "conf-pool", "workerPod": "conf-pool-7d9f-x2k4p", "workerPodIp": "10.8.0.12"}
+        "workerAssignment": {"worker": {"name": "w-abc"}, "workerNamespace": "ate-demo-conf", "workerPool": "conf-pool", "workerPod": "conf-pool-7d9f-x2k4p", "workerPodIps": ["10.8.0.12"]}
       }
     },
     {

@@ -30,7 +30,7 @@ DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
-DEMO_CONF_TEMPLATE_REVISION=3
+DEMO_CONF_TEMPLATE_REVISION=4
 
 # conf_seconds converts a Go duration made of h/m/s parts to
 # whole seconds, or prints nothing if it cannot parse it.
@@ -352,7 +352,7 @@ conf_check_substrate() {
     if [[ -z "${SUBSTRATE_REPO:-}" ]]; then
       echo "error: Substrate is not installed (no ate-system namespace)." >&2
       echo "Install it from a clean substrate checkout at ${pin}:" >&2
-      echo "  hack/install-ate.sh --deploy-ate-system" >&2
+      echo "  hack/install-ate.sh --deploy-ate-system --credential-provider='{\"enabled\":false}'" >&2
       echo "or set SUBSTRATE_REPO to that checkout and run this again." >&2
       exit 1
     fi
@@ -373,7 +373,7 @@ conf_check_substrate() {
       exit 1
     fi
     log_step "Installing Substrate from ${SUBSTRATE_REPO}..."
-    (cd "${SUBSTRATE_REPO}" && hack/install-ate.sh --deploy-ate-system)
+    (cd "${SUBSTRATE_REPO}" && hack/install-ate.sh --deploy-ate-system --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}")
   fi
   labels="$(run_kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.ate\.dev/substrate-version}{"\n"}{end}')"
   if ! substrate_labels_match "${pin}" "${labels}" "${allow_dirty}"; then

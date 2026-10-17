@@ -29,9 +29,9 @@ have one; instead it runs as root inside gVisor and grants itself
 `CHOWN`, `SETUID`, `SETGID` and `DAC_OVERRIDE` so its executor can `setuid`
 down to `nobody` per sandboxed run
 (`manifests/actortemplate.yaml.tmpl`). The fix belongs in substrate's atelet
-([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/v0.3.0/cmd/atelet/oci.go),
+([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/v0.4.0/cmd/atelet/oci.go),
 which builds the overlay) and ateom
-([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/v0.3.0/internal/imagecache/bundle_linux.go),
+([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/v0.4.0/internal/imagecache/bundle_linux.go),
 which lays out the bundle), so the overlay is traversable by whatever user
 the image specifies.
 
@@ -46,21 +46,6 @@ and exact values in the README's "Deploy" section. The fix belongs in
 `atenet-router`'s own defaults, or in a Substrate-level profile for
 long-running backends, so a deploy that fronts an LLM does not need an
 external patch step at all.
-
-## ClusterTrustBundles still use the v1beta1 API
-
-GKE 1.37 serves `certificates.k8s.io/v1` and leaves v1beta1 off unless
-enabled. v0.2.0 moved PodCertificateRequests to v1, but
-podcertificate-controller still creates ClusterTrustBundles through v1beta1
-([signercontroller.go](https://github.com/agent-substrate/substrate/blob/v0.3.0/cmd/podcertcontroller/internal/signercontroller/signercontroller.go#L219)),
-and so does the ateclient trust-bundle lookup
-([builder.go](https://github.com/agent-substrate/substrate/blob/v0.3.0/internal/ateclient/builder.go#L271)).
-On a default 1.37 cluster every create returns "the server could not find
-the requested resource" and `install-ate.sh` times out waiting for
-`podidentity.podcert.ate.dev:identity:primary-bundle`. Enabling
-`certificates.k8s.io/v1beta1/clustertrustbundles` on the cluster works
-around it; the fix is the same v1-first fallback for ClusterTrustBundles.
-Substrate main has the same code as of 2026-10-01.
 
 ## WorkerPools cannot cap how many actors a worker hosts
 

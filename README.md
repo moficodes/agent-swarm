@@ -19,7 +19,7 @@ limitations under the License.
 ## Prerequisites
 
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
-  at the version pinned in `go.mod` (currently the `v0.3.0` release).
+  at the version pinned in `go.mod` (currently the `v0.4.0` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
   version; see "Bumping Substrate" below to move the pin. Substrate needs
   GKE 1.37 or later, which some zones offer only in the RAPID channel.
@@ -27,16 +27,14 @@ limitations under the License.
 
       PROJECT_ID=my-project CLUSTER_NAME=substrate-poc hack/create-cluster.sh
 
-  It takes the newest 1.37 release in RAPID, enables the ClusterTrustBundle
-  beta API that the Substrate install needs on 1.37 (see
-  `substrate-gaps.md`), and adds a maintenance exclusion against node and
-  minor upgrades until the version's end of support, since a node upgrade
-  recreates the worker pods mid-demo. Control-plane patches still apply.
-  It reads the variable names Substrate's `tools/setup-gcp` writes to
+  It takes the newest 1.37 release in RAPID and adds a maintenance exclusion
+  against node and minor upgrades until the version's end of support, since a
+  node upgrade recreates the worker pods mid-demo. Control-plane patches still
+  apply. It reads the variable names Substrate's `tools/setup-gcp` writes to
   `.ate-dev-env.sh` (`CLUSTER_LOCATION`, `NODE_MACHINE_TYPE`, ...), so you
   can source that file instead; `--help` lists them and `--dry-run` prints
-  the gcloud commands. Run on an existing cluster, it adds the beta API
-  and exclusion if missing.
+  the gcloud commands. Run on an existing cluster, it adds the exclusion if
+  missing.
 - One-time project setup: APIs, a snapshot bucket, an image registry and
   IAM bindings. These belong to the project, not the cluster, so they
   survive recreating it. Nothing in this repo creates them. From a
@@ -95,7 +93,7 @@ each) multiplexed onto a `WorkerPool` of 2 to 5 Kubernetes pods
 (`manifests/workerpool.yaml.tmpl`). Each attendee's conversation
 history lives in the actor's own process memory
 (`internal/workload/server/server.go`); the actor's
-`snapshotConfig` captures full content on pause and commit
+`snapshotConfig` captures full content on commit
 (`manifests/actortemplate.yaml.tmpl`), so the conversation
 survives Substrate suspending and resuming the actor on a different worker
 pod. A stage reset, or handing an `attendee-NN` slot to a new visitor, has
@@ -384,9 +382,9 @@ between releases. `hack/deploy.sh` compares every cluster node's
 `ate.dev/substrate-version` label against that pin and refuses to deploy on a
 mismatch. Substrate stamps that label with `git describe --tags` of the
 checkout it was installed from, so install from a clean checkout of exactly
-the pinned version: a tag pin needs a label equal to the tag (`v0.3.0`), and
+the pinned version: a tag pin needs a label equal to the tag (`v0.4.0`), and
 a commit pin accepts the commit or the describe form after a tag
-(`v0.3.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
+(`v0.4.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
 
 ```bash
 go get -tool github.com/agent-substrate/substrate/cmd/kubectl-ate@<tag-or-commit>

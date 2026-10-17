@@ -33,9 +33,6 @@ GKE_RELEASE_CHANNEL="${GKE_RELEASE_CHANNEL:-rapid}"
 GKE_MINOR_VERSION="${GKE_MINOR_VERSION:-1.37}"
 CC_DRY_RUN="${CC_DRY_RUN:-false}"
 
-# Substrate v0.3.0 creates ClusterTrustBundles through v1beta1, which GKE
-# 1.37 leaves off (substrate-gaps.md).
-CC_BETA_API=certificates.k8s.io/v1beta1/clustertrustbundles
 # A channel cluster auto-upgrades its nodes, which recreates worker pods
 # mid-demo. The exclusion blocks node and minor upgrades until the version's
 # end of support; control-plane patches still apply.
@@ -95,8 +92,7 @@ cc_create_args() {
     --network "${NETWORK}" \
     --subnetwork "${SUBNETWORK}" \
     --workload-pool "${PROJECT_ID}.svc.id.goog" \
-    --managed-otel-scope COLLECTION_AND_INSTRUMENTATION_COMPONENTS \
-    "--enable-kubernetes-unstable-apis=${CC_BETA_API}"
+    --managed-otel-scope COLLECTION_AND_INSTRUMENTATION_COMPONENTS
 }
 
 # cc_exclusion_args prints the `gcloud container clusters update` arguments
@@ -133,11 +129,6 @@ cc_create() {
 
   if cc_describe 'value(name)' >/dev/null 2>&1; then
     log_step "Cluster ${CLUSTER_NAME} already exists; checking its settings."
-    if ! cc_describe 'value(enableK8sBetaApis.enabledApis)' 2>/dev/null | grep -qF "${CC_BETA_API}"; then
-      log_step "Enabling ${CC_BETA_API}..."
-      cc_run gcloud container clusters update "${CLUSTER_NAME}" --project "${PROJECT_ID}" \
-        --location "${CLUSTER_LOCATION}" "--enable-kubernetes-unstable-apis=${CC_BETA_API}"
-    fi
   else
     version="$(cc_resolve_version)"
     log_step "Creating ${CLUSTER_NAME} on GKE ${version} (${GKE_RELEASE_CHANNEL})..."
@@ -187,10 +178,10 @@ cc_main() {
 
 cc_usage() {
   echo "Usage: $0 [--dry-run]"
-  echo "  Creates a GKE cluster for Substrate on the newest GKE_MINOR_VERSION release, with the"
-  echo "  ClusterTrustBundle beta API and a maintenance exclusion against node upgrades. On an"
-  echo "  existing cluster it adds the beta API and the exclusion if missing and leaves the"
-  echo "  version alone. --dry-run prints the gcloud commands that change anything."
+  echo "  Creates a GKE cluster for Substrate on the newest GKE_MINOR_VERSION release, with a"
+  echo "  maintenance exclusion against node upgrades. On an existing cluster it adds the"
+  echo "  exclusion if missing and leaves the version alone. --dry-run prints the gcloud"
+  echo "  commands that change anything."
   echo "  Required env: PROJECT_ID, CLUSTER_NAME"
   echo "  Optional env: CLUSTER_LOCATION (default us-west1-c), NETWORK, SUBNETWORK (default default),"
   echo "                NODE_MACHINE_TYPE (default c3-standard-4), NODE_COUNT (default 2),"
