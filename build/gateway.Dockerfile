@@ -21,7 +21,7 @@ COPY . .
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 # kubectl-ate comes from the substrate version pinned in go.mod, so the CLI
 # the gateway shells out to matches the cluster.
-RUN go build -trimpath -o /out/kubectl-ate github.com/agent-substrate/substrate/cmd/kubectl-ate \
+RUN go build -trimpath -o /out/kubectl-ate go.ate.dev/substrate/cmd/kubectl-ate \
  && go build -trimpath -o /out/conf-gateway ./cmd/conf-gateway
 
 FROM gcr.io/distroless/static:nonroot

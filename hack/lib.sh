@@ -17,7 +17,7 @@
 # Helpers for hack/deploy.sh, ported from substrate's hack/install-ate.sh.
 # Sourced; expects to run from the repo root.
 
-SUBSTRATE_MODULE=github.com/agent-substrate/substrate
+SUBSTRATE_MODULE=go.ate.dev/substrate
 
 log_step() {
   echo -e "\033[1;36m[step]: $1\033[0m"
@@ -65,12 +65,43 @@ substrate_pin() {
   fi
 }
 
-# substrate_label_is_pin succeeds if one node's clean (non-"-dirty")
-# ate.dev/substrate-version LABEL names PIN. Substrate labels nodes with
-# `git describe --tags --always` of the checkout it was installed from, so a
-# tag PIN must match the label exactly, and a commit PIN matches a label that
-# is a prefix of it, either bare ("c7a1be17") or in describe form after a
-# tag ("v0.1.0-12-gc7a1be17").
+# substrate_version_from_output normalizes `ateapi --version` output
+# (e.g. "go.ate.dev/substrate.Version=v0.6.0 commit=d3f23635... built=...")
+# to a version label ("v0.6.0", "v0.6.0-dirty", or a 12-character commit
+# prefix) that substrate_labels_match can compare against substrate_pin.
+substrate_version_from_output() {
+  local out="$1" ver commit="" dirty=""
+  [[ -n "${out}" ]] || return 0
+  ver="${out%%[[:space:]]*}"
+  ver="${ver#*.Version=}"
+  if [[ "${ver}" == *+dirty ]]; then
+    ver="${ver%+dirty}"
+    dirty="-dirty"
+  elif [[ "${ver}" == *-dirty ]]; then
+    ver="${ver%-dirty}"
+    dirty="-dirty"
+  fi
+  if [[ "${out}" =~ commit=([0-9a-f]+)(-dirty)? ]]; then
+    commit="${BASH_REMATCH[1]}"
+    [[ -n "${BASH_REMATCH[2]}" ]] && dirty="-dirty"
+  fi
+  # A Go pseudo-version or "(devel)" from ReadBuildInfo names a commit, not a release tag.
+  if [[ "${ver}" == "(devel)" || "${ver}" =~ [-.][0-9]{14}-([0-9a-f]{12})$ ]]; then
+    if [[ -n "${commit}" ]]; then
+      ver="${commit:0:12}"
+    elif [[ -n "${BASH_REMATCH[1]:-}" ]]; then
+      ver="${BASH_REMATCH[1]}"
+    fi
+  fi
+  echo "${ver}${dirty}"
+}
+
+# substrate_label_is_pin succeeds if one clean (non-"-dirty") Substrate
+# version LABEL names PIN. Substrate stamps binaries (and, prior to v0.5.0,
+# nodes) with the release tag or `git describe --tags --always` of the
+# checkout it was installed from, so a tag PIN must match the label
+# exactly, and a commit PIN matches a label that is a prefix of it, either
+# bare ("c7a1be17") or in describe form after a tag ("v0.1.0-12-gc7a1be17").
 substrate_label_is_pin() {
   local pin="$1" label="$2"
   [[ -n "${label}" ]] || return 1
@@ -203,29 +234,6 @@ create_actor_template() {
   wait_actortemplate_ready "${atespace}" "${template}" "${timeout_secs}" || exit 1
 }
 
-# prepare_actor_for_delete suspends an actor (resuming it first if paused)
-# until DeleteActor accepts it.
-prepare_actor_for_delete() {
-  local actor="$1" atespace="$2" deadline=$((SECONDS + 120)) json state
-  while ((SECONDS < deadline)); do
-    json=$(run_kubectl_ate get actor "${actor}" -a "${atespace}" -o json 2>/dev/null) || return 0
-    state=$(jq -r '.status.state // empty' <<<"${json}")
-    case "${state}" in
-      ACTOR_STATE_SUSPENDED | ACTOR_STATE_CRASHED | ACTOR_STATE_DELETING) return 0 ;;
-      ACTOR_STATE_PAUSED) run_kubectl_ate resume actor "${actor}" -a "${atespace}" -o json >/dev/null ;;
-      ACTOR_STATE_RUNNING) run_kubectl_ate suspend actor "${actor}" -a "${atespace}" -o json >/dev/null ;;
-      ACTOR_STATE_RESUMING | ACTOR_STATE_SUSPENDING | ACTOR_STATE_PAUSING) ;;
-      *)
-        echo "cannot delete actor ${actor}: unexpected state ${state}" >&2
-        return 1
-        ;;
-    esac
-    sleep 2
-  done
-  echo "timed out waiting for actor ${actor} to become deletable" >&2
-  return 1
-}
-
 # delete_template_actors deletes every actor created from ATESPACE/TEMPLATE.
 delete_template_actors() {
   local tmpl_atespace="$1" tmpl="$2" actors_json atespace actor
@@ -236,7 +244,6 @@ delete_template_actors() {
   log_step "Deleting actors for ${tmpl_atespace}/${tmpl}"
   while IFS=$'\t' read -r atespace actor; do
     [[ -z "${actor}" ]] && continue
-    prepare_actor_for_delete "${actor}" "${atespace}"
     run_kubectl_ate delete actor "${actor}" -a "${atespace}"
   done < <(jq -r --arg as "${tmpl_atespace}" --arg tmpl "${tmpl}" \
     '.actors[]? | select(.actorTemplate.atespace == $as and .actorTemplate.name == $tmpl) | "\(.metadata.atespace)\t\(.metadata.name)"' \

@@ -85,6 +85,8 @@ out="$(render "${GATEWAY_MANIFEST}" "demo.example.com")"
 for want in "kind: ServiceAccount" "iam.gke.io/gcp-service-account" "kind: Deployment" \
             "resourceNames:" "- ate-client" "clustertrustbundles" \
             "endpointslices" "horizontalpodautoscalers" "workerpools" "- conf-workers" \
+            "https://atenet-router.ate-system.svc:443" \
+            "podidentity.podcert.ate.dev/identity" "servicedns.podcert.ate.dev/identity" \
             "readOnlyRootFilesystem: true" "runAsNonRoot: true" "runAsUser: 65532" \
             "cloud.google.com/backend-config: '{\"default\":\"conf-gateway\"}'"; do
   if ! grep -qF -- "${want}" <<<"${out}"; then
@@ -125,6 +127,28 @@ fi
 for f in "${WORKERPOOL_MANIFEST}" "${AUTOSCALING_MANIFEST}" "${APISERVICE_MANIFEST}"; do
   if ! check_objects "$(render "${f}" "")"; then
     echo "error: ${f} failed offline object validation" >&2
+    status=1
+  fi
+done
+
+out_template="$(render "${ACTOR_TEMPLATE}" "")"
+for want in "preferredFidelity: SNAPSHOT_FIDELITY_MEMORY" "cpuMillicores: 1000" "memoryBytes: 536870912"; do
+  if ! grep -qF -- "${want}" <<<"${out_template}"; then
+    echo "error: actor template manifest lacks ${want}" >&2
+    status=1
+  fi
+done
+for unwanted in "onCommit:" "SANDBOX_CLASS_GVISOR" "sandboxConfig:" "quantity:"; do
+  if grep -qF -- "${unwanted}" <<<"${out_template}"; then
+    echo "error: actor template manifest still has removed field ${unwanted}" >&2
+    status=1
+  fi
+done
+
+out_workerpool="$(render "${WORKERPOOL_MANIFEST}" "")"
+for want in 'ate.dev/api-access: "true"' "sandboxClasses:" "- name: gvisor" "ko://go.ate.dev/substrate/cmd/ateworker-gvisor"; do
+  if ! grep -qF -- "${want}" <<<"${out_workerpool}"; then
+    echo "error: workerpool manifest lacks ${want}" >&2
     status=1
   fi
 done

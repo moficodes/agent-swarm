@@ -29,9 +29,9 @@ have one; instead it runs as root inside gVisor and grants itself
 `CHOWN`, `SETUID`, `SETGID` and `DAC_OVERRIDE` so its executor can `setuid`
 down to `nobody` per sandboxed run
 (`manifests/actortemplate.yaml.tmpl`). The fix belongs in substrate's atelet
-([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/v0.4.0/cmd/atelet/oci.go),
-which builds the overlay) and ateom
-([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/v0.4.0/internal/imagecache/bundle_linux.go),
+([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/v0.6.0/cmd/atelet/oci.go),
+which builds the overlay) and ateworker
+([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/v0.6.0/internal/imagecache/bundle_linux.go),
 which lays out the bundle), so the overlay is traversable by whatever user
 the image specifies.
 
@@ -49,9 +49,9 @@ external patch step at all.
 
 ## WorkerPools cannot cap how many actors a worker hosts
 
-A worker hosts actors until its capacity runs out or it reaches ateom's
+A worker hosts actors until its capacity runs out or it reaches ateworker's
 `--max-actors` (default 1000), and a WorkerPool cannot set that flag. The
-capacity comes from the ateom container's `limits.cpu` and `limits.memory`;
+capacity comes from the ateworker container's `limits.cpu` and `limits.memory`;
 without limits it is the node's allocatable CPU and memory, so a worker on a
 4-vCPU node would take as many of this demo's 1-CPU actors as the node has
 CPUs. The demo wants exactly 4 actors per worker, so `hack/deploy.sh` sets
@@ -60,7 +60,7 @@ and leaves memory unlimited so a sandbox cannot OOM-kill its worker
 (`manifests/workerpool.yaml.tmpl`). The seat count is then a side effect of
 the actor template's CPU limit: raising an actor to 2 CPUs would quietly
 halve it. The fix belongs in the WorkerPool API: a field for the actors per
-worker, passed to ateom as `--max-actors`.
+worker, passed to ateworker as `--max-actors`.
 
 ## Worker metrics do not count actors
 

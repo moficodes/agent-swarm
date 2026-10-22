@@ -35,8 +35,8 @@ jobs:
         run: make verify-local
       - name: Pinned substrate tools build
         run: |
-          go build -o /dev/null github.com/agent-substrate/substrate/cmd/kubectl-ate
-          GOOS=linux go build -o /dev/null github.com/agent-substrate/substrate/cmd/ateom-gvisor
+          go build -o /dev/null go.ate.dev/substrate/cmd/kubectl-ate
+          GOOS=linux go build -o /dev/null go.ate.dev/substrate/cmd/ateworker-gvisor
       - uses: docker/setup-buildx-action@v3
       - name: Gateway image builds
         run: docker buildx build --platform=linux/amd64 -f build/gateway.Dockerfile .

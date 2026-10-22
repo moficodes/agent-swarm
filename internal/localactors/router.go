@@ -19,6 +19,7 @@ package localactors
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -67,6 +68,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.URL.Path == "/statusz" {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"parking": map[string]int{"active": r.Parked()}})
+		return
+	}
+	if req.URL.Path == "/metrics" {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = fmt.Fprintf(w, "# HELP atenet_router_parking_active number of requests currently parked in the router awaiting actor resume\n# TYPE atenet_router_parking_active gauge\natenet_router_parking_active %d\n", r.Parked())
 		return
 	}
 	space, name, ok := strings.Cut(req.Header.Get(targetHeader), "/")

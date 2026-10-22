@@ -96,6 +96,15 @@ func (k *KubectlATE) Revert(ctx context.Context, name string) error {
 
 // ParseActorList decodes `kubectl-ate get actors -o json` output.
 func ParseActorList(data []byte) ([]Status, error) {
+	type snapshot struct {
+		Generation      int32 `json:"generation"`
+		DurableSnapshot *struct {
+			Status string `json:"status"`
+			Object struct {
+				SnapshotURI string `json:"snapshotUri"`
+			} `json:"object"`
+		} `json:"durableSnapshot"`
+	}
 	var list struct {
 		Actors []struct {
 			Metadata struct {
@@ -106,10 +115,7 @@ func ParseActorList(data []byte) ([]Status, error) {
 				WorkerAssignment struct {
 					WorkerPod string `json:"workerPod"`
 				} `json:"workerAssignment"`
-				InProgressSnapshotURI string `json:"inProgressSnapshotUri"`
-				ExternalSnapshot      struct {
-					SnapshotURI string `json:"snapshotUri"`
-				} `json:"externalSnapshot"`
+				Snapshots []snapshot `json:"snapshots"`
 			} `json:"status"`
 		} `json:"actors"`
 	}
@@ -122,12 +128,36 @@ func ParseActorList(data []byte) ([]Status, error) {
 		if state == "" || state == "UNSPECIFIED" {
 			state = types.StateUnknown
 		}
+		var (
+			snapshotURI   string
+			snapshotGen   int32 = -1
+			inProgressURI string
+			inProgressGen int32 = -1
+		)
+		for _, snap := range a.Status.Snapshots {
+			if snap.DurableSnapshot == nil {
+				continue
+			}
+			uri := snap.DurableSnapshot.Object.SnapshotURI
+			switch snap.DurableSnapshot.Status {
+			case "SNAPSHOT_STORAGE_STATUS_COMPLETED":
+				if snap.Generation >= snapshotGen {
+					snapshotGen = snap.Generation
+					snapshotURI = uri
+				}
+			case "SNAPSHOT_STORAGE_STATUS_PENDING":
+				if snap.Generation >= inProgressGen {
+					inProgressGen = snap.Generation
+					inProgressURI = uri
+				}
+			}
+		}
 		out = append(out, Status{
 			Name:                  a.Metadata.Name,
 			State:                 state,
 			WorkerPod:             a.Status.WorkerAssignment.WorkerPod,
-			InProgressSnapshotURI: a.Status.InProgressSnapshotURI,
-			SnapshotURI:           a.Status.ExternalSnapshot.SnapshotURI,
+			InProgressSnapshotURI: inProgressURI,
+			SnapshotURI:           snapshotURI,
 		})
 	}
 	return out, nil

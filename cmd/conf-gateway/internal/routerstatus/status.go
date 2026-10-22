@@ -17,11 +17,14 @@
 package routerstatus
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -90,6 +93,9 @@ func (a *Aggregator) Fetch(ctx context.Context) Snapshot {
 }
 
 func (a *Aggregator) fetchOne(ctx context.Context, base string) (int, error) {
+	if n, ok, err := a.fetchMetrics(ctx, base); ok || err != nil {
+		return n, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/statusz?format=json", nil)
 	if err != nil {
 		return 0, err
@@ -111,4 +117,87 @@ func (a *Aggregator) fetchOne(ctx context.Context, base string) (int, error) {
 		return 0, err
 	}
 	return sz.Parking.Active, nil
+}
+
+// fetchMetrics scrapes atenet_router_parking_active from base+"/metrics". It
+// returns ok=false with nil error when the target returns 404 so callers can
+// fall back to /statusz?format=json.
+func (a *Aggregator) fetchMetrics(ctx context.Context, base string) (int, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/metrics", nil)
+	if err != nil {
+		return 0, false, err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return 0, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return 0, false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, false, fmt.Errorf("metrics %s: %s", base, resp.Status)
+	}
+	n, err := parseMetricsParked(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
+}
+
+const parkingMetricName = "atenet_router_parking_active"
+
+func parseMetricsParked(r io.Reader) (int, error) {
+	sc := bufio.NewScanner(r)
+	var (
+		total   int
+		sawProm bool
+	)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			if strings.HasPrefix(line, "# HELP ") || strings.HasPrefix(line, "# TYPE ") {
+				sawProm = true
+			}
+			continue
+		}
+		if !strings.HasPrefix(line, parkingMetricName) {
+			continue
+		}
+		rest := line[len(parkingMetricName):]
+		if len(rest) == 0 {
+			continue
+		}
+		switch rest[0] {
+		case '{':
+			end := strings.IndexByte(rest, '}')
+			if end < 0 {
+				return 0, fmt.Errorf("malformed metric line %q", line)
+			}
+			rest = rest[end+1:]
+		case ' ', '\t':
+		default:
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			return 0, fmt.Errorf("missing value in metric line %q", line)
+		}
+		v, err := strconv.ParseFloat(fields[0], 64)
+		if err != nil {
+			return 0, fmt.Errorf("parsing %s value %q: %w", parkingMetricName, fields[0], err)
+		}
+		sawProm = true
+		total += int(v)
+	}
+	if err := sc.Err(); err != nil {
+		return 0, err
+	}
+	if !sawProm {
+		return 0, fmt.Errorf("metrics response contained no Prometheus exposition data")
+	}
+	return total, nil
 }

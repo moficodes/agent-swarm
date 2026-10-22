@@ -18,7 +18,18 @@
       "actorTemplate": {"atespace": "ate-demo-conf", "name": "conf-workload"},
       "status": {
         "state": "ACTOR_STATE_SUSPENDED",
-        "externalSnapshot": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-03/9"}
+        "snapshots": [
+          {
+            "generation": 1,
+            "owner": "SNAPSHOT_OWNER_ACTOR",
+            "fidelity": "SNAPSHOT_FIDELITY_MEMORY",
+            "durableSnapshot": {
+              "status": "SNAPSHOT_STORAGE_STATUS_COMPLETED",
+              "object": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-03/9"}
+            }
+          }
+        ],
+        "lastAssignedGeneration": 1
       }
     },
     {

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -26,7 +27,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY", "ACTOR_COUNT"}
+var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ROUTER_CA_FILE", "ROUTER_CRED_BUNDLE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY", "ACTOR_COUNT"}
 
 // clearConfigEnv clears every environment variable LoadConfig reads, so tests
 // start from a clean slate regardless of the host environment.
@@ -77,6 +78,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.ActorCount != 50 {
 		t.Errorf("expected default ActorCount 50, got %d", cfg.ActorCount)
+	}
+	if cfg.RouterCAFile != "" || cfg.RouterCredBundle != "" {
+		t.Errorf("expected empty default RouterCAFile and RouterCredBundle, got %q %q", cfg.RouterCAFile, cfg.RouterCredBundle)
 	}
 }
 
@@ -247,5 +251,21 @@ func TestNewWorkerScaleReader_OutsideCluster(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_PORT", "")
 	if _, err := newWorkerScaleReader(); err == nil {
 		t.Fatal("newWorkerScaleReader() outside a cluster returned no error")
+	}
+}
+
+func TestNewRouterHTTPClient_DefaultWithoutTLSFiles(t *testing.T) {
+	c, err := newRouterHTTPClient(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c != http.DefaultClient {
+		t.Errorf("got %v, want http.DefaultClient", c)
+	}
+}
+
+func TestNewRouterHTTPClient_MissingOneFileErrors(t *testing.T) {
+	if _, err := newRouterHTTPClient(Config{RouterCAFile: "/nonexistent/ca.pem"}); err == nil {
+		t.Error("expected error when only RouterCAFile is set")
 	}
 }

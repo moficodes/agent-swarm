@@ -19,7 +19,7 @@ limitations under the License.
 ## Prerequisites
 
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
-  at the version pinned in `go.mod` (currently the `v0.4.0` release).
+  at the version pinned in `go.mod` (currently the `v0.6.0` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
   version; see "Bumping Substrate" below to move the pin. Substrate needs
   GKE 1.37 or later, which some zones offer only in the RAPID channel.
@@ -81,7 +81,8 @@ limitations under the License.
   at the pin; `hack/deploy.sh` installs Substrate from it when the
   `ate-system` namespace is missing), `KUBECTL_CONTEXT` (which kube context
   to target; defaults to the current one), `DEMO_CONF_ALLOW_DIRTY_SUBSTRATE`
-  (accept a cluster labeled `<pin>-dirty`; see "Bumping Substrate"), and
+  (accept a cluster built from a `<pin>-dirty` checkout; see "Bumping
+  Substrate"), and
   `KO_DEFAULTPLATFORMS=linux/amd64` (skip the arm64 build `ko` does by
   default). `hack/deploy.sh` sources no dev-env file, so export these
   yourself.
@@ -93,7 +94,7 @@ each) multiplexed onto a `WorkerPool` of 2 to 5 Kubernetes pods
 (`manifests/workerpool.yaml.tmpl`). Each attendee's conversation
 history lives in the actor's own process memory
 (`internal/workload/server/server.go`); the actor's
-`snapshotConfig` captures full content on commit
+`snapshotConfig` sets `preferredFidelity: SNAPSHOT_FIDELITY_MEMORY`
 (`manifests/actortemplate.yaml.tmpl`), so the conversation
 survives Substrate suspending and resuming the actor on a different worker
 pod. A stage reset, or handing an `attendee-NN` slot to a new visitor, has
@@ -174,8 +175,9 @@ conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
   Its `BackendConfig` raises the load balancer's backend timeout to an hour
   so long turns and SSE streams are not cut at the 30s default.
 - Gateway to actor: `conf-gateway` proxies `/api/chat` and `/api/approve`
-  through `atenet-router` (`ROUTER_URL=http://atenet-router.ate-system.svc:80`
-  in `manifests/gateway.yaml.tmpl`) with an
+  through `atenet-router` over mTLS (`ROUTER_URL=https://atenet-router.ate-system.svc:443`
+  in `manifests/gateway.yaml.tmpl`, using its projected pod certificate and
+  `servicedns.podcert.ate.dev/identity` trust bundle) with an
   `ate-target-actor` header identifying the attendee's actor
   (`cmd/conf-gateway/internal/actorproxy/proxy.go`).
 - Actor to model: actors run with egress denied, so the actor never calls
@@ -189,7 +191,9 @@ conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
   `/api/model-result` for attendees.
 - Gateway to ateapi: the gateway shells out to `kubectl-ate` against
   `ATEAPI_ENDPOINT=api.ate-system.svc:443` to read actor state and to issue
-  suspends (`cmd/conf-gateway/internal/actorstate`).
+  suspends (`cmd/conf-gateway/internal/actorstate`). The `ate-demo-conf`
+  namespace carries the `ate.dev/api-access: "true"` label required by
+  `ate-system`'s ingress `NetworkPolicy` (`manifests/workerpool.yaml.tmpl`).
 
 ## Credentials
 
@@ -242,10 +246,13 @@ set, otherwise the current kube context, and logs which one at the start of
 default; set `KO_DEFAULTPLATFORMS=linux/amd64` to skip the arm64 build.
 
 `atenet-router` needs `--parked-request-budget` at least 60s, any
-`--route-timeout` at least 60s, and `terminationGracePeriodSeconds` at least
-120 to survive an LLM turn and drain safely; `--patch-router` sets
-`--parked-request-budget=60s`, `--route-timeout=5m` and the grace period to
-120 (`conf_check_router` in `hack/deploy.sh`).
+`--route-timeout` at least 60s, `terminationGracePeriodSeconds` at least
+120, and `spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway` in
+`--ingress-allowed-spiffe-ids` to survive an LLM turn, drain safely and
+admit the gateway over mTLS; `--patch-router` sets
+`--parked-request-budget=60s`, `--route-timeout=5m`,
+`--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway`
+and the grace period to 120 (`conf_check_router` in `hack/deploy.sh`).
 Without it, the deploy fails with the specific changes needed instead of
 silently deploying a router that will 503 or get killed mid-drain.
 
@@ -280,7 +287,6 @@ Every badge comes from an `ActorView` the gateway reads from ateapi through
 | RESUMING | Resuming | Restoring on a worker | `resuming` |
 | RUNNING | Running | `worker_pod` | `running` |
 | SUSPENDING | Suspending | Writing snapshot | `suspending` |
-| PAUSING / PAUSED | Pausing / Paused | | `paused` |
 | CRASHED | Crashed | `state_detail` | `crashed` |
 | DELETING / REVERTING | Deleting / Reverting | | `transition` |
 | UNAVAILABLE | State unavailable | `state_detail` | `unavailable` |
@@ -313,7 +319,8 @@ Gemini reply carries no tag.
   transition such as RESUMING can be missed between two polls
   (`cmd/conf-gateway/main.go`,
   `cmd/conf-gateway/internal/actorstate`).
-- Parked-request counts are summed across every ready `atenet-router` pod
+- Parked-request counts (`atenet_router_parking_active`) are scraped from
+  `:9090/metrics` and summed across every ready `atenet-router` pod
   (discovered from its EndpointSlices) on each telemetry tick, not read from
   a single router instance
   (`cmd/conf-gateway/internal/routerstatus`).
@@ -378,17 +385,17 @@ export PRESENTER_TOKEN="$(kubectl get secret conf-gateway -n ate-demo-conf -o js
 ## Bumping Substrate
 
 `go.mod` pins substrate at a release tag, or at a commit (a pseudo-version)
-between releases. `hack/deploy.sh` compares every cluster node's
-`ate.dev/substrate-version` label against that pin and refuses to deploy on a
-mismatch. Substrate stamps that label with `git describe --tags` of the
-checkout it was installed from, so install from a clean checkout of exactly
-the pinned version: a tag pin needs a label equal to the tag (`v0.4.0`), and
-a commit pin accepts the commit or the describe form after a tag
-(`v0.4.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
+between releases. `hack/deploy.sh` checks the cluster's running
+`ate-api-server` version (`/ko-app/ateapi --version`, falling back to node
+`ate.dev/substrate-version` labels) against that pin and refuses to deploy on
+a mismatch. Install from a clean checkout of exactly the pinned version: a
+tag pin needs a version equal to the tag (`v0.6.0`), and a commit pin accepts
+the commit or the describe form after a tag (`v0.6.0-5-g1a2b3c4d`). To move
+the pin, for example to the next release:
 
 ```bash
-go get -tool github.com/agent-substrate/substrate/cmd/kubectl-ate@<tag-or-commit>
-go get -tool github.com/agent-substrate/substrate/cmd/ateom-gvisor@<tag-or-commit>
+go get -tool go.ate.dev/substrate/cmd/kubectl-ate@<tag-or-commit>
+go get -tool go.ate.dev/substrate/cmd/ateworker-gvisor@<tag-or-commit>
 ```
 
 then copy substrate's `go` directive and its `k8s.io/apimachinery` `replace`
@@ -397,6 +404,36 @@ assertion in `hack/test-deploy.sh`. Check the release's
 ActorTemplate and WorkerPool API changes against `manifests/` (bump
 `DEMO_CONF_TEMPLATE_REVISION` if the template changes), then reinstall
 Substrate on the cluster from a checkout at the new pin.
+
+When upgrading an existing `v0.5.0` cluster to `v0.6.0` in place, tear down
+the demo first (`make undeploy` so `WorkerPool/conf-workers` and
+`ActorTemplate/conf-agent` are recreated with the `v0.6.0` schema), reset
+bundled Postgres and the `ate-api-authentication` ConfigMap in `ate-system`
+(`v0.6.0` removed `actorIdentityJWTProvider` from `authentication.yaml`),
+clear each node's v1 `/var/lib/ate/image-cache` directory (`v0.6.0` `atelet`
+requires layout version `2`), run `setup-gcp create bucket` and
+`setup-gcp create iam` from the `v0.6.0` checkout (which adds the
+`<BUCKET_NAME>-assets` bucket and `ate-snapshot-transfer` service account),
+and then deploy `ate-system` and the demo:
+
+```bash
+make undeploy
+kubectl -n ate-system delete sts/postgres pvc/data-postgres-0 cm/ate-api-authentication --ignore-not-found
+for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl -n ate-system run "clear-image-cache-${node##*-}" --rm -i --restart=Never --image=debian:13-slim \
+    --overrides='{"spec":{"nodeName":"'"${node}"'","containers":[{"name":"clean","image":"debian:13-slim","command":["rm","-rf","/var/lib/ate/image-cache"],"securityContext":{"runAsUser":0},"volumeMounts":[{"name":"ate","mountPath":"/var/lib/ate"}]}],"volumes":[{"name":"ate","hostPath":{"path":"/var/lib/ate"}}]}}'
+done
+(
+  cd "$SUBSTRATE_REPO"
+  git checkout v0.6.0
+  go run ./tools/setup-gcp create bucket
+  go run ./tools/setup-gcp create iam
+  SNAPSHOT_LOCATION="gs://${BUCKET_NAME}/snapshots/" \
+  SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer \
+    ./hack/install-ate.sh deploy ate-system --credential-provider='{"enabled":false}'
+)
+make deploy DEPLOY_FLAGS=--patch-router
+```
 
 ## Teardown
 

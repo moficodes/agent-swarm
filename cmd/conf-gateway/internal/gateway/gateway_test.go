@@ -243,16 +243,16 @@ func TestStageTelemetry(t *testing.T) {
 // TestTelemetry_ParkingFromAggregator checks that the gateway sums parking
 // across every router pod the aggregator's source reports, not just one.
 func TestTelemetry_ParkingFromAggregator(t *testing.T) {
-	statuszServer := func(parked int) *httptest.Server {
+	metricsServer := func(parked int) *httptest.Server {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"parking":{"active":%d}}`, parked)
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			fmt.Fprintf(w, "# TYPE atenet_router_parking_active gauge\natenet_router_parking_active %d\n", parked)
 		}))
 		t.Cleanup(srv.Close)
 		return srv
 	}
-	pod1 := statuszServer(1)
-	pod2 := statuszServer(2)
+	pod1 := metricsServer(1)
+	pod2 := metricsServer(2)
 
 	gw := newTestGateway(t, "http://localhost:8000",
 		gateway.WithStatusInterval(5*time.Millisecond),

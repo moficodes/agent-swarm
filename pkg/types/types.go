@@ -111,8 +111,6 @@ const (
 	StateRunning     SubstrateState = "RUNNING"
 	StateSuspending  SubstrateState = "SUSPENDING"
 	StateSuspended   SubstrateState = "SUSPENDED"
-	StatePausing     SubstrateState = "PAUSING"
-	StatePaused      SubstrateState = "PAUSED"
 	StateCrashed     SubstrateState = "CRASHED"
 	StateDeleting    SubstrateState = "DELETING"
 	StateReverting   SubstrateState = "REVERTING"

@@ -42,7 +42,7 @@ verify:
 .PHONY: build
 build:
 	$(GO) build -o $(BINDIR)/ ./cmd/...
-	$(GO) build -o $(BINDIR)/kubectl-ate github.com/agent-substrate/substrate/cmd/kubectl-ate
+	$(GO) build -o $(BINDIR)/kubectl-ate go.ate.dev/substrate/cmd/kubectl-ate
 	docker buildx build --platform=linux/amd64 -f build/gateway.Dockerfile -t agent-swarm/conf-gateway:dev .
 
 # Local mode: two actor slots on this machine and mock model replies.

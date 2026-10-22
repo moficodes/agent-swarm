@@ -22,8 +22,6 @@
     RUNNING: { label: 'Running', sub: '', cls: 'running' },
     SUSPENDING: { label: 'Suspending', sub: 'Writing snapshot', cls: 'suspending' },
     SUSPENDED: { label: 'Suspended', sub: 'Snapshot saved', cls: 'suspended' },
-    PAUSING: { label: 'Pausing', sub: '', cls: 'paused' },
-    PAUSED: { label: 'Paused', sub: '', cls: 'paused' },
     CRASHED: { label: 'Crashed', sub: '', cls: 'crashed' },
     DELETING: { label: 'Deleting', sub: '', cls: 'transition' },
     REVERTING: { label: 'Reverting', sub: '', cls: 'transition' },

@@ -29,17 +29,18 @@ source "${ROOT}/hack/create-cluster.sh"
 
 fail=0
 
-# expect checks conf_router_flags_ok against ARGS_JSON and an
-# optional GRACE_SECONDS (default 120, i.e. already acceptable, so callers
-# that only care about the duration flags don't have to think about grace).
+# expect checks conf_router_flags_ok against ARGS_JSON, an optional
+# GRACE_SECONDS (default 120, i.e. already acceptable, so callers that only
+# care about the duration flags don't have to think about grace), and an
+# optional SPIFFE_ID (default empty).
 expect() {
   # ${3-120}, not ${3:-120}: an explicitly empty third argument (used to
   # test an unreadable grace period) must stay empty, not fall back to the
   # default the way a merely-omitted argument does.
-  local want="$1" args="$2" grace="${3-120}" got=0
-  conf_router_flags_ok "${args}" "${grace}" >/dev/null || got=$?
+  local want="$1" args="$2" grace="${3-120}" spiffe="${4-}" got=0
+  conf_router_flags_ok "${args}" "${grace}" "${spiffe}" >/dev/null || got=$?
   if [[ "${want}" == ok && "${got}" != 0 ]] || [[ "${want}" == bad && "${got}" == 0 ]]; then
-    echo "FAIL: ${want} for ${args} (grace=${grace})" >&2
+    echo "FAIL: ${want} for ${args} (grace=${grace} spiffe=${spiffe})" >&2
     fail=1
   fi
 }
@@ -71,6 +72,14 @@ expect bad '[]'
 expect ok  '["--parked-request-budget=90s","--route-timeout=5m"]' 120
 expect bad '["--parked-request-budget=90s","--route-timeout=5m"]' 119
 expect bad '["--parked-request-budget=90s","--route-timeout=5m"]' ""
+
+# --ingress-allowed-spiffe-ids must include DEMO_CONF_ROUTER_SPIFFE_ID when
+# checked (both comma-separated and repeated forms are accepted).
+expect bad '["--parked-request-budget=90s","--route-timeout=5m"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}"
+expect ok  '["--parked-request-budget=90s","--route-timeout=5m","--ingress-allowed-spiffe-ids='"${DEMO_CONF_ROUTER_SPIFFE_ID}"'"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}"
+expect ok  '["--parked-request-budget=90s","--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/other/sa/x,'"${DEMO_CONF_ROUTER_SPIFFE_ID}"'"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}"
+expect ok  '["--parked-request-budget=90s","--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/other/sa/x","--ingress-allowed-spiffe-ids","'"${DEMO_CONF_ROUTER_SPIFFE_ID}"'"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}"
+expect bad '["--parked-request-budget=90s","--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/other/sa/x"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}"
 
 # expect_grace checks conf_grace_ok directly.
 expect_grace() {
@@ -282,7 +291,7 @@ if ! conf_render manifests/gateway.yaml.tmpl | grep -A1 -F "name: ACTORS_PER_WOR
   fail=1
 fi
 pool_yaml="$(DEMO_CONF_WORKER_REPLICAS=4 conf_render manifests/workerpool.yaml.tmpl)"
-for want in "replicas: 4" "cpu: 500m" "memory: 2304Mi"; do
+for want in 'ate.dev/api-access: "true"' "replicas: 4" "sandboxClasses:" "- name: gvisor" "cpu: 500m" "memory: 2304Mi"; do
   if ! grep -qF -- "${want}" <<<"${pool_yaml}"; then
     echo "FAIL: rendered workerpool manifest lacks ${want}" >&2
     fail=1
@@ -442,10 +451,28 @@ if [[ "${out}" != *"Target cluster context: my-ctx"* ]]; then
 fi
 
 # substrate_pin reads the pinned tag (or commit) from go.mod.
-if [[ "$(substrate_pin)" != "v0.4.0" ]]; then
-  echo "FAIL: substrate_pin = '$(substrate_pin)', want v0.4.0" >&2
+if [[ "$(substrate_pin)" != "v0.6.0" ]]; then
+  echo "FAIL: substrate_pin = '$(substrate_pin)', want v0.6.0" >&2
   fail=1
 fi
+
+# expect_ver_out checks substrate_version_from_output against ateapi --version strings.
+expect_ver_out() {
+  local want="$1" input="$2" got
+  got="$(substrate_version_from_output "${input}")"
+  if [[ "${got}" != "${want}" ]]; then
+    echo "FAIL: substrate_version_from_output '${input}' = '${got}', want '${want}'" >&2
+    fail=1
+  fi
+}
+expect_ver_out v0.6.0 "go.ate.dev/substrate.Version=v0.6.0 commit=d3f2363590a11b2f50489971985ba033b4c9eff7 built=2026-10-21T20:00:00Z linux/amd64"
+expect_ver_out v0.6.0-dirty "go.ate.dev/substrate.Version=v0.6.0+dirty commit=d3f2363590a11b2f50489971985ba033b4c9eff7-dirty built=2026-10-21T20:00:00Z linux/amd64"
+expect_ver_out v0.5.0 "github.com/agent-substrate/substrate.Version=v0.5.0 commit=e8d40c33f96f4b7a4984bfea7334a36ab5b45b7b built=2026-10-14T21:12:11Z linux/amd64"
+expect_ver_out v0.5.0-dirty "github.com/agent-substrate/substrate.Version=v0.5.0+dirty commit=e8d40c33f96f4b7a4984bfea7334a36ab5b45b7b-dirty built=2026-10-14T21:12:11Z linux/amd64"
+expect_ver_out e8d40c33f96f "github.com/agent-substrate/substrate.Version=v0.5.1-0.20261015000000-e8d40c33f96f commit=e8d40c33f96f4b7a4984bfea7334a36ab5b45b7b built=2026-10-15T00:00:00Z linux/amd64"
+expect_ver_out e8d40c33f96f-dirty "github.com/agent-substrate/substrate.Version=v0.5.1-0.20261015000000-e8d40c33f96f+dirty commit=e8d40c33f96f4b7a4984bfea7334a36ab5b45b7b-dirty built=2026-10-15T00:00:00Z linux/amd64"
+expect_ver_out v0.4.0 "v0.4.0 commit=756c2a53741121e728f4cc3066c8a19e575b4919 built=2026-10-07T22:53:25Z linux/amd64"
+expect_ver_out "" ""
 
 # expect_pin checks substrate_pin's parsing of go.mod versions, with go
 # stubbed to report VERSION: a pseudo-version yields its commit, whether it
@@ -465,6 +492,8 @@ expect_pin v0.2.0 v0.2.0
 expect_pin v0.3.0-rc.1 v0.3.0-rc.1
 expect_pin v0.3.0 v0.3.0
 expect_pin v0.4.0 v0.4.0
+expect_pin v0.5.0 v0.5.0
+expect_pin v0.6.0 v0.6.0
 
 # cc_pick_version takes the newest release of the minor version from gcloud's
 # newest-first list, and fails when the channel has none.

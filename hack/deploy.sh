@@ -30,7 +30,10 @@ DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
-DEMO_CONF_TEMPLATE_REVISION=4
+DEMO_CONF_TEMPLATE_REVISION=6
+# DEMO_CONF_ROUTER_SPIFFE_ID is the pod identity conf-gateway presents to
+# atenet-router's mTLS ingress (:443).
+DEMO_CONF_ROUTER_SPIFFE_ID="spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway"
 
 # conf_seconds converts a Go duration made of h/m/s parts to
 # whole seconds, or prints nothing if it cannot parse it.
@@ -76,14 +79,27 @@ conf_grace_ok() {
   [[ "${grace}" =~ ^[0-9]+$ ]] && ((10#${grace} >= 120))
 }
 
+# conf_router_allows_spiffe returns 0 if ARGS_JSON includes SPIFFE_ID in
+# any --ingress-allowed-spiffe-ids flag (which pflag parses as a
+# comma-separated StringSlice that may be repeated).
+conf_router_allows_spiffe() {
+  local args_json="$1" spiffe_id="$2"
+  jq -e --arg f "--ingress-allowed-spiffe-ids" --arg id "${spiffe_id}" '
+    . as $a | [range(0; length)] | map(
+      if ($a[.] | startswith($f + "=")) then ($a[.] | ltrimstr($f + "="))
+      elif $a[.] == $f then ($a[. + 1] // "")
+      else empty end
+    ) | map(split(",")[]) | index($id) != null' <<<"${args_json}" >/dev/null
+}
+
 # conf_router_flags_ok prints the changes atenet-router needs for
-# long LLM turns and returns 1 if any are missing or too low. It also
-# requires GRACE_SECONDS (see conf_grace_ok) to be at least 120,
-# but only once the duration flags are themselves acceptable: a low grace
-# period is only unsafe once --parked-request-budget is raised to 60s, so
-# there is nothing to say about it before that.
+# long LLM turns and conf-gateway mTLS ingress, and returns 1 if any are
+# missing or too low. It also requires GRACE_SECONDS (see conf_grace_ok) to
+# be at least 120, but only once the duration flags are themselves
+# acceptable: a low grace period is only unsafe once --parked-request-budget
+# is raised to 60s, so there is nothing to say about it before that.
 conf_router_flags_ok() {
-  local args_json="$1" grace="${2:-}" missing=() v s
+  local args_json="$1" grace="${2:-}" spiffe="${3-${DEMO_CONF_ROUTER_SPIFFE_ID}}" missing=() v s
   v="$(conf_flag_value "${args_json}" --parked-request-budget)"
   s="$(conf_seconds "${v:-5s}")"
   if [[ -z "${s}" || "${s}" -lt 60 ]]; then
@@ -98,6 +114,9 @@ conf_router_flags_ok() {
   fi
   if ((${#missing[@]} == 0)) && ! conf_grace_ok "${grace}"; then
     missing+=("terminationGracePeriodSeconds=120")
+  fi
+  if [[ -n "${spiffe}" ]] && ! conf_router_allows_spiffe "${args_json}" "${spiffe}"; then
+    missing+=("--ingress-allowed-spiffe-ids=${spiffe}")
   fi
   if ((${#missing[@]} > 0)); then
     printf '%s\n' "${missing[@]}"
@@ -343,16 +362,16 @@ conf_check_template() {
 
 # conf_check_substrate requires Substrate on the cluster at the version
 # pinned in go.mod, installing it from SUBSTRATE_REPO if it is absent.
-# DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true also accepts a cluster labeled
-# "<pin>-dirty" (see substrate_labels_match).
+# DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true also accepts a cluster built from a
+# "<pin>-dirty" checkout (see substrate_labels_match).
 conf_check_substrate() {
-  local pin labels allow_dirty="${DEMO_CONF_ALLOW_DIRTY_SUBSTRATE:-false}"
+  local pin labels ver_out allow_dirty="${DEMO_CONF_ALLOW_DIRTY_SUBSTRATE:-false}"
   pin="$(substrate_pin)" || { echo "error: cannot read the substrate pin from go.mod" >&2; exit 1; }
   if ! run_kubectl get namespace ate-system >/dev/null 2>&1; then
     if [[ -z "${SUBSTRATE_REPO:-}" ]]; then
       echo "error: Substrate is not installed (no ate-system namespace)." >&2
       echo "Install it from a clean substrate checkout at ${pin}:" >&2
-      echo "  hack/install-ate.sh --deploy-ate-system --credential-provider='{\"enabled\":false}'" >&2
+      echo "  SNAPSHOT_LOCATION=\"gs://\${BUCKET_NAME}/snapshots/\" SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer hack/install-ate.sh deploy ate-system --credential-provider='{\"enabled\":false}'" >&2
       echo "or set SUBSTRATE_REPO to that checkout and run this again." >&2
       exit 1
     fi
@@ -368,28 +387,32 @@ conf_check_substrate() {
     fi
     if ! substrate_repo_clean "${SUBSTRATE_REPO}"; then
       echo "error: SUBSTRATE_REPO has uncommitted changes." >&2
-      echo "install-ate.sh would stamp nodes ate.dev/substrate-version=${pin}-dirty, which the check below refuses by default." >&2
+      echo "install-ate.sh would build ate-api-server as ${pin}-dirty, which the check below refuses by default." >&2
       echo "Commit or stash them, or set DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true to accept a dirty install." >&2
       exit 1
     fi
     log_step "Installing Substrate from ${SUBSTRATE_REPO}..."
-    (cd "${SUBSTRATE_REPO}" && hack/install-ate.sh --deploy-ate-system --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}")
+    (cd "${SUBSTRATE_REPO}" && SNAPSHOT_LOCATION="${SNAPSHOT_LOCATION:-gs://${BUCKET_NAME}/snapshots/}" SNAPSHOT_TRANSFER_GSA_NAME="${SNAPSHOT_TRANSFER_GSA_NAME:-ate-snapshot-transfer}" hack/install-ate.sh deploy ate-system --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}")
   fi
-  labels="$(run_kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.ate\.dev/substrate-version}{"\n"}{end}')"
+  ver_out="$(run_kubectl exec -n ate-system deployment/ate-api-server -c ate-api-server -- /ko-app/ateapi --version 2>/dev/null || true)"
+  labels="$(substrate_version_from_output "${ver_out}")"
+  if [[ -z "${labels}" ]]; then
+    labels="$(run_kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.ate\.dev/substrate-version}{"\n"}{end}')"
+  fi
   if ! substrate_labels_match "${pin}" "${labels}" "${allow_dirty}"; then
     case "$(substrate_label_mismatch_kind "${pin}" "${labels}")" in
       unlabeled)
-        echo "error: no node carries ate.dev/substrate-version; is Substrate installed at a version that labels nodes?" >&2
+        echo "error: cannot determine the cluster's Substrate version (ate-api-server is not responding in ate-system); is Substrate installed and running?" >&2
         ;;
       dirty)
-        echo "error: the cluster's nodes run the pinned ${pin}, but Substrate was installed from a modified checkout ($(sort -u <<<"${labels}" | tr '\n' ' ')):" >&2
+        echo "error: the cluster runs the pinned ${pin}, but Substrate was installed from a modified checkout ($(sort -u <<<"${labels}" | tr '\n' ' ')):" >&2
         echo "Reinstall Substrate from a clean checkout at ${pin}, or set DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true to accept it." >&2
         ;;
       *)
-        echo "error: the cluster's nodes run Substrate $(sort -u <<<"${labels}" | tr '\n' ' ')but go.mod pins ${pin}." >&2
+        echo "error: the cluster runs Substrate $(sort -u <<<"${labels}" | tr '\n' ' ')but go.mod pins ${pin}." >&2
         echo "Bump the pin to the cluster's tag or commit:" >&2
         echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/kubectl-ate@<tag-or-commit>" >&2
-        echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/ateom-gvisor@<tag-or-commit>" >&2
+        echo "  go get -tool ${SUBSTRATE_MODULE}/cmd/ateworker-gvisor@<tag-or-commit>" >&2
         echo "  then copy substrate's go directive and k8s.io/apimachinery replace into go.mod and run go mod tidy." >&2
         ;;
     esac

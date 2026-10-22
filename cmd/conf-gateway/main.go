@@ -39,15 +39,18 @@ import (
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/routerstatus"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/routertls"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/workerscale"
 )
 
 // routerStatusNamespace and routerStatusService identify the atenet-router
-// Service whose EndpointSlices are read for router pod addresses.
+// Service whose EndpointSlices are read for router pod addresses. Port 9090 is
+// the Prometheus metrics port admitted by ate-system's observability
+// NetworkPolicy (whereas /statusz on 4040 is loopback-only in v0.5.0+).
 const (
 	routerStatusNamespace = "ate-system"
 	routerStatusService   = "atenet-router"
-	routerStatusPort      = 4040
+	routerStatusPort      = 9090
 )
 
 // workerPoolNamespace and workerPoolName identify the WorkerPool, and the
@@ -73,6 +76,11 @@ type Config struct {
 	// aggregation: "static" polls StatusURL alone, "endpointslices" discovers
 	// every ready atenet-router pod from Kubernetes EndpointSlices.
 	RouterStatusDiscovery string
+
+	// RouterCAFile and RouterCredBundle configure mTLS for in-cluster
+	// requests to atenet-router. Both empty uses http.DefaultClient.
+	RouterCAFile     string
+	RouterCredBundle string
 
 	// ATEAPIEndpoint is passed to kubectl-ate; empty uses its own default.
 	ATEAPIEndpoint string
@@ -144,6 +152,8 @@ func LoadConfig() Config {
 		PresenterKey:          presenterKey,
 		Atespace:              atespace,
 		RouterStatusDiscovery: routerStatusDiscovery,
+		RouterCAFile:          os.Getenv("ROUTER_CA_FILE"),
+		RouterCredBundle:      os.Getenv("ROUTER_CRED_BUNDLE"),
 		ATEAPIEndpoint:        os.Getenv("ATEAPI_ENDPOINT"),
 		KubectlATE:            kubectlATE,
 		StatePollInterval:     envDuration("STATE_POLL_INTERVAL", time.Second),
@@ -237,6 +247,16 @@ func newModelProxy(ctx context.Context, cfg Config) (*modelproxy.Proxy, error) {
 	return modelproxy.New(pc)
 }
 
+// newRouterHTTPClient builds the HTTP client for atenet-router. When neither
+// RouterCAFile nor RouterCredBundle is set (for example in local mode), it
+// returns http.DefaultClient; otherwise both must be set for mTLS.
+func newRouterHTTPClient(cfg Config) (*http.Client, error) {
+	if cfg.RouterCAFile == "" && cfg.RouterCredBundle == "" {
+		return http.DefaultClient, nil
+	}
+	return routertls.NewHTTPClient(cfg.RouterCAFile, cfg.RouterCredBundle)
+}
+
 // newRouterStatusSource builds the router pod source cfg.RouterStatusDiscovery
 // selects. "static" polls cfg.StatusURL alone; "endpointslices" discovers
 // every ready atenet-router pod from the in-cluster Kubernetes API. Any other
@@ -297,6 +317,11 @@ func main() {
 		log.Printf("VERTEX_PROJECT is unset; model calls are disabled and actors reply with the mock engine.")
 	}
 
+	routerHTTPClient, err := newRouterHTTPClient(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	routerStatusSrc, err := newRouterStatusSource(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -310,6 +335,7 @@ func main() {
 		gateway.WithMaxActors(cfg.ActorCount),
 		gateway.WithSeatsPerWorker(cfg.ActorsPerWorker),
 		gateway.WithSuspendAfter(cfg.SuspendAfter),
+		gateway.WithHTTPClient(routerHTTPClient),
 		gateway.WithUsage(proxy),
 		gateway.WithModel(proxy),
 		gateway.WithMockLLM(cfg.MockLLM || !proxy.Enabled()),

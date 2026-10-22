@@ -37,10 +37,34 @@ func statusz(t *testing.T, parked int) string {
 	return srv.URL
 }
 
+func metricsServer(t *testing.T, body string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
 func TestAggregator_SumsAcrossPods(t *testing.T) {
 	a := routerstatus.NewAggregator(routerstatus.StaticTargets{statusz(t, 2), statusz(t, 3)}, http.DefaultClient)
 	got := a.Fetch(context.Background())
 	if got != (routerstatus.Snapshot{Parked: 5, Available: true, Targets: 2}) {
+		t.Errorf("Fetch = %+v", got)
+	}
+}
+
+func TestAggregator_SumsPrometheusMetricsAcrossPods(t *testing.T) {
+	pod1 := metricsServer(t, "# HELP atenet_router_parking_active parked\n# TYPE atenet_router_parking_active gauge\natenet_router_parking_active{otel_scope_name=\"atenet-router\"} 3\n")
+	// A freshly started router pod exports Go/OTel metrics before any request is parked.
+	pod2 := metricsServer(t, "# HELP target_info Target metadata\n# TYPE target_info gauge\ntarget_info{service_name=\"atenet-router\"} 1\n")
+	a := routerstatus.NewAggregator(routerstatus.StaticTargets{pod1, pod2}, http.DefaultClient)
+	got := a.Fetch(context.Background())
+	if got != (routerstatus.Snapshot{Parked: 3, Available: true, Targets: 2}) {
 		t.Errorf("Fetch = %+v", got)
 	}
 }

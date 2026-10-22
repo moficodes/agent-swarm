@@ -53,6 +53,55 @@ func TestParseActorList_Empty(t *testing.T) {
 	}
 }
 
+func TestParseActorList_SnapshotGenerations(t *testing.T) {
+	const raw = `{
+  "actors": [
+    {
+      "metadata": {"name": "attendee-07"},
+      "status": {
+        "state": "ACTOR_STATE_SUSPENDING",
+        "snapshots": [
+          {
+            "generation": 1,
+            "durableSnapshot": {
+              "status": "SNAPSHOT_STORAGE_STATUS_COMPLETED",
+              "object": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-07/1"}
+            }
+          },
+          {
+            "generation": 2,
+            "durableSnapshot": {
+              "status": "SNAPSHOT_STORAGE_STATUS_COMPLETED",
+              "object": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-07/2"}
+            }
+          },
+          {
+            "generation": 3,
+            "durableSnapshot": {
+              "status": "SNAPSHOT_STORAGE_STATUS_PENDING",
+              "object": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-07/3"}
+            }
+          }
+        ]
+      }
+    }
+  ]
+}`
+	got, err := actorstate.ParseActorList([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []actorstate.Status{{
+		Name:                  "attendee-07",
+		State:                 types.StateSuspending,
+		SnapshotURI:           "gs://conf-snapshots/ate-demo-conf/attendee-07/2",
+		InProgressSnapshotURI: "gs://conf-snapshots/ate-demo-conf/attendee-07/3",
+	}}
+	if !slices.Equal(got, want) {
+		t.Errorf("ParseActorList =\n%+v\nwant\n%+v", got, want)
+	}
+}
+
 func TestParseActorList_RejectsGarbage(t *testing.T) {
 	if _, err := actorstate.ParseActorList([]byte("Error: unauthorized")); err == nil {
 		t.Error("ParseActorList accepted non-JSON")

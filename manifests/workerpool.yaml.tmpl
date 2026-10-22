@@ -16,6 +16,8 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: ate-demo-conf
+  labels:
+    ate.dev/api-access: "true"
 
 ---
 
@@ -30,9 +32,11 @@ spec:
   # hack/deploy.sh keeps the size the conf-workers HPA chose on a re-deploy
   # (manifests/autoscaling.yaml.tmpl).
   replicas: ${WORKER_REPLICAS}
-  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  workerImage: ko://go.ate.dev/substrate/cmd/ateworker-gvisor
+  sandboxClasses:
+  - name: gvisor
   template:
-    # Requests let the scheduler spread workers across nodes. ateom reports
+    # Requests let the scheduler spread workers across nodes. ateworker reports
     # its limits as the worker's capacity and hosts actors until it runs
     # out. hack/deploy.sh sets the CPU limit to DEMO_CONF_ACTORS_PER_WORKER
     # CPUs plus 500m, which fits exactly that many 1-CPU actors and not one
