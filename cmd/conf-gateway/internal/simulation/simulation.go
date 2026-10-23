@@ -274,6 +274,7 @@ func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, o
 func (s *SimulationRunner) sendChat(ctx context.Context, attendeeID, token, prompt string) (*types.ChatMessage, error) {
 	chatReq := types.ChatRequest{
 		Message: prompt,
+		Mock:    true,
 	}
 	bodyBytes, err := json.Marshal(chatReq)
 	if err != nil {

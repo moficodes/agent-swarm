@@ -377,6 +377,86 @@ func TestMockEngine_GenerateTurn(t *testing.T) {
 	}
 }
 
+func TestMockEngine_GenerateTurn_TailoredSimulationPrompts(t *testing.T) {
+	mockEngine := engine.NewMockEngine()
+	executor := engine.NewSandboxExecutor(t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cases := []struct {
+		prompt      string
+		wantSummary string
+		wantInCode  string
+		wantInOut   string
+	}{
+		{
+			prompt:      "Run anomaly analysis on recent telemetry spikes",
+			wantSummary: "Execute Telemetry Outlier Analysis & ASCII Plotting",
+			wantInCode:  "detect_anomalies",
+			wantInOut:   "[SANDBOX] Mean:",
+		},
+		{
+			prompt:      "Execute security audit on container runtime",
+			wantSummary: "Audit gVisor Sandbox Privileges & Capabilities",
+			wantInCode:  "os.getuid",
+			wantInOut:   "[SANDBOX] Security Audit",
+		},
+		{
+			prompt:      "Run benchmark sandbox test",
+			wantSummary: "Run Sandbox CPU & Allocation Micro-Benchmark",
+			wantInCode:  "time.perf_counter",
+			wantInOut:   "[SANDBOX] Benchmark",
+		},
+		{
+			prompt:      "Analyze conference traffic patterns and resource usage",
+			wantSummary: "Analyze Conference Request Traffic & Seat Utilization",
+			wantInCode:  "statistics",
+			wantInOut:   "[SANDBOX] Traffic",
+		},
+		{
+			prompt:      "Profile memory consumption across active worker pods",
+			wantSummary: "Profile Sandbox Memory Footprint & RSS",
+			wantInCode:  "tracemalloc",
+			wantInOut:   "[SANDBOX] Memory Profile",
+		},
+		{
+			prompt:      "Verify isolation boundaries for tenant workloads",
+			wantSummary: "Verify Tenant Namespace & Mount Isolation",
+			wantInCode:  "os.environ",
+			wantInOut:   "[SANDBOX] Isolation",
+		},
+	}
+
+	seenSummaries := make(map[string]bool)
+	for _, tc := range cases {
+		msg := mockEngine.GenerateTurn(tc.prompt)
+		if msg == nil || msg.Approval == nil {
+			t.Fatalf("prompt %q: expected non-nil message with approval", tc.prompt)
+		}
+		if msg.Approval.Summary != tc.wantSummary {
+			t.Errorf("prompt %q: summary = %q, want %q", tc.prompt, msg.Approval.Summary, tc.wantSummary)
+		}
+		if !strings.Contains(msg.Approval.Code, tc.wantInCode) {
+			t.Errorf("prompt %q: code missing %q:\n%s", tc.prompt, tc.wantInCode, msg.Approval.Code)
+		}
+		seenSummaries[msg.Approval.Summary] = true
+
+		res, err := executor.Execute(ctx, msg.Approval.Language, msg.Approval.Code)
+		if err != nil {
+			t.Fatalf("prompt %q: execution error: %v", tc.prompt, err)
+		}
+		if res == nil || res.ExitCode != 0 {
+			t.Fatalf("prompt %q: expected exit 0, got %+v", tc.prompt, res)
+		}
+		if !strings.Contains(res.Stdout, tc.wantInOut) {
+			t.Errorf("prompt %q: stdout = %q, want substring %q", tc.prompt, res.Stdout, tc.wantInOut)
+		}
+	}
+	if len(seenSummaries) != len(cases) {
+		t.Errorf("expected %d distinct summaries, got %d", len(cases), len(seenSummaries))
+	}
+}
+
 func TestSandboxExecutor_TimeoutKillsProcessGroup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()

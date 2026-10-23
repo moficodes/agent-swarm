@@ -800,6 +800,45 @@ func TestChat_ModelFailureFallsBackToLabeledMock(t *testing.T) {
 	}
 }
 
+func TestChat_PerRequestMockSkipsGemini(t *testing.T) {
+	fake := geminitest.New(t, geminitest.TextResponse("live gemini reply"))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
+
+	// 1. A simulated (Mock: true) chat request must reply directly with SourceMock and make 0 Gemini calls.
+	mockBody, _ := json.Marshal(types.ChatRequest{
+		Message: "Execute security audit on container runtime",
+		Mock:    true,
+	})
+	mockReq := httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewReader(mockBody))
+	mockReq.Header.Set(types.ModelKeyHeader, "k.mac")
+	rec := serve(s.Handler(), mockReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mock chat status = %d, body %s", rec.Code, rec.Body)
+	}
+	var mockMsg types.ChatMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &mockMsg); err != nil {
+		t.Fatalf("failed to decode mock chat response: %v", err)
+	}
+	if mockMsg.Source != types.SourceMock {
+		t.Errorf("mockMsg.Source = %q, want %q", mockMsg.Source, types.SourceMock)
+	}
+	if mockMsg.Approval == nil || mockMsg.Approval.Summary != "Audit gVisor Sandbox Privileges & Capabilities" {
+		t.Errorf("unexpected mock approval: %+v", mockMsg.Approval)
+	}
+	if got := len(fake.Requests()); got != 0 {
+		t.Fatalf("expected 0 Gemini calls for Mock: true turn, got %d", got)
+	}
+
+	// 2. A normal (/chat, Mock: false) request on the same server still calls Gemini.
+	liveMsg := postChat(t, s.Handler(), fake.URL, "k.mac", "Hello live Gemini")
+	if liveMsg.Source != types.SourceGemini || liveMsg.Content != "live gemini reply" {
+		t.Errorf("live reply = %q (%s), want live gemini reply", liveMsg.Content, liveMsg.Source)
+	}
+	if got := len(fake.Requests()); got != 1 {
+		t.Errorf("expected 1 Gemini call after live turn, got %d", got)
+	}
+}
+
 func TestChat_NoProxyConfiguredUsesLabeledMock(t *testing.T) {
 	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(gemini.Config{}))
 	if msg := postChat(t, s.Handler(), "", "", "hi"); msg.Source != types.SourceMock {

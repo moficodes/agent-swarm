@@ -378,3 +378,41 @@ func TestContract_NewSessionClearsReassignedSlot(t *testing.T) {
 		t.Errorf("gateway still shows the previous visitor's chat: %s", rec.Body)
 	}
 }
+
+func TestContract_SimulationUsesMockEngineWhileChatUsesGemini(t *testing.T) {
+	env := newContractEnv(t, geminitest.New(t, geminitest.TextResponse("live gemini answer")))
+
+	// 1. Simulated turn (Mock: true) uses MockEngine (0 Gemini calls, SourceMock) and still executes in sandbox on approve.
+	simMsg := decodeMsg(t, env.post(t, "attendee-01", "/api/chat", types.ChatRequest{
+		Message: "Run benchmark sandbox test",
+		Mock:    true,
+	}))
+	if simMsg.Source != types.SourceMock {
+		t.Fatalf("simMsg.Source = %q, want %q", simMsg.Source, types.SourceMock)
+	}
+	if simMsg.Approval == nil || simMsg.Approval.Summary != "Run Sandbox CPU & Allocation Micro-Benchmark" {
+		t.Fatalf("unexpected simulated approval: %+v", simMsg.Approval)
+	}
+	if got := len(env.vertex.Requests()); got != 0 {
+		t.Fatalf("expected 0 Vertex calls for simulated turn, got %d", got)
+	}
+
+	execMsg := decodeMsg(t, env.post(t, "attendee-01", "/api/approve", types.ApprovalResponse{
+		ApprovalID: simMsg.Approval.ApprovalID,
+		Decision:   types.DecisionApprove,
+	}))
+	if execMsg.Execution == nil || execMsg.Execution.ExitCode != 0 || !strings.Contains(execMsg.Execution.Stdout, "[SANDBOX] Benchmark") {
+		t.Fatalf("expected sandbox execution for simulated approval, got %+v", execMsg.Execution)
+	}
+
+	// 2. Live /chat turn (Mock: false) calls Gemini through the gateway.
+	liveMsg := decodeMsg(t, env.post(t, "attendee-02", "/api/chat", types.ChatRequest{
+		Message: "What is my sandbox environment?",
+	}))
+	if liveMsg.Source != types.SourceGemini || liveMsg.Content != "live gemini answer" {
+		t.Fatalf("liveMsg = %q (%s), want live gemini answer", liveMsg.Content, liveMsg.Source)
+	}
+	if got := len(env.vertex.Requests()); got != 1 {
+		t.Fatalf("expected 1 Vertex call after live /chat turn, got %d", got)
+	}
+}

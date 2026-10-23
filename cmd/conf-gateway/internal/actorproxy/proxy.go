@@ -34,6 +34,7 @@ import (
 )
 
 type attendeeContextKey struct{}
+type mockContextKey struct{}
 
 // WithAttendee returns r marked as a request from attendee, so the proxy
 // routes it to that attendee's actor.
@@ -41,9 +42,20 @@ func WithAttendee(r *http.Request, attendee string) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), attendeeContextKey{}, attendee))
 }
 
+// WithMock returns r marked as a simulated mock turn so the proxy never
+// forwards model calls upstream for it.
+func WithMock(r *http.Request, mock bool) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), mockContextKey{}, mock))
+}
+
 func attendeeOf(r *http.Request) string {
 	attendeeID, _ := r.Context().Value(attendeeContextKey{}).(string)
 	return attendeeID
+}
+
+func mockOf(r *http.Request) bool {
+	mock, _ := r.Context().Value(mockContextKey{}).(bool)
+	return mock
 }
 
 // Hooks report the outcome of each proxied attendee request. Each runs only
@@ -220,7 +232,7 @@ func (p *Proxy) relay(resp *http.Response, attendee string) error {
 
 		ctx := resp.Request.Context()
 		res := types.ModelResult{CallID: step.ModelCall.CallID, Status: http.StatusServiceUnavailable}
-		if p.model != nil {
+		if p.model != nil && !mockOf(resp.Request) {
 			res = p.model.Call(ctx, attendee, *step.ModelCall)
 		}
 		next, err := p.postResult(ctx, attendee, res)

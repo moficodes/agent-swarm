@@ -37,6 +37,13 @@ func (f *fakeTarget) Handler() http.Handler {
 			http.Error(w, "bad token", http.StatusUnauthorized)
 			return
 		}
+		if r.URL.Path == "/api/chat" {
+			var req types.ChatRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !req.Mock {
+				http.Error(w, "expected mock: true chat request", http.StatusBadRequest)
+				return
+			}
+		}
 		select {
 		case f.chats <- r.Header.Get("X-Attendee-ID"):
 		default:
@@ -55,8 +62,15 @@ func TestRunner_StartDrivesTargetAndStop(t *testing.T) {
 		t.Fatalf("Status = %v, %d; want true, 2", running, count)
 	}
 	seen := map[string]bool{}
+	deadline := time.After(2 * time.Second)
 	for len(seen) < 2 {
-		seen[<-f.chats] = true
+		select {
+		case id := <-f.chats:
+			seen[id] = true
+		case <-deadline:
+			r.Stop()
+			t.Fatalf("timed out waiting for chats; seen=%v", seen)
+		}
 	}
 	if !seen["attendee-01"] || !seen["attendee-02"] {
 		t.Fatalf("chats came from %v, want attendee-01 and attendee-02", seen)

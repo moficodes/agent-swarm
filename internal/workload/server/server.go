@@ -246,12 +246,13 @@ func (s *WorkloadServer) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// The turn outlives this request: its model calls come back through
 	// handleModelResult.
+	useMock := req.Mock
 	t.Run(context.Background(), func(ctx context.Context) *types.ChatMessage {
-		assistantMsg := s.reply(ctx, historyCopy, req.Message)
+		assistantMsg := s.reply(ctx, historyCopy, req.Message, useMock)
 		s.mu.Lock()
 		if assistantMsg.Approval != nil {
 			s.pendingApproval = assistantMsg.Approval
-			s.pendingFix = false
+			s.pendingFix = assistantMsg.Source != types.SourceGemini
 		}
 		s.history = append(s.history, *assistantMsg)
 		s.turn = nil
@@ -308,8 +309,8 @@ func writeStep(w http.ResponseWriter, r *http.Request, t *relay.Turn) {
 // calls included.
 const chatTimeout = 60 * time.Second
 
-func (s *WorkloadServer) reply(ctx context.Context, history []types.ChatMessage, prompt string) *types.ChatMessage {
-	if s.forceMock || s.gemini == nil {
+func (s *WorkloadServer) reply(ctx context.Context, history []types.ChatMessage, prompt string, useMock bool) *types.ChatMessage {
+	if useMock || s.forceMock || s.gemini == nil {
 		msg := s.mockEngine.GenerateTurn(prompt)
 		msg.Source = types.SourceMock
 		return msg

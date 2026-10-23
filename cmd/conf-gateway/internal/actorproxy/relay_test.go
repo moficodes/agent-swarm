@@ -163,6 +163,26 @@ func TestProxy_WithoutModelCallerRelaysUnavailable(t *testing.T) {
 	}
 }
 
+func TestProxy_WithMockSkipsModelCaller(t *testing.T) {
+	results := make(chan resultPost, 1)
+	model := &fakeModel{}
+	p := New(relayRouter(t, []string{"a"}, false, results), "space", []byte("secret"), nil, model, Hooks{})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"hi","mock":true}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, WithMock(WithAttendee(req, "attendee-01"), true))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want the actor's reply", rec.Code)
+	}
+	if len(model.calls) != 0 {
+		t.Errorf("model calls = %v, want none when WithMock is true", model.calls)
+	}
+	if r := <-results; r.res.CallID != "a" || r.res.Status != http.StatusServiceUnavailable {
+		t.Errorf("posted result = %+v, want a 503 for call a", r.res)
+	}
+}
+
 func TestProxy_ActorRefusingTheResultIsAnActorError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == types.ModelResultPath {

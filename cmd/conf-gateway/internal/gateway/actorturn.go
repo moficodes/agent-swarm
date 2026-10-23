@@ -38,30 +38,34 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var useMock bool
 	if r.URL.Path == "/api/chat" && r.Body != nil {
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err == nil {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			var chatReq types.ChatRequest
-			if err := json.Unmarshal(bodyBytes, &chatReq); err == nil && chatReq.Message != "" {
-				userMsg := types.ChatMessage{
-					ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
-					Sender:    types.SenderUser,
-					Content:   chatReq.Message,
-					Timestamp: time.Now().Unix(),
+			if err := json.Unmarshal(bodyBytes, &chatReq); err == nil {
+				useMock = chatReq.Mock
+				if chatReq.Message != "" {
+					userMsg := types.ChatMessage{
+						ID:        fmt.Sprintf("user-%d", time.Now().UnixNano()),
+						Sender:    types.SenderUser,
+						Content:   chatReq.Message,
+						Timestamp: time.Now().Unix(),
+					}
+					actionID := fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
+					g.mu.Lock()
+					g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], userMsg)
+					g.currentActionID[attendeeID] = actionID
+					g.mu.Unlock()
+					g.RecordActionEntry(types.ActionLogEntry{
+						ID:         actionID,
+						AttendeeID: attendeeID,
+						Timestamp:  time.Now().Unix(),
+						Prompt:     chatReq.Message,
+						Activity:   types.ActivityThinking,
+					})
 				}
-				actionID := fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
-				g.mu.Lock()
-				g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], userMsg)
-				g.currentActionID[attendeeID] = actionID
-				g.mu.Unlock()
-				g.RecordActionEntry(types.ActionLogEntry{
-					ID:         actionID,
-					AttendeeID: attendeeID,
-					Timestamp:  time.Now().Unix(),
-					Prompt:     chatReq.Message,
-					Activity:   types.ActivityThinking,
-				})
 			}
 		}
 	} else if r.URL.Path == "/api/approve" {
@@ -103,7 +107,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
 	g.mu.Unlock()
 
-	g.proxy.ServeHTTP(w, actorproxy.WithAttendee(r, attendeeID))
+	g.proxy.ServeHTTP(w, actorproxy.WithMock(actorproxy.WithAttendee(r, attendeeID), useMock))
 }
 
 // onProxyError records a router that could not be reached.

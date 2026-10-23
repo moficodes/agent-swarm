@@ -184,6 +184,9 @@ type ChatMessage struct {
 // ChatRequest is the payload sent to initiate a chat or task request.
 type ChatRequest struct {
 	Message string `json:"message"`
+	// Mock requests a deterministic offline reply from MockEngine without
+	// making a Gemini model call.
+	Mock bool `json:"mock,omitempty"`
 }
 
 // ExecutionResult represents the output from running code in an isolated sandbox.
