@@ -57,7 +57,7 @@ func NewHTTPClient(caFile, credBundle string) (*http.Client, error) {
 		MinVersion: getMinTLSVersion(),
 		// Chain and hostname verification run in VerifyConnection against the
 		// reloadable root pool so CA rotations apply without a restart.
-		InsecureSkipVerify: true, //nolint:gosec
+		InsecureSkipVerify:   true, //nolint:gosec
 		GetClientCertificate: loadCert,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			pool, err := loadPool()

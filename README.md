@@ -35,23 +35,23 @@ limitations under the License.
   can source that file instead; `--help` lists them and `--dry-run` prints
   the gcloud commands. Run on an existing cluster, it adds the exclusion if
   missing.
-- One-time project setup: APIs, a snapshot bucket, an image registry and
-  IAM bindings. These belong to the project, not the cluster, so they
-  survive recreating it. Nothing in this repo creates them. From a
+- One-time project setup: APIs, snapshot and sandbox-assets buckets, an image
+  registry and IAM bindings. These belong to the project, not the cluster, so
+  they survive recreating it. Nothing in this repo creates them. From a
   substrate checkout, with `PROJECT_ID` and `BUCKET_NAME` exported:
 
       go run ./tools/setup-gcp enable apis     # before hack/create-cluster.sh
-      go run ./tools/setup-gcp create bucket   # the snapshot bucket, BUCKET_NAME
+      go run ./tools/setup-gcp create bucket   # BUCKET_NAME and BUCKET_NAME-assets
       go run ./tools/setup-gcp create iam      # after the cluster exists
 
   Don't run `setup-gcp bootstrap`: it also creates a cluster, and it can't
   choose GKE 1.37. `create iam` grants the node service account
-  `roles/artifactregistry.reader` and `roles/storage.objectViewer`, and
-  gives atelet and the ate-api-server snapshot bucket access through
-  Workload Identity (atelet also gets registry access). Those principals
-  live in the cluster's Workload Identity pool, which is why it runs after
-  the cluster. The table in substrate's `tools/setup-gcp/README.md` lists
-  every binding.
+  `roles/artifactregistry.reader` and `roles/storage.objectViewer`, creates
+  the `ate-snapshot-transfer` service account, and gives atelet and the
+  ate-api-server snapshot and sandbox-assets bucket access through Workload
+  Identity (atelet also gets registry access). Those principals live in the
+  cluster's Workload Identity pool, which is why it runs after the cluster.
+  The table in substrate's `tools/setup-gcp/README.md` lists every binding.
 
   setup-gcp enables the Artifact Registry API but creates no repository.
   `KO_DOCKER_REPO` must name one in the project, so the node service
@@ -386,12 +386,11 @@ export PRESENTER_TOKEN="$(kubectl get secret conf-gateway -n ate-demo-conf -o js
 
 `go.mod` pins substrate at a release tag, or at a commit (a pseudo-version)
 between releases. `hack/deploy.sh` checks the cluster's running
-`ate-api-server` version (`/ko-app/ateapi --version`, falling back to node
-`ate.dev/substrate-version` labels) against that pin and refuses to deploy on
-a mismatch. Install from a clean checkout of exactly the pinned version: a
-tag pin needs a version equal to the tag (`v0.6.0`), and a commit pin accepts
-the commit or the describe form after a tag (`v0.6.0-5-g1a2b3c4d`). To move
-the pin, for example to the next release:
+`ate-api-server` version (`/ko-app/ateapi --version`) against that pin and
+refuses to deploy on a mismatch. Install from a clean checkout of exactly the
+pinned version: a tag pin needs a version equal to the tag (`v0.6.0`), and a
+commit pin accepts the commit or the describe form after a tag
+(`v0.6.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
 
 ```bash
 go get -tool go.ate.dev/substrate/cmd/kubectl-ate@<tag-or-commit>
@@ -404,36 +403,6 @@ assertion in `hack/test-deploy.sh`. Check the release's
 ActorTemplate and WorkerPool API changes against `manifests/` (bump
 `DEMO_CONF_TEMPLATE_REVISION` if the template changes), then reinstall
 Substrate on the cluster from a checkout at the new pin.
-
-When upgrading an existing `v0.5.0` cluster to `v0.6.0` in place, tear down
-the demo first (`make undeploy` so `WorkerPool/conf-workers` and
-`ActorTemplate/conf-agent` are recreated with the `v0.6.0` schema), reset
-bundled Postgres and the `ate-api-authentication` ConfigMap in `ate-system`
-(`v0.6.0` removed `actorIdentityJWTProvider` from `authentication.yaml`),
-clear each node's v1 `/var/lib/ate/image-cache` directory (`v0.6.0` `atelet`
-requires layout version `2`), run `setup-gcp create bucket` and
-`setup-gcp create iam` from the `v0.6.0` checkout (which adds the
-`<BUCKET_NAME>-assets` bucket and `ate-snapshot-transfer` service account),
-and then deploy `ate-system` and the demo:
-
-```bash
-make undeploy
-kubectl -n ate-system delete sts/postgres pvc/data-postgres-0 cm/ate-api-authentication --ignore-not-found
-for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
-  kubectl -n ate-system run "clear-image-cache-${node##*-}" --rm -i --restart=Never --image=debian:13-slim \
-    --overrides='{"spec":{"nodeName":"'"${node}"'","containers":[{"name":"clean","image":"debian:13-slim","command":["rm","-rf","/var/lib/ate/image-cache"],"securityContext":{"runAsUser":0},"volumeMounts":[{"name":"ate","mountPath":"/var/lib/ate"}]}],"volumes":[{"name":"ate","hostPath":{"path":"/var/lib/ate"}}]}}'
-done
-(
-  cd "$SUBSTRATE_REPO"
-  git checkout v0.6.0
-  go run ./tools/setup-gcp create bucket
-  go run ./tools/setup-gcp create iam
-  SNAPSHOT_LOCATION="gs://${BUCKET_NAME}/snapshots/" \
-  SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer \
-    ./hack/install-ate.sh deploy ate-system --credential-provider='{"enabled":false}'
-)
-make deploy DEPLOY_FLAGS=--patch-router
-```
 
 ## Teardown
 

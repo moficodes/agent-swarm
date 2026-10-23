@@ -396,9 +396,6 @@ conf_check_substrate() {
   fi
   ver_out="$(run_kubectl exec -n ate-system deployment/ate-api-server -c ate-api-server -- /ko-app/ateapi --version 2>/dev/null || true)"
   labels="$(substrate_version_from_output "${ver_out}")"
-  if [[ -z "${labels}" ]]; then
-    labels="$(run_kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.ate\.dev/substrate-version}{"\n"}{end}')"
-  fi
   if ! substrate_labels_match "${pin}" "${labels}" "${allow_dirty}"; then
     case "$(substrate_label_mismatch_kind "${pin}" "${labels}")" in
       unlabeled)

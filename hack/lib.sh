@@ -97,11 +97,11 @@ substrate_version_from_output() {
 }
 
 # substrate_label_is_pin succeeds if one clean (non-"-dirty") Substrate
-# version LABEL names PIN. Substrate stamps binaries (and, prior to v0.5.0,
-# nodes) with the release tag or `git describe --tags --always` of the
-# checkout it was installed from, so a tag PIN must match the label
-# exactly, and a commit PIN matches a label that is a prefix of it, either
-# bare ("c7a1be17") or in describe form after a tag ("v0.1.0-12-gc7a1be17").
+# version LABEL names PIN. Substrate stamps binaries with the release tag or
+# `git describe --tags --always` of the checkout it was installed from, so a
+# tag PIN must match the label exactly, and a commit PIN matches a label that
+# is a prefix of it, either bare ("c7a1be17") or in describe form after a tag
+# ("v0.1.0-12-gc7a1be17").
 substrate_label_is_pin() {
   local pin="$1" label="$2"
   [[ -n "${label}" ]] || return 1
@@ -116,11 +116,10 @@ substrate_label_is_pin() {
 }
 
 # substrate_labels_match succeeds if at least one line of LABELS is set and
-# every set line names PIN (see substrate_label_is_pin). LABELS holds one
-# node's ate.dev/substrate-version per line; unlabeled nodes are empty lines.
+# every set line names PIN (see substrate_label_is_pin).
 # ALLOW_DIRTY (default false; pass "true", e.g. from
 # DEMO_CONF_ALLOW_DIRTY_SUBSTRATE) also accepts "<label>-dirty", which
-# Substrate stamps on nodes when installed from a modified checkout.
+# Substrate stamps on binaries when installed from a modified checkout.
 substrate_labels_match() {
   local pin="$1" labels="$2" allow_dirty="${3:-false}" label seen=false
   while IFS= read -r label; do
@@ -143,10 +142,10 @@ substrate_labels_match() {
 # substrate_labels_match against PIN, so conf_check_substrate can print a
 # message that fits the actual cause instead of always suggesting a pin
 # bump. Prints one of:
-#   unlabeled  no node carries ate.dev/substrate-version at all
+#   unlabeled  no version reported at all
 #   dirty      every set label is "<PIN's label>-dirty": the cluster runs
 #              the pinned version, but from a modified checkout
-#   mismatch   otherwise: at least one node runs a different version
+#   mismatch   otherwise: at least one reported version differs from PIN
 substrate_label_mismatch_kind() {
   local pin="$1" labels="$2" label seen=false all_dirty=true
   while IFS= read -r label; do
@@ -167,7 +166,7 @@ substrate_label_mismatch_kind() {
 }
 
 # substrate_repo_clean succeeds if REPO's working tree has no uncommitted
-# changes. install-ate.sh stamps nodes "<commit>-dirty" when run from a
+# changes. install-ate.sh stamps binaries "<version>-dirty" when run from a
 # modified checkout, which substrate_labels_match then refuses by default,
 # so conf_check_substrate checks this before installing from SUBSTRATE_REPO.
 substrate_repo_clean() {
