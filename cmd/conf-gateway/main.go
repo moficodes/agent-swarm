@@ -24,6 +24,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -325,6 +326,18 @@ func newRouterStatusSource(cfg Config) (routerstatus.Source, error) {
 	}
 }
 
+// newActorControl resolves the kubectl-ate binary path and returns an
+// ActorControl backed by it. Failing at startup when the binary is absent
+// keeps Kubernetes from replacing a healthy gateway ReplicaSet with a broken
+// ko-built image that lacks /usr/local/bin/kubectl-ate.
+func newActorControl(cfg Config) (*actorstate.KubectlATE, error) {
+	resolved, err := exec.LookPath(cfg.KubectlATE)
+	if err != nil {
+		return nil, fmt.Errorf("finding kubectl-ate binary %q (build conf-gateway with build/gateway.Dockerfile, not ko): %w", cfg.KubectlATE, err)
+	}
+	return actorstate.NewKubectlATE(resolved, cfg.ATEAPIEndpoint, cfg.Atespace), nil
+}
+
 // newWorkerScaleReader builds a reader for the conf-workers pool's size from
 // the in-cluster Kubernetes API.
 func newWorkerScaleReader() (*workerscale.Reader, error) {
@@ -399,7 +412,11 @@ func main() {
 	if cfg.LocalMode {
 		log.Printf("LOCAL_MODE=true; actor state is not read from ateapi and actors are never suspended.")
 	} else {
-		opts = append(opts, gateway.WithActorControl(actorstate.NewKubectlATE(cfg.KubectlATE, cfg.ATEAPIEndpoint, cfg.Atespace)))
+		ctrl, err := newActorControl(cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		opts = append(opts, gateway.WithActorControl(ctrl))
 		if r, err := newWorkerScaleReader(); err != nil {
 			log.Printf("Worker pod counts are unavailable: %v", err)
 		} else {

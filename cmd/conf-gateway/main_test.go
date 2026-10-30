@@ -19,6 +19,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -315,3 +316,36 @@ func TestNewRouterHTTPClient_MissingOneFileErrors(t *testing.T) {
 	}
 }
 
+func TestNewActorControl_MissingBinaryErrors(t *testing.T) {
+	cfg := Config{
+		KubectlATE:     "/nonexistent/kubectl-ate",
+		ATEAPIEndpoint: "api.ate-system.svc:443",
+		Atespace:       "ate-demo-conf",
+	}
+	_, err := newActorControl(cfg)
+	if err == nil {
+		t.Fatal("expected error when KubectlATE binary does not exist, got nil")
+	}
+	if !strings.Contains(err.Error(), "gateway.Dockerfile") {
+		t.Errorf("error = %q, want hint naming gateway.Dockerfile", err.Error())
+	}
+}
+
+func TestNewActorControl_ResolvesBinary(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	cfg := Config{
+		KubectlATE:     exe,
+		ATEAPIEndpoint: "api.ate-system.svc:443",
+		Atespace:       "ate-demo-conf",
+	}
+	ctrl, err := newActorControl(cfg)
+	if err != nil {
+		t.Fatalf("newActorControl returned unexpected error: %v", err)
+	}
+	if ctrl == nil {
+		t.Fatal("expected non-nil ActorControl")
+	}
+}

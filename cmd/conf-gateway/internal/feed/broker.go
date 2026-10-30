@@ -258,18 +258,20 @@ func (b *Broker) ServeActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribe before the client sees 200 so no action or reset published
+	// after that is missed.
+	actionCh := b.SubscribeActions()
+	defer b.UnsubscribeActions(actionCh)
+
+	resetCh := b.SubscribeReset()
+	defer b.UnsubscribeReset(resetCh)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-
-	actionCh := b.SubscribeActions()
-	defer b.UnsubscribeActions(actionCh)
-
-	resetCh := b.SubscribeReset()
-	defer b.UnsubscribeReset(resetCh)
 
 	ctxDone := r.Context().Done()
 	for {
