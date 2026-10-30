@@ -175,6 +175,16 @@ if ! DEMO_CONF_ACTORS=7 conf_render manifests/gateway.yaml.tmpl | grep -A1 'name
   echo "FAIL: rendered gateway manifest lacks ACTOR_COUNT from DEMO_CONF_ACTORS" >&2
   fail=1
 fi
+# The gateway manifest passes optional Google presenter auth and 10 RPM rate limits.
+gw_rendered="$(ALLOWED_GOOGLE_DOMAINS=google.com,event.goog GOOGLE_CLIENT_ID=cid FIREBASE_API_KEY=fkey conf_render manifests/gateway.yaml.tmpl)"
+for pair in 'ALLOWED_GOOGLE_DOMAINS:google.com,event.goog' 'GOOGLE_CLIENT_ID:cid' 'FIREBASE_API_KEY:fkey' 'CHAT_RATE_LIMIT_RPM:10' 'SESSION_RATE_LIMIT_RPM:10'; do
+  k="${pair%%:*}"
+  v="${pair#*:}"
+  if ! grep -A1 "name: ${k}" <<<"${gw_rendered}" | grep -qF "value: \"${v}\""; then
+    echo "FAIL: rendered gateway manifest lacks ${k}=${v}" >&2
+    fail=1
+  fi
+done
 
 # The dashboard renders to valid JSON for one cluster, and every query and
 # the logs panel filter on that cluster.
@@ -282,7 +292,7 @@ if grep -qF 'ate_worker_state="assigned"' <<<"${auto}"; then
   echo "FAIL: rendered autoscaling manifest queries the removed assigned worker state" >&2
   fail=1
 fi
-if ! DEMO_CONF_ACTORS_PER_WORKER=2 conf_render manifests/autoscaling.yaml.tmpl | grep -qF "or vector(0)) / 2)"; then
+if ! grep -qF "or vector(0)) / 2)" <<<"$(DEMO_CONF_ACTORS_PER_WORKER=2 conf_render manifests/autoscaling.yaml.tmpl)"; then
   echo "FAIL: autoscaling manifest does not divide parked turns by DEMO_CONF_ACTORS_PER_WORKER" >&2
   fail=1
 fi

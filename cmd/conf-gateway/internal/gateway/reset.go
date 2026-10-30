@@ -82,6 +82,8 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	g.mu.Unlock()
 
 	g.board.Reset()
+	g.chatLimiter.reset()
+	g.sessionLimiter.reset()
 	if g.usage != nil {
 		g.usage.ResetUsage()
 	}

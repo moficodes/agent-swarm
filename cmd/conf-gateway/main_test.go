@@ -27,7 +27,15 @@ import (
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 )
 
-var configEnvVars = []string{"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE", "ROUTER_CA_FILE", "ROUTER_CRED_BUNDLE", "ATEAPI_ENDPOINT", "KUBECTL_ATE", "STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE", "VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY", "ACTOR_COUNT"}
+var configEnvVars = []string{
+	"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE",
+	"ROUTER_CA_FILE", "ROUTER_CRED_BUNDLE", "ATEAPI_ENDPOINT", "KUBECTL_ATE",
+	"STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE",
+	"VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY",
+	"ACTOR_COUNT", "ACTORS_PER_WORKER", "ALLOWED_GOOGLE_DOMAINS", "GOOGLE_CLIENT_ID",
+	"FIREBASE_API_KEY", "FIREBASE_AUTH_DOMAIN", "FIREBASE_PROJECT_ID",
+	"CHAT_RATE_LIMIT_RPM", "SESSION_RATE_LIMIT_RPM",
+}
 
 // clearConfigEnv clears every environment variable LoadConfig reads, so tests
 // start from a clean slate regardless of the host environment.
@@ -81,6 +89,43 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.RouterCAFile != "" || cfg.RouterCredBundle != "" {
 		t.Errorf("expected empty default RouterCAFile and RouterCredBundle, got %q %q", cfg.RouterCAFile, cfg.RouterCredBundle)
+	}
+	if len(cfg.AllowedGoogleDomains) != 0 {
+		t.Errorf("expected empty default AllowedGoogleDomains, got %v", cfg.AllowedGoogleDomains)
+	}
+	if cfg.ChatRateLimitRPM != 10 || cfg.SessionRateLimitRPM != 10 {
+		t.Errorf("expected default rate limits 10 RPM, got chat=%d session=%d", cfg.ChatRateLimitRPM, cfg.SessionRateLimitRPM)
+	}
+}
+
+func TestLoadConfig_GoogleAuthAndRateLimits(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("ALLOWED_GOOGLE_DOMAINS", "google.com, @event.goog, cloud-demos.goog, gcdemos.goog")
+	t.Setenv("GOOGLE_CLIENT_ID", "my-client.apps.googleusercontent.com")
+	t.Setenv("FIREBASE_API_KEY", "AIzaTest")
+	t.Setenv("VERTEX_PROJECT", "demo-proj")
+	t.Setenv("CHAT_RATE_LIMIT_RPM", "15")
+	t.Setenv("SESSION_RATE_LIMIT_RPM", "0")
+
+	cfg := LoadConfig()
+	wantDomains := []string{"google.com", "event.goog", "cloud-demos.goog", "gcdemos.goog"}
+	if !slices.Equal(cfg.AllowedGoogleDomains, wantDomains) {
+		t.Errorf("AllowedGoogleDomains = %v, want %v", cfg.AllowedGoogleDomains, wantDomains)
+	}
+	if cfg.GoogleClientID != "my-client.apps.googleusercontent.com" {
+		t.Errorf("GoogleClientID = %q", cfg.GoogleClientID)
+	}
+	if cfg.FirebaseAPIKey != "AIzaTest" {
+		t.Errorf("FirebaseAPIKey = %q", cfg.FirebaseAPIKey)
+	}
+	if cfg.FirebaseProjectID != "demo-proj" {
+		t.Errorf("FirebaseProjectID = %q, want demo-proj from VERTEX_PROJECT", cfg.FirebaseProjectID)
+	}
+	if cfg.ChatRateLimitRPM != 15 {
+		t.Errorf("ChatRateLimitRPM = %d, want 15", cfg.ChatRateLimitRPM)
+	}
+	if cfg.SessionRateLimitRPM != 0 {
+		t.Errorf("SessionRateLimitRPM = %d, want 0 (disabled)", cfg.SessionRateLimitRPM)
 	}
 }
 
@@ -269,3 +314,4 @@ func TestNewRouterHTTPClient_MissingOneFileErrors(t *testing.T) {
 		t.Error("expected error when only RouterCAFile is set")
 	}
 }
+

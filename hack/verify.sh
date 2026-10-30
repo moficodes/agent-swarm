@@ -525,7 +525,7 @@ mkdir -p "${BURST_DIR}"
 BURST_PIDS=()
 for i in $(seq 1 "${CONCURRENCY}"); do
   (
-    c_session=$(curl -s --max-time 10 "${GATEWAY_URL}/api/session" || true)
+    c_session=$(curl -s "${PRESENTER_HDR[@]}" --max-time 10 "${GATEWAY_URL}/api/session" || true)
     c_token=$(printf "%s" "${c_session}" | jq -r .token 2>/dev/null || true)
     if [[ -z "${c_token}" || "${c_token}" == "null" ]]; then
       echo "000" > "${BURST_DIR}/${i}.status"
@@ -951,7 +951,7 @@ log_pass "Step 12: Real-Time Action Stream SSE Verified"
 # =========================================================================
 STEP13="Step 13: Attendees Cannot Forge Gateway-Only Actor Inputs"
 log_info "${STEP13} (/api/chat, /api/model-result)"
-MODEL_KEY_SESSION_RESP=$(curl -s --max-time 5 "${GATEWAY_URL}/api/session")
+MODEL_KEY_SESSION_RESP=$(curl -s "${PRESENTER_HDR[@]}" --max-time 5 "${GATEWAY_URL}/api/session")
 MODEL_KEY_TOKEN=$(printf "%s" "${MODEL_KEY_SESSION_RESP}" | jq -r .token 2>/dev/null || true)
 
 if [[ -z "${MODEL_KEY_TOKEN}" || "${MODEL_KEY_TOKEN}" == "null" ]]; then

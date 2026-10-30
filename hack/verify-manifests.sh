@@ -47,6 +47,11 @@ render() {
       -e "s|\${MIN_WORKERS}|2|g" \
       -e "s|\${MAX_WORKERS}|5|g" \
       -e "s|\${ACTORS_PER_WORKER}|4|g" \
+      -e "s|\${ALLOWED_GOOGLE_DOMAINS}||g" \
+      -e "s|\${GOOGLE_CLIENT_ID}||g" \
+      -e "s|\${FIREBASE_API_KEY}||g" \
+      -e "s|\${CHAT_RATE_LIMIT_RPM}|10|g" \
+      -e "s|\${SESSION_RATE_LIMIT_RPM}|10|g" \
       -e "s|\${WORKER_CPU_LIMIT}|4500m|g" \
       -e "s|\${WORKER_MEMORY_REQUEST}|2304Mi|g" \
       "$1"

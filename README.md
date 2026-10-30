@@ -263,6 +263,10 @@ them (`conf_delete` in `hack/deploy.sh`).
 
 ## Presenter access
 
+By default (when `ALLOWED_GOOGLE_DOMAINS` is unset), `/stage` and `/feed` are
+unlocked with the gateway's `PRESENTER_TOKEN` so anyone can run the demo out of
+the box without setting up OAuth:
+
 ```bash
 kubectl port-forward -n ate-demo-conf svc/conf-gateway 8090:80
 open "http://localhost:8090/stage?key=$(kubectl get secret conf-gateway -n ate-demo-conf -o jsonpath='{.data.PRESENTER_TOKEN}' | base64 -d)"
@@ -273,6 +277,40 @@ The `key` query parameter is exchanged for an `HttpOnly` cookie
 `/feed` in the same browser need no key. Scripts and `curl` can send the same
 key as an `X-Presenter-Key` header instead
 (`cmd/conf-gateway/internal/auth/auth.go`).
+
+To require Google Sign-In on `/stage` and `/feed` for a public conference URL
+(while keeping `/chat` open to attendees and keeping `PRESENTER_TOKEN` working
+for `make e2e` and CLI scripts), set `ALLOWED_GOOGLE_DOMAINS` to a
+comma-separated list of Google Workspace domains:
+
+```bash
+ALLOWED_GOOGLE_DOMAINS="google.com,event.goog,cloud-demos.goog,gcdemos.goog" \
+DEMO_DOMAIN="swarm.example.com" \
+make deploy DEPLOY_FLAGS=--patch-router
+```
+
+When `ALLOWED_GOOGLE_DOMAINS` and `PROJECT_ID` are set, `hack/deploy.sh`
+auto-discovers `GOOGLE_CLIENT_ID` and `FIREBASE_API_KEY` from the project's
+Identity Platform configuration (or you can export `GOOGLE_CLIENT_ID` /
+`FIREBASE_API_KEY` directly) and adds `DEMO_DOMAIN` to Identity Platform's
+`authorizedDomains`. Unauthenticated visits to `/stage` and `/feed` render a
+Google Sign-In gate that verifies the RS256 ID token on `POST /api/auth/google`
+and checks that the verified email belongs to `ALLOWED_GOOGLE_DOMAINS`
+(`cmd/conf-gateway/internal/auth/google.go`).
+
+## Attendee `/chat` guardrails
+
+`/chat` stays open without login so conference attendees can join immediately
+from a QR code or short URL, protected by three built-in guardrails:
+
+- **Per-attendee chat rate limit (`CHAT_RATE_LIMIT_RPM`, default `10`)**: caps
+  `POST /api/chat` at 10 requests per minute per attendee session (`HTTP 429`).
+- **Per-IP session minting rate limit (`SESSION_RATE_LIMIT_RPM`, default `10`)**:
+  caps `GET /api/session` at 10 requests per minute per client IP (`HTTP 429`)
+  so a script cannot cycle through all 50 actor slots in a tight loop.
+- **Active-slot protection**: when `GET /api/session` assigns the next
+  `attendee-NN` slot, it skips slots that have a turn in flight or a pending
+  human-in-the-loop approval (`cmd/conf-gateway/internal/gateway/session.go`).
 
 ## What the badges mean
 

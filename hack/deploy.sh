@@ -310,9 +310,55 @@ conf_render() {
       -e "s|\${MIN_WORKERS}|${DEMO_CONF_MIN_WORKERS}|g" \
       -e "s|\${MAX_WORKERS}|${DEMO_CONF_MAX_WORKERS}|g" \
       -e "s|\${ACTORS_PER_WORKER}|${seats}|g" \
+      -e "s|\${ALLOWED_GOOGLE_DOMAINS}|${ALLOWED_GOOGLE_DOMAINS:-}|g" \
+      -e "s|\${GOOGLE_CLIENT_ID}|${GOOGLE_CLIENT_ID:-}|g" \
+      -e "s|\${FIREBASE_API_KEY}|${FIREBASE_API_KEY:-}|g" \
+      -e "s|\${CHAT_RATE_LIMIT_RPM}|${CHAT_RATE_LIMIT_RPM:-10}|g" \
+      -e "s|\${SESSION_RATE_LIMIT_RPM}|${SESSION_RATE_LIMIT_RPM:-10}|g" \
       -e "s|\${WORKER_CPU_LIMIT}|$((10#${seats} * 1000 + 500))m|g" \
       -e "s|\${WORKER_MEMORY_REQUEST}|$((10#${seats} * 512 + 256))Mi|g" \
       "$1"
+}
+
+# conf_discover_google_auth populates GOOGLE_CLIENT_ID and FIREBASE_API_KEY from
+# the GCP project's Identity Platform configuration when ALLOWED_GOOGLE_DOMAINS
+# is set, and adds DEMO_DOMAIN to Identity Platform's authorizedDomains.
+conf_discover_google_auth() {
+  [[ -n "${ALLOWED_GOOGLE_DOMAINS:-}" && -n "${PROJECT_ID:-}" ]] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  local tok idp_json key_name cfg_json domains_json
+  tok="$(gcloud auth print-access-token 2>/dev/null || true)"
+  [[ -n "${tok}" ]] || return 0
+
+  if [[ -z "${GOOGLE_CLIENT_ID:-}" ]]; then
+    idp_json="$(curl -fsS -H "Authorization: Bearer ${tok}" \
+      -H "x-goog-user-project: ${PROJECT_ID}" \
+      "https://identitytoolkit.googleapis.com/admin/v2/projects/${PROJECT_ID}/defaultSupportedIdpConfigs/google.com" 2>/dev/null || true)"
+    GOOGLE_CLIENT_ID="$(jq -r '.clientId // empty' <<<"${idp_json}" 2>/dev/null || true)"
+  fi
+
+  if [[ -z "${FIREBASE_API_KEY:-}" ]]; then
+    key_name="$(gcloud services api-keys list --project "${PROJECT_ID}" \
+      --filter='displayName:"Browser key"' --format='value(name)' 2>/dev/null | head -n1 || true)"
+    if [[ -n "${key_name}" ]]; then
+      FIREBASE_API_KEY="$(gcloud services api-keys get-key-string "${key_name}" \
+        --project "${PROJECT_ID}" --format='value(keyString)' 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -n "${DEMO_DOMAIN:-}" ]]; then
+    cfg_json="$(curl -fsS -H "Authorization: Bearer ${tok}" \
+      -H "x-goog-user-project: ${PROJECT_ID}" \
+      "https://identitytoolkit.googleapis.com/admin/v2/projects/${PROJECT_ID}/config" 2>/dev/null || true)"
+    if [[ -n "${cfg_json}" ]] && ! jq -e --arg d "${DEMO_DOMAIN}" '(.authorizedDomains // []) | index($d) != null' <<<"${cfg_json}" >/dev/null 2>&1; then
+      domains_json="$(jq -c --arg d "${DEMO_DOMAIN}" '{authorizedDomains: (((.authorizedDomains // []) + [$d]) | unique)}' <<<"${cfg_json}")"
+      curl -fsS -X PATCH -H "Authorization: Bearer ${tok}" \
+        -H "x-goog-user-project: ${PROJECT_ID}" \
+        -H "Content-Type: application/json" \
+        "https://identitytoolkit.googleapis.com/admin/v2/projects/${PROJECT_ID}/config?updateMask=authorizedDomains" \
+        -d "${domains_json}" >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 conf_ensure_secret() {
@@ -507,6 +553,7 @@ conf_deploy() {
   conf_check_router
   if [[ -n "${PROJECT_ID:-}" ]]; then
     conf_ensure_gsa
+    conf_discover_google_auth
   fi
 
   local current_workers
@@ -616,7 +663,9 @@ conf_main() {
       echo "  --patch-router  patch atenet-router's timeouts and grace period instead of failing"
       echo "  Required env: KO_DOCKER_REPO, BUCKET_NAME"
       echo "  Optional env: PROJECT_ID (enables Vertex AI; unset runs mock replies), VERTEX_LOCATION,"
-      echo "                DEMO_DOMAIN, DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO,"
+      echo "                DEMO_DOMAIN, ALLOWED_GOOGLE_DOMAINS, GOOGLE_CLIENT_ID, FIREBASE_API_KEY,"
+      echo "                CHAT_RATE_LIMIT_RPM (default 10), SESSION_RATE_LIMIT_RPM (default 10),"
+      echo "                DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO,"
       echo "                DEMO_CONF_MIN_WORKERS (default 2), DEMO_CONF_MAX_WORKERS (default 5),"
       echo "                DEMO_CONF_ACTORS_PER_WORKER (default 4),"
       echo "                KUBECTL_CONTEXT (defaults to the current kube context),"

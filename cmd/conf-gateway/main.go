@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/modelproxy"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/routerstatus"
@@ -108,6 +109,22 @@ type Config struct {
 	ActorCount int
 	// ActorsPerWorker is how many actors one worker pod hosts at once.
 	ActorsPerWorker int
+	// AllowedGoogleDomains lists Google Workspace domains whose verified users
+	// may sign in to presenter pages (/stage and /feed). Empty disables Google Sign-In.
+	AllowedGoogleDomains []string
+	// GoogleClientID is the OAuth 2.0 Web Client ID for Google Sign-In.
+	GoogleClientID string
+	// FirebaseAPIKey, FirebaseAuthDomain, and FirebaseProjectID configure
+	// Firebase Authentication / Identity Platform popup Google Sign-In.
+	FirebaseAPIKey     string
+	FirebaseAuthDomain string
+	FirebaseProjectID  string
+	// ChatRateLimitRPM is the per-attendee rate limit (requests per minute) on
+	// POST /api/chat. Zero disables the limit.
+	ChatRateLimitRPM int
+	// SessionRateLimitRPM is the per-IP rate limit (requests per minute) on
+	// GET /api/session for non-presenter requests. Zero disables the limit.
+	SessionRateLimitRPM int
 }
 
 // LoadConfig loads the configuration from environment variables with defaults.
@@ -144,6 +161,12 @@ func LoadConfig() Config {
 		routerStatusDiscovery = "static"
 	}
 
+	vertexProject := os.Getenv("VERTEX_PROJECT")
+	firebaseProjectID := strings.TrimSpace(os.Getenv("FIREBASE_PROJECT_ID"))
+	if firebaseProjectID == "" {
+		firebaseProjectID = vertexProject
+	}
+
 	return Config{
 		Port:                  port,
 		RouterURL:             routerURL,
@@ -160,12 +183,34 @@ func LoadConfig() Config {
 		SuspendAfter:          envDuration("SUSPEND_AFTER", 0),
 		MockLLM:               os.Getenv("DEMO_MOCK_LLM") == "true",
 		LocalMode:             os.Getenv("LOCAL_MODE") == "true",
-		VertexProject:         os.Getenv("VERTEX_PROJECT"),
+		VertexProject:         vertexProject,
 		VertexLocation:        vertexLocation,
 		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
 		ActorCount:            envPositiveInt("ACTOR_COUNT", 50),
 		ActorsPerWorker:       envPositiveInt("ACTORS_PER_WORKER", 1),
+		AllowedGoogleDomains:  auth.NormalizeDomains([]string{os.Getenv("ALLOWED_GOOGLE_DOMAINS")}),
+		GoogleClientID:        strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
+		FirebaseAPIKey:        strings.TrimSpace(os.Getenv("FIREBASE_API_KEY")),
+		FirebaseAuthDomain:    strings.TrimSpace(os.Getenv("FIREBASE_AUTH_DOMAIN")),
+		FirebaseProjectID:     firebaseProjectID,
+		ChatRateLimitRPM:      envNonNegativeInt("CHAT_RATE_LIMIT_RPM", 10),
+		SessionRateLimitRPM:   envNonNegativeInt("SESSION_RATE_LIMIT_RPM", 10),
 	}
+}
+
+// envNonNegativeInt parses the named variable as a non-negative integer (0
+// disables a rate limit). It returns def when the variable is unset or invalid.
+func envNonNegativeInt(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		log.Printf("invalid %s %q; using %d", name, v, def)
+		return def
+	}
+	return n
 }
 
 // envPositiveInt parses the named variable as a positive integer. It returns
@@ -331,6 +376,15 @@ func main() {
 		gateway.WithAtespace(cfg.Atespace),
 		gateway.WithSecret(secret),
 		gateway.WithPresenterKey(cfg.PresenterKey),
+		gateway.WithGoogleAuth(auth.GoogleAuthConfig{
+			AllowedDomains:     cfg.AllowedGoogleDomains,
+			ClientID:           cfg.GoogleClientID,
+			FirebaseAPIKey:     cfg.FirebaseAPIKey,
+			FirebaseAuthDomain: cfg.FirebaseAuthDomain,
+			FirebaseProjectID:  cfg.FirebaseProjectID,
+		}),
+		gateway.WithChatRateLimitRPM(cfg.ChatRateLimitRPM),
+		gateway.WithSessionRateLimitRPM(cfg.SessionRateLimitRPM),
 		gateway.WithPollInterval(cfg.StatePollInterval),
 		gateway.WithMaxActors(cfg.ActorCount),
 		gateway.WithSeatsPerWorker(cfg.ActorsPerWorker),

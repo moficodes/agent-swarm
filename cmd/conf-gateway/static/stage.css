@@ -358,10 +358,12 @@ html, body {
 .stage-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.25rem;
   height: 100%;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* Card Base */
@@ -374,6 +376,8 @@ html, body {
   backdrop-filter: blur(12px);
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .card-header {
@@ -395,17 +399,13 @@ html, body {
   margin-top: 0.2rem;
 }
 
-/* Sidebar: QR & Parking */
-.stage-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-}
-
 /* QR Code Block */
 .hero-qr-card {
   align-items: center;
   text-align: center;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .hero-qr-card .card-header {
@@ -419,6 +419,10 @@ html, body {
   align-items: center;
   gap: 0.75rem;
   margin: 0.5rem 0;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .qr-box {
@@ -456,21 +460,28 @@ html, body {
 }
 
 .qr-url-link {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
+  display: inline-block;
   color: var(--neon-cyan);
   text-decoration: none;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
-  padding: 0.3rem 0.6rem;
+  line-height: 1.4;
+  padding: 0.35rem 0.65rem;
   border-radius: 6px;
   background: rgba(0, 255, 204, 0.08);
   border: 1px solid rgba(0, 255, 204, 0.25);
   transition: background 0.2s ease;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: center;
+}
+
+.qr-url-link .external-icon {
+  display: inline-block;
+  margin-left: 0.25rem;
   white-space: nowrap;
 }
 

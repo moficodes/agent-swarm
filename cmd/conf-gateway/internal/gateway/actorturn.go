@@ -38,6 +38,11 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/api/chat" && !g.isPresenter(r) && !g.chatLimiter.allow(attendeeID) {
+		http.Error(w, fmt.Sprintf("chat rate limit exceeded (max %d requests per minute)", g.chatRateLimitRPM), http.StatusTooManyRequests)
+		return
+	}
+
 	var useMock bool
 	if r.URL.Path == "/api/chat" && r.Body != nil {
 		bodyBytes, err := io.ReadAll(r.Body)

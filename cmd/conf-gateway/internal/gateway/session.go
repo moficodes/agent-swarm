@@ -34,6 +34,12 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	presenter := g.isPresenter(r)
+	if !presenter && !g.sessionLimiter.allow(clientIP(r)) {
+		http.Error(w, fmt.Sprintf("session rate limit exceeded (max %d requests per minute)", g.sessionRateLimitRPM), http.StatusTooManyRequests)
+		return
+	}
+
 	maxActors := 50
 	if g.maxActors > 0 {
 		maxActors = g.maxActors
@@ -41,7 +47,7 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	requestedID := strings.TrimSpace(r.URL.Query().Get("attendee_id"))
 	var attendeeID string
-	if requestedID != "" && g.isPresenter(r) && auth.ValidAttendeeID(requestedID, maxActors) {
+	if requestedID != "" && presenter && auth.ValidAttendeeID(requestedID, maxActors) {
 		attendeeID = requestedID
 	} else {
 
@@ -61,9 +67,7 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 			startOffset = 0
 		}
 
-		seq := atomic.AddUint64(&g.attendeeSeq, 1)
-		index := startOffset + int((seq-1)%uint64(availableRange)) + 1
-		attendeeID = fmt.Sprintf("attendee-%02d", index)
+		attendeeID = g.selectAttendeeSlot(startOffset, availableRange)
 		g.forgetAttendee(attendeeID)
 	}
 
@@ -81,6 +85,35 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 		"attendee_id": attendeeID,
 		"token":       token,
 	})
+}
+
+// selectAttendeeSlot picks the next attendee slot in [startOffset+1 .. startOffset+availableRange],
+// skipping slots that are currently executing a turn or waiting on a human approval
+// so active attendees are not evicted when the counter wraps around.
+func (g *Gateway) selectAttendeeSlot(startOffset, availableRange int) string {
+	var firstCandidate string
+	for attempt := 0; attempt < availableRange; attempt++ {
+		seq := atomic.AddUint64(&g.attendeeSeq, 1)
+		index := startOffset + int((seq-1)%uint64(availableRange)) + 1
+		candidate := fmt.Sprintf("attendee-%02d", index)
+		if attempt == 0 {
+			firstCandidate = candidate
+		}
+		if !g.isSlotActive(candidate) {
+			return candidate
+		}
+	}
+	return firstCandidate
+}
+
+func (g *Gateway) isSlotActive(attendee string) bool {
+	g.mu.RLock()
+	inFlight := g.turnsInFlight[attendee]
+	g.mu.RUnlock()
+	if inFlight > 0 {
+		return true
+	}
+	return g.proxy != nil && g.proxy.PendingApproval(attendee) != nil
 }
 
 // forgetAttendee drops everything kept for the attendee's previous visitor,

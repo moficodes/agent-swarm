@@ -170,6 +170,16 @@ spec:
           value: "${ACTOR_COUNT}"
         - name: ACTORS_PER_WORKER
           value: "${ACTORS_PER_WORKER}"
+        - name: ALLOWED_GOOGLE_DOMAINS
+          value: "${ALLOWED_GOOGLE_DOMAINS}"
+        - name: GOOGLE_CLIENT_ID
+          value: "${GOOGLE_CLIENT_ID}"
+        - name: FIREBASE_API_KEY
+          value: "${FIREBASE_API_KEY}"
+        - name: CHAT_RATE_LIMIT_RPM
+          value: "${CHAT_RATE_LIMIT_RPM}"
+        - name: SESSION_RATE_LIMIT_RPM
+          value: "${SESSION_RATE_LIMIT_RPM}"
         - name: HMAC_SECRET
           valueFrom:
             secretKeyRef:

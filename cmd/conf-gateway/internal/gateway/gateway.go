@@ -211,6 +211,11 @@ type Gateway struct {
 	secret              string
 	signer              *auth.Signer
 	presenterKey        string
+	googleVerifier      *auth.GoogleVerifier
+	chatRateLimitRPM    int
+	sessionRateLimitRPM int
+	chatLimiter         *rateLimiter
+	sessionLimiter      *rateLimiter
 	statusInterval      time.Duration
 	workerScale         WorkerScaleSource
 	workerScaleInterval time.Duration
@@ -304,6 +309,8 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	if gw.presenterKey == "" {
 		gw.presenterKey = randomHex(16)
 	}
+	gw.chatLimiter = newRateLimiter(gw.chatRateLimitRPM, nil)
+	gw.sessionLimiter = newRateLimiter(gw.sessionRateLimitRPM, nil)
 
 	if gw.simController == nil {
 		gw.simController = NewSimulationRunner(gw)
@@ -449,10 +456,16 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/stage/telemetry", g.requirePresenter(g.handleTelemetry))
 	g.mux.HandleFunc("/api/reset", g.requirePresenter(g.handleReset))
 	g.mux.HandleFunc("/api/simulation", g.requirePresenter(web.JSONPOST(g.handleSimulation)))
+	g.mux.HandleFunc("/api/auth/google", web.JSONPOST(g.handleGoogleAuth))
+	g.mux.HandleFunc("/api/auth/logout", g.handleLogout)
 	g.mux.HandleFunc("/api/chat", web.JSONPOST(g.proxyToActor))
 	g.mux.HandleFunc("/api/approve", web.JSONPOST(g.proxyToActor))
 
-	pages := web.Pages{FS: g.staticFS, PresenterKey: g.presenterKey}
+	pages := web.Pages{
+		FS:           g.staticFS,
+		PresenterKey: g.presenterKey,
+		GoogleAuth:   g.googleVerifier.Config(),
+	}
 	chat := pages.Page("chat.html", false, "/chat", "/chat/")
 	feedPage := pages.Page("feed.html", true, "/feed", "/feed/")
 	stage := pages.Page("stage.html", true, "/stage", "/stage/")
