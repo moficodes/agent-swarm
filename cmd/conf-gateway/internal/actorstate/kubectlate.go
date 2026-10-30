@@ -99,7 +99,7 @@ func ParseActorList(data []byte) ([]Status, error) {
 	type snapshot struct {
 		Generation      int32 `json:"generation"`
 		DurableSnapshot *struct {
-			Status string `json:"status"`
+			State  string `json:"state"`
 			Object struct {
 				SnapshotURI string `json:"snapshotUri"`
 			} `json:"object"`
@@ -139,13 +139,13 @@ func ParseActorList(data []byte) ([]Status, error) {
 				continue
 			}
 			uri := snap.DurableSnapshot.Object.SnapshotURI
-			switch snap.DurableSnapshot.Status {
-			case "SNAPSHOT_STORAGE_STATUS_COMPLETED":
+			switch snap.DurableSnapshot.State {
+			case "SNAPSHOT_STORAGE_STATE_COMPLETED":
 				if snap.Generation >= snapshotGen {
 					snapshotGen = snap.Generation
 					snapshotURI = uri
 				}
-			case "SNAPSHOT_STORAGE_STATUS_PENDING":
+			case "SNAPSHOT_STORAGE_STATE_PENDING":
 				if snap.Generation >= inProgressGen {
 					inProgressGen = snap.Generation
 					inProgressURI = uri

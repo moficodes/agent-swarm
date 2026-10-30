@@ -30,7 +30,7 @@ DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
-DEMO_CONF_TEMPLATE_REVISION=6
+DEMO_CONF_TEMPLATE_REVISION=7
 # DEMO_CONF_ROUTER_SPIFFE_ID is the pod identity conf-gateway presents to
 # atenet-router's mTLS ingress (:443).
 DEMO_CONF_ROUTER_SPIFFE_ID="spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway"
@@ -296,8 +296,7 @@ conf_build_gateway() {
 
 conf_render() {
   local seats="${DEMO_CONF_ACTORS_PER_WORKER}"
-  sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME:-placeholder}|g" \
-      -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
+  sed -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
       -e "s|\${GATEWAY_GSA}|${DEMO_CONF_GATEWAY_GSA:-}|g" \
       -e "s|\${VERTEX_PROJECT}|${DEMO_CONF_VERTEX_PROJECT:-}|g" \
       -e "s|\${VERTEX_LOCATION}|${DEMO_CONF_VERTEX_LOCATION:-us-central1}|g" \
@@ -417,7 +416,7 @@ conf_check_substrate() {
     if [[ -z "${SUBSTRATE_REPO:-}" ]]; then
       echo "error: Substrate is not installed (no ate-system namespace)." >&2
       echo "Install it from a clean substrate checkout at ${pin}:" >&2
-      echo "  SNAPSHOT_LOCATION=\"gs://\${BUCKET_NAME}/snapshots/\" SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer hack/install-ate.sh deploy ate-system --credential-provider='{\"enabled\":false}'" >&2
+      echo "  SNAPSHOT_LOCATION=\"gs://\${BUCKET_NAME}/snapshots/\" SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer go run ./cmd/ate-setup deploy ate-system --credential-provider='{\"enabled\":false}' --ingress-allowed-spiffe-ids=${DEMO_CONF_ROUTER_SPIFFE_ID}" >&2
       echo "or set SUBSTRATE_REPO to that checkout and run this again." >&2
       exit 1
     fi
@@ -433,12 +432,29 @@ conf_check_substrate() {
     fi
     if ! substrate_repo_clean "${SUBSTRATE_REPO}"; then
       echo "error: SUBSTRATE_REPO has uncommitted changes." >&2
-      echo "install-ate.sh would build ate-api-server as ${pin}-dirty, which the check below refuses by default." >&2
+      echo "ate-setup would build ate-api-server as ${pin}-dirty, which the check below refuses by default." >&2
       echo "Commit or stash them, or set DEMO_CONF_ALLOW_DIRTY_SUBSTRATE=true to accept a dirty install." >&2
       exit 1
     fi
+    if [[ -z "${SNAPSHOT_LOCATION:-}" && -z "${BUCKET_NAME:-}" && "${ATE_INSTALL_KIND:-false}" != "true" ]]; then
+      echo "error: SNAPSHOT_LOCATION or BUCKET_NAME must be set to install Substrate from SUBSTRATE_REPO" >&2
+      exit 1
+    fi
     log_step "Installing Substrate from ${SUBSTRATE_REPO}..."
-    (cd "${SUBSTRATE_REPO}" && SNAPSHOT_LOCATION="${SNAPSHOT_LOCATION:-gs://${BUCKET_NAME}/snapshots/}" SNAPSHOT_TRANSFER_GSA_NAME="${SNAPSHOT_TRANSFER_GSA_NAME:-ate-snapshot-transfer}" hack/install-ate.sh deploy ate-system --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}")
+    (
+      cd "${SUBSTRATE_REPO}"
+      if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+        go run ./cmd/ate-setup deploy ate-system \
+          --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}" \
+          --ingress-allowed-spiffe-ids="${ATE_INGRESS_ALLOWED_SPIFFE_IDS:-${DEMO_CONF_ROUTER_SPIFFE_ID}}"
+      else
+        SNAPSHOT_LOCATION="${SNAPSHOT_LOCATION:-gs://${BUCKET_NAME}/snapshots/}" \
+        SNAPSHOT_TRANSFER_GSA_NAME="${SNAPSHOT_TRANSFER_GSA_NAME:-ate-snapshot-transfer}" \
+        go run ./cmd/ate-setup deploy ate-system \
+          --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}" \
+          --ingress-allowed-spiffe-ids="${ATE_INGRESS_ALLOWED_SPIFFE_IDS:-${DEMO_CONF_ROUTER_SPIFFE_ID}}"
+      fi
+    )
   fi
   ver_out="$(run_kubectl exec -n ate-system deployment/ate-api-server -c ate-api-server -- /ko-app/ateapi --version 2>/dev/null || true)"
   labels="$(substrate_version_from_output "${ver_out}")"
@@ -516,7 +532,6 @@ conf_apply_dashboard() {
 conf_deploy() {
   log_step "Deploying the conference demo"
   log_target_context
-  : "${BUCKET_NAME:?BUCKET_NAME must be set}"
   : "${KO_DOCKER_REPO:?KO_DOCKER_REPO must be set}"
   local tool
   for tool in kubectl ko docker jq go; do
@@ -661,11 +676,11 @@ conf_main() {
       echo "  up              deploy the demo onto a cluster running Substrate at the go.mod pin"
       echo "  down            delete it (router flags and the gateway service account stay)"
       echo "  --patch-router  patch atenet-router's timeouts and grace period instead of failing"
-      echo "  Required env: KO_DOCKER_REPO, BUCKET_NAME"
-      echo "  Optional env: PROJECT_ID (enables Vertex AI; unset runs mock replies), VERTEX_LOCATION,"
+      echo "  Required env: KO_DOCKER_REPO"
+      echo "  Optional env: PROJECT_ID (enables Gemini on Agent Platform; unset runs mock replies), VERTEX_LOCATION,"
       echo "                DEMO_DOMAIN, ALLOWED_GOOGLE_DOMAINS, GOOGLE_CLIENT_ID, FIREBASE_API_KEY,"
       echo "                CHAT_RATE_LIMIT_RPM (default 10), SESSION_RATE_LIMIT_RPM (default 10),"
-      echo "                DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO,"
+      echo "                DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO, BUCKET_NAME, SNAPSHOT_LOCATION,"
       echo "                DEMO_CONF_MIN_WORKERS (default 2), DEMO_CONF_MAX_WORKERS (default 5),"
       echo "                DEMO_CONF_ACTORS_PER_WORKER (default 4),"
       echo "                KUBECTL_CONTEXT (defaults to the current kube context),"

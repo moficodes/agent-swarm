@@ -19,7 +19,7 @@ limitations under the License.
 ## Prerequisites
 
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
-  at the version pinned in `go.mod` (currently the `v0.6.0` release).
+  at the version pinned in `go.mod` (currently the `v1.0.0-rc.1` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
   version; see "Bumping Substrate" below to move the pin. Substrate needs
   GKE 1.37 or later, which some zones offer only in the RAPID channel.
@@ -70,16 +70,16 @@ limitations under the License.
   and its Vertex AI binding itself.
 - `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, `shellcheck` (for
   `make verify`), and `gcloud` (only needed for Vertex AI).
-- Environment variables: `KO_DOCKER_REPO` and `BUCKET_NAME` are required.
-  `PROJECT_ID` is optional and enables Vertex AI; leave it unset to run with
+- Environment variables: `KO_DOCKER_REPO` is required.
+  `PROJECT_ID` is optional and enables Gemini on Agent Platform; leave it unset to run with
   mock replies. Also optional: `VERTEX_LOCATION`, `DEMO_DOMAIN`,
   `DEMO_CONF_ACTORS` (default 50), `DEMO_CONF_MIN_WORKERS` (default 2) and
   `DEMO_CONF_MAX_WORKERS` (default 5), the `conf-workers` autoscaling range,
   `DEMO_CONF_ACTORS_PER_WORKER` (default 4, the actors each worker hosts at
   once),
   `SUBSTRATE_REPO` (a clean substrate checkout
-  at the pin; `hack/deploy.sh` installs Substrate from it when the
-  `ate-system` namespace is missing), `KUBECTL_CONTEXT` (which kube context
+  at the pin; `hack/deploy.sh` installs Substrate from it via `ate-setup` when the
+  `ate-system` namespace is missing, using `SNAPSHOT_LOCATION` or `BUCKET_NAME`), `KUBECTL_CONTEXT` (which kube context
   to target; defaults to the current one), `DEMO_CONF_ALLOW_DIRTY_SUBSTRATE`
   (accept a cluster built from a `<pin>-dirty` checkout; see "Bumping
   Substrate"), and
@@ -225,9 +225,10 @@ conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
 
 ## Deploy
 
-Required environment: `BUCKET_NAME` (GCS bucket for actor snapshots),
-`KO_DOCKER_REPO`. Optional: `PROJECT_ID` (enables Vertex AI; unset runs in
-mock mode with `DEMO_MOCK_LLM=true`), `VERTEX_LOCATION` (default
+Required environment: `KO_DOCKER_REPO` (actors use the cluster's
+`--snapshot-location`, though `BUCKET_NAME` or `SNAPSHOT_LOCATION` is needed
+when `SUBSTRATE_REPO` installs Substrate). Optional: `PROJECT_ID` (enables
+Gemini on Agent Platform; unset runs in mock mode with `DEMO_MOCK_LLM=true`), `VERTEX_LOCATION` (default
 `us-central1`), `DEMO_DOMAIN` (fronts the gateway with a TLS Ingress). See
 "Prerequisites" above for the full list.
 
@@ -426,9 +427,9 @@ export PRESENTER_TOKEN="$(kubectl get secret conf-gateway -n ate-demo-conf -o js
 between releases. `hack/deploy.sh` checks the cluster's running
 `ate-api-server` version (`/ko-app/ateapi --version`) against that pin and
 refuses to deploy on a mismatch. Install from a clean checkout of exactly the
-pinned version: a tag pin needs a version equal to the tag (`v0.6.0`), and a
+pinned version: a tag pin needs a version equal to the tag (`v1.0.0-rc.1`), and a
 commit pin accepts the commit or the describe form after a tag
-(`v0.6.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
+(`v1.0.0-rc.1-5-g1a2b3c4d`). To move the pin, for example to the next release:
 
 ```bash
 go get -tool go.ate.dev/substrate/cmd/kubectl-ate@<tag-or-commit>

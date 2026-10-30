@@ -279,7 +279,7 @@ fi
 # The autoscaling manifest carries the configured range; the WorkerPool
 # carries the replicas deploy.sh chose and the pod requests.
 auto="$(DEMO_CONF_MIN_WORKERS=3 DEMO_CONF_MAX_WORKERS=4 conf_render manifests/autoscaling.yaml.tmpl)"
-for want in "minReplicas: 3" "maxReplicas: 4" "name: conf-workers" "kind: WorkerPool" 'averageValue: "1"' \
+for want in "minReplicas: 3" "maxReplicas: 4" "name: conf-workers" "apiVersion: ate.dev/v1" "kind: WorkerPool" 'averageValue: "1"' \
             'ate_worker_state="partial"' 'ate_worker_state="at_capacity"' \
             "ceil((sum(atenet_router_parking_active) or vector(0)) / 4)" "conf_worker_demand"; do
   if ! grep -qF -- "${want}" <<<"${auto}"; then
@@ -301,7 +301,7 @@ if ! conf_render manifests/gateway.yaml.tmpl | grep -A1 -F "name: ACTORS_PER_WOR
   fail=1
 fi
 pool_yaml="$(DEMO_CONF_WORKER_REPLICAS=4 conf_render manifests/workerpool.yaml.tmpl)"
-for want in 'ate.dev/api-access: "true"' "replicas: 4" "sandboxClasses:" "- name: gvisor" "cpu: 500m" "memory: 2304Mi"; do
+for want in 'ate.dev/api-access: "true"' "apiVersion: ate.dev/v1" "replicas: 4" "sandboxClasses:" "- name: gvisor" "cpu: 500m" "memory: 2304Mi"; do
   if ! grep -qF -- "${want}" <<<"${pool_yaml}"; then
     echo "FAIL: rendered workerpool manifest lacks ${want}" >&2
     fail=1
@@ -427,7 +427,7 @@ if [[ "$(substrate_label_mismatch_kind v0.2.0 'v0.2.0-dirty')" != dirty ]]; then
 fi
 
 # substrate_repo_clean flags an uncommitted change in SUBSTRATE_REPO before
-# conf_check_substrate installs from it: install-ate.sh would stamp nodes
+# conf_check_substrate installs from it: ate-setup would stamp binaries
 # "-dirty" from a modified checkout, which substrate_labels_match then
 # refuses by default.
 tmp_repo="$(mktemp -d)"
@@ -461,8 +461,8 @@ if [[ "${out}" != *"Target cluster context: my-ctx"* ]]; then
 fi
 
 # substrate_pin reads the pinned tag (or commit) from go.mod.
-if [[ "$(substrate_pin)" != "v0.6.0" ]]; then
-  echo "FAIL: substrate_pin = '$(substrate_pin)', want v0.6.0" >&2
+if [[ "$(substrate_pin)" != "v1.0.0-rc.1" ]]; then
+  echo "FAIL: substrate_pin = '$(substrate_pin)', want v1.0.0-rc.1" >&2
   fail=1
 fi
 
@@ -475,6 +475,10 @@ expect_ver_out() {
     fail=1
   fi
 }
+expect_ver_out v1.0.0-rc.1 "v1.0.0-rc.1 commit=c27cb01590a11b2f50489971985ba033b4c9eff7 built=2026-10-29T20:00:00Z linux/amd64"
+expect_ver_out v1.0.0-rc.1-dirty "v1.0.0-rc.1-dirty commit=c27cb01590a11b2f50489971985ba033b4c9eff7 built=2026-10-29T20:00:00Z linux/amd64"
+expect_ver_out v1.0.0-rc.1 "go.ate.dev/substrate.Version=v1.0.0-rc.1 commit=c27cb01590a11b2f50489971985ba033b4c9eff7 built=2026-10-29T20:00:00Z linux/amd64"
+expect_ver_out v1.0.0-rc.1-dirty "go.ate.dev/substrate.Version=v1.0.0-rc.1+dirty commit=c27cb01590a11b2f50489971985ba033b4c9eff7-dirty built=2026-10-29T20:00:00Z linux/amd64"
 expect_ver_out v0.6.0 "go.ate.dev/substrate.Version=v0.6.0 commit=d3f2363590a11b2f50489971985ba033b4c9eff7 built=2026-10-21T20:00:00Z linux/amd64"
 expect_ver_out v0.6.0-dirty "go.ate.dev/substrate.Version=v0.6.0+dirty commit=d3f2363590a11b2f50489971985ba033b4c9eff7-dirty built=2026-10-21T20:00:00Z linux/amd64"
 expect_ver_out v0.5.0 "github.com/agent-substrate/substrate.Version=v0.5.0 commit=e8d40c33f96f4b7a4984bfea7334a36ab5b45b7b built=2026-10-14T21:12:11Z linux/amd64"
@@ -504,6 +508,7 @@ expect_pin v0.3.0 v0.3.0
 expect_pin v0.4.0 v0.4.0
 expect_pin v0.5.0 v0.5.0
 expect_pin v0.6.0 v0.6.0
+expect_pin v1.0.0-rc.1 v1.0.0-rc.1
 
 # cc_pick_version takes the newest release of the minor version from gcloud's
 # newest-first list, and fails when the channel has none.

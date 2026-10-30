@@ -24,7 +24,7 @@
             "owner": "SNAPSHOT_OWNER_ACTOR",
             "fidelity": "SNAPSHOT_FIDELITY_MEMORY",
             "durableSnapshot": {
-              "status": "SNAPSHOT_STORAGE_STATUS_COMPLETED",
+              "state": "SNAPSHOT_STORAGE_STATE_COMPLETED",
               "object": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-03/9"}
             }
           }

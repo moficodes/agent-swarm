@@ -29,9 +29,9 @@ have one; instead it runs as root inside gVisor and grants itself
 `CHOWN`, `SETUID`, `SETGID` and `DAC_OVERRIDE` so its executor can `setuid`
 down to `nobody` per sandboxed run
 (`manifests/actortemplate.yaml.tmpl`). The fix belongs in substrate's atelet
-([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/v0.6.0/cmd/atelet/oci.go),
+([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/cmd/atelet/oci.go),
 which builds the overlay) and ateworker
-([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/v0.6.0/internal/imagecache/bundle_linux.go),
+([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/internal/imagecache/bundle_linux.go),
 which lays out the bundle), so the overlay is traversable by whatever user
 the image specifies.
 

@@ -41,7 +41,6 @@ render() {
       -e "s|\${DEMO_MOCK_LLM}|false|g" \
       -e "s|\${ACTOR_COUNT}|50|g" \
       -e "s|\${DEMO_DOMAIN}|$2|g" \
-      -e "s|\${BUCKET_NAME}|b|g" \
       -e "s|\${TEMPLATE_REVISION}|1|g" \
       -e "s|\${WORKER_REPLICAS}|2|g" \
       -e "s|\${MIN_WORKERS}|2|g" \
@@ -143,7 +142,7 @@ for want in "preferredFidelity: SNAPSHOT_FIDELITY_MEMORY" "cpuMillicores: 1000" 
     status=1
   fi
 done
-for unwanted in "onCommit:" "SANDBOX_CLASS_GVISOR" "sandboxConfig:" "quantity:"; do
+for unwanted in "onCommit:" "SANDBOX_CLASS_GVISOR" "sandboxConfig:" "quantity:" "storageLocation:"; do
   if grep -qF -- "${unwanted}" <<<"${out_template}"; then
     echo "error: actor template manifest still has removed field ${unwanted}" >&2
     status=1
@@ -151,11 +150,25 @@ for unwanted in "onCommit:" "SANDBOX_CLASS_GVISOR" "sandboxConfig:" "quantity:";
 done
 
 out_workerpool="$(render "${WORKERPOOL_MANIFEST}" "")"
-for want in 'ate.dev/api-access: "true"' "sandboxClasses:" "- name: gvisor" "ko://go.ate.dev/substrate/cmd/ateworker-gvisor"; do
+for want in 'ate.dev/api-access: "true"' "apiVersion: ate.dev/v1" "sandboxClasses:" "- name: gvisor" "ko://go.ate.dev/substrate/cmd/ateworker-gvisor"; do
   if ! grep -qF -- "${want}" <<<"${out_workerpool}"; then
     echo "error: workerpool manifest lacks ${want}" >&2
     status=1
   fi
 done
+if grep -qF -- "ate.dev/v1alpha1" <<<"${out_workerpool}"; then
+  echo "error: workerpool manifest still references ate.dev/v1alpha1" >&2
+  status=1
+fi
+
+out_autoscaling="$(render "${AUTOSCALING_MANIFEST}" "")"
+if ! grep -qF -- "apiVersion: ate.dev/v1" <<<"${out_autoscaling}"; then
+  echo "error: autoscaling manifest lacks scaleTargetRef apiVersion: ate.dev/v1" >&2
+  status=1
+fi
+if grep -qF -- "ate.dev/v1alpha1" <<<"${out_autoscaling}"; then
+  echo "error: autoscaling manifest still references ate.dev/v1alpha1" >&2
+  status=1
+fi
 
 exit "${status}"

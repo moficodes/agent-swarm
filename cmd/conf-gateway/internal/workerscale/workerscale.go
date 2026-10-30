@@ -32,7 +32,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
-var workerPoolGVR = schema.GroupVersionResource{Group: "ate.dev", Version: "v1alpha1", Resource: "workerpools"}
+var workerPoolGVR = schema.GroupVersionResource{Group: "ate.dev", Version: "v1", Resource: "workerpools"}
 
 // fetchTimeout bounds one Fetch, so a slow API server cannot stall the
 // gateway's poll loop.

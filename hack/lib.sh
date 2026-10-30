@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Helpers for hack/deploy.sh, ported from substrate's hack/install-ate.sh.
+# Helpers for hack/deploy.sh.
 # Sourced; expects to run from the repo root.
 
 SUBSTRATE_MODULE=go.ate.dev/substrate
@@ -66,8 +66,8 @@ substrate_pin() {
 }
 
 # substrate_version_from_output normalizes `ateapi --version` output
-# (e.g. "go.ate.dev/substrate.Version=v0.6.0 commit=d3f23635... built=...")
-# to a version label ("v0.6.0", "v0.6.0-dirty", or a 12-character commit
+# (e.g. "v1.0.0-rc.1 commit=c27cb015... built=...")
+# to a version label ("v1.0.0-rc.1", "v1.0.0-rc.1-dirty", or a 12-character commit
 # prefix) that substrate_labels_match can compare against substrate_pin.
 substrate_version_from_output() {
   local out="$1" ver commit="" dirty=""
@@ -166,7 +166,7 @@ substrate_label_mismatch_kind() {
 }
 
 # substrate_repo_clean succeeds if REPO's working tree has no uncommitted
-# changes. install-ate.sh stamps binaries "<version>-dirty" when run from a
+# changes. ate-setup stamps binaries "<version>-dirty" when run from a
 # modified checkout, which substrate_labels_match then refuses by default,
 # so conf_check_substrate checks this before installing from SUBSTRATE_REPO.
 substrate_repo_clean() {

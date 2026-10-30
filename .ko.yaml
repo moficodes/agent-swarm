@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Same default base as substrate's .ko.yaml, which ateworker-gvisor is built with.
-defaultBaseImage: gcr.io/distroless/static-debian13:latest@sha256:f2ea2709ac8db56323cbd7d014277f32cb572d9ea124b0076f7aafe5980678fe
+defaultBaseImage: gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 
 defaultPlatforms:
   - linux/amd64

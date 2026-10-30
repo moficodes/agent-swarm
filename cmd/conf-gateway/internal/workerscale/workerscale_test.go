@@ -41,7 +41,7 @@ const (
 	name = "conf-workers"
 )
 
-var poolGVR = schema.GroupVersionResource{Group: "ate.dev", Version: "v1alpha1", Resource: "workerpools"}
+var poolGVR = schema.GroupVersionResource{Group: "ate.dev", Version: "v1", Resource: "workerpools"}
 
 func hpa(current, desired, max int32) *autoscalingv2.HorizontalPodAutoscaler {
 	return &autoscalingv2.HorizontalPodAutoscaler{
@@ -58,7 +58,7 @@ func pool(replicas int64) *unstructured.Unstructured {
 		spec["replicas"] = replicas
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "ate.dev/v1alpha1",
+		"apiVersion": "ate.dev/v1",
 		"kind":       "WorkerPool",
 		"metadata":   map[string]any{"name": name, "namespace": ns},
 		"spec":       spec,

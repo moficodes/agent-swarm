@@ -64,21 +64,21 @@ func TestParseActorList_SnapshotGenerations(t *testing.T) {
           {
             "generation": 1,
             "durableSnapshot": {
-              "status": "SNAPSHOT_STORAGE_STATUS_COMPLETED",
+              "state": "SNAPSHOT_STORAGE_STATE_COMPLETED",
               "object": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-07/1"}
             }
           },
           {
             "generation": 2,
             "durableSnapshot": {
-              "status": "SNAPSHOT_STORAGE_STATUS_COMPLETED",
+              "state": "SNAPSHOT_STORAGE_STATE_COMPLETED",
               "object": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-07/2"}
             }
           },
           {
             "generation": 3,
             "durableSnapshot": {
-              "status": "SNAPSHOT_STORAGE_STATUS_PENDING",
+              "state": "SNAPSHOT_STORAGE_STATE_PENDING",
               "object": {"snapshotUri": "gs://conf-snapshots/ate-demo-conf/attendee-07/3"}
             }
           }
