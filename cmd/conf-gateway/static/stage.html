@@ -89,6 +89,11 @@ limitations under the License.
           <span class="spec-value">gVisor runsc</span>
         </div>
         <div class="spec-card">
+          <span class="spec-label">AGENT WORKSPACE</span>
+          <span id="workspace-mode" class="spec-value">--</span>
+          <span id="workspace-bound" class="spec-note spec-note-cyan" hidden></span>
+        </div>
+        <div class="spec-card">
           <span class="spec-label">ACTOR STATE</span>
           <span class="spec-value highlight-green">Live from ateapi</span>
         </div>
@@ -313,6 +318,10 @@ limitations under the License.
           <div class="drawer-metric full-width">
             <span class="drawer-metric-label">SNAPSHOT</span>
             <span id="spotlight-snapshot" class="drawer-metric-value snapshot-path">No snapshot</span>
+          </div>
+          <div class="drawer-metric full-width">
+            <span class="drawer-metric-label">AGENT VOLUME (/WORKSPACE)</span>
+            <span id="spotlight-volume" class="drawer-metric-value snapshot-path">Container rootfs · /tmp/workspace</span>
           </div>
         </div>
       </div>

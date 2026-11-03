@@ -47,9 +47,20 @@ run_kubectl_fatal() {
   fi
 }
 
-# run_kubectl_ate runs the kubectl-ate pinned in go.mod.
+# conf_storage_class_enabled succeeds when DEMO_CONF_STORAGE_CLASS names an
+# external volume StorageClass (anything non-empty other than "none").
+conf_storage_class_enabled() {
+  [[ -n "${DEMO_CONF_STORAGE_CLASS:-}" && "${DEMO_CONF_STORAGE_CLASS}" != "none" ]]
+}
+
+# run_kubectl_ate runs the kubectl-ate pinned in go.mod. ExternalVolumes is
+# preview-gated in Substrate v1.0.0-rc.1, so --preview is passed whenever an
+# external volume StorageClass is configured.
 run_kubectl_ate() {
-  go tool kubectl-ate ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} "$@"
+  local flags=()
+  [[ -n "${KUBECTL_CONTEXT:-}" ]] && flags+=("--context=${KUBECTL_CONTEXT}")
+  conf_storage_class_enabled && flags+=("--preview")
+  go tool kubectl-ate "${flags[@]}" "$@"
 }
 
 # substrate_pin prints the substrate version pinned in go.mod: the release

@@ -181,10 +181,10 @@ func (s *WorkloadServer) routes() {
 	s.mux.HandleFunc(types.ModelResultPath, s.handleModelResult)
 }
 
-// handleClearHistory drops the conversation history and any pending
-// approval, so the actor's next user starts with a fresh model context. Only
-// the gateway knows the actor's model key, so the request must carry the key
-// the actor already holds; an actor that holds none has no history yet.
+// handleClearHistory drops the conversation history, any pending approval,
+// and files in the workspace directory so the actor's next user starts fresh.
+// Only the gateway knows the actor's model key, so the request must carry the
+// key the actor already holds; an actor that holds none has no history yet.
 func (s *WorkloadServer) handleClearHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -192,14 +192,21 @@ func (s *WorkloadServer) handleClearHistory(w http.ResponseWriter, r *http.Reque
 	}
 	k := r.Header.Get(types.ModelKeyHeader)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if k == "" || (s.modelKey != "" && subtle.ConstantTimeCompare([]byte(k), []byte(s.modelKey)) != 1) {
+		s.mu.Unlock()
 		http.Error(w, "gateway key required", http.StatusForbidden)
 		return
 	}
 	s.history = nil
 	s.pendingApproval = nil
 	s.pendingFix = false
+	exec := s.executor
+	s.mu.Unlock()
+	if exec != nil {
+		if err := exec.ClearWorkspace(); err != nil {
+			log.Printf("clearing workspace: %v", err)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

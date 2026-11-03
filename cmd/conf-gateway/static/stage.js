@@ -23,6 +23,8 @@
     workerPodsScaling: document.getElementById('worker-pods-scaling'),
     oversubRatio: document.getElementById('oversub-ratio'),
     oversubWaiting: document.getElementById('oversub-waiting'),
+    workspaceMode: document.getElementById('workspace-mode'),
+    workspaceBound: document.getElementById('workspace-bound'),
     qrCode: document.getElementById('qr-code'),
     qrLink: document.getElementById('qr-link'),
     qrUrlText: document.getElementById('qr-url-text'),
@@ -49,6 +51,7 @@
     spotlightClose: document.getElementById('spotlight-close'),
     spotlightWorker: document.getElementById('spotlight-worker'),
     spotlightSnapshot: document.getElementById('spotlight-snapshot'),
+    spotlightVolume: document.getElementById('spotlight-volume'),
     spotlightFootprint: document.getElementById('spotlight-footprint'),
     spotlightPrompt: document.getElementById('spotlight-prompt'),
     spotlightCode: document.getElementById('spotlight-code'),
@@ -417,6 +420,9 @@
     const busySeats = (data.workers || []).reduce((n, w) => n + (w.actors || []).length, 0);
     updateWorkerPods(data.worker_pods, data.actor_count || 0, seats, busySeats,
       data.parked_requests || 0, data.parking_available);
+
+    // 7. Update the agent workspace volume header card
+    updateWorkspaceSpec(data.actors || {});
   }
 
   // formatRatio shows one decimal below 10x, so 50 actors on 20 seats reads
@@ -498,9 +504,24 @@
   }
 
   // updateMockBanner shows the "Mock LLM" banner when the gateway is
-  // configured without a real Vertex AI backend.
+  // configured without a real Gemini backend.
   function updateMockBanner(mockLLM) {
     if (el.mockBanner) el.mockBanner.hidden = !mockLLM;
+  }
+
+  // updateWorkspaceSpec populates the header's agent workspace card from live
+  // external volume bindings across reported actors.
+  function updateWorkspaceSpec(actorsMap) {
+    if (!el.workspaceMode) return;
+    const summary = window.ActorView.fleetVolumes(actorsMap);
+    el.workspaceMode.textContent = summary.label;
+    el.workspaceMode.className = 'spec-value' + (summary.configured ? ' highlight-cyan' : '');
+    if (el.workspaceBound) {
+      const showSub = summary.known && !!summary.sub;
+      el.workspaceBound.hidden = !showSub;
+      el.workspaceBound.textContent = showSub ? summary.sub : '';
+      el.workspaceBound.className = 'spec-note' + (summary.configured ? ' spec-note-cyan' : '');
+    }
   }
 
   // renderSeatHTML renders one of a worker's seats: the actor holding it and
@@ -788,6 +809,19 @@
       } else {
         el.spotlightSnapshot.textContent = 'No snapshot';
         el.spotlightSnapshot.removeAttribute('title');
+      }
+    }
+
+    // Agent volume (/workspace)
+    if (el.spotlightVolume) {
+      const vol = window.ActorView.volume(data);
+      const sep = vol.bound ? ' → ' : ' · ';
+      el.spotlightVolume.textContent = vol.sub ? vol.label + sep + vol.sub : vol.label;
+      el.spotlightVolume.className = 'drawer-metric-value snapshot-path' + (vol.bound ? ' highlight-cyan' : '');
+      if (vol.uri) {
+        el.spotlightVolume.title = vol.uri;
+      } else {
+        el.spotlightVolume.removeAttribute('title');
       }
     }
 

@@ -90,9 +90,18 @@ func TestBoard_ActivitySurvivesPolls(t *testing.T) {
 
 func TestBoard_MissingActorBecomesUnknown(t *testing.T) {
 	b := actorstate.NewBoard(func(types.ActorView) {})
-	b.SetStatuses([]actorstate.Status{{Name: "a", State: types.StateRunning}})
+	b.SetStatuses([]actorstate.Status{{
+		Name:        "a",
+		State:       types.StateRunning,
+		VolumeType:  "filestore.csi.storage.gke.io",
+		VolumeShare: "192.0.2.10:/s123",
+		VolumeURI:   "volumepool://proj/us-west1/pool/volumes/a",
+	}})
+	if v, _ := b.View("a"); v.VolumeShare != "192.0.2.10:/s123" || v.VolumeType != "filestore.csi.storage.gke.io" {
+		t.Fatalf("view before clear = %+v", v)
+	}
 	b.SetStatuses(nil)
-	if v, _ := b.View("a"); v.State != types.StateUnknown || v.StateDetail == "" {
+	if v, _ := b.View("a"); v.State != types.StateUnknown || v.StateDetail == "" || v.VolumeShare != "" || v.VolumeType != "" || v.VolumeURI != "" {
 		t.Errorf("view = %+v", v)
 	}
 }

@@ -135,8 +135,29 @@ func (s *SandboxExecutor) limitMemory(cmd *exec.Cmd) {
 	cmd.Path = "/bin/sh"
 }
 
-// clearWorkspace removes everything left in the workspace by earlier runs.
-func (s *SandboxExecutor) clearWorkspace() error {
+// ensureWorkspaceOwner hands dir to sandboxUID:sandboxGID when it is owned by
+// another user. Restoring an actor from a template golden snapshot attaches a
+// fresh external volume mounted as root:root after NewSandboxExecutor has
+// already run, so Execute checks ownership before dropping privileges.
+func ensureWorkspaceOwner(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return nil
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid == sandboxUID && st.Gid == sandboxGID {
+		return nil
+	}
+	if err := os.Chown(dir, sandboxUID, sandboxGID); err != nil {
+		return fmt.Errorf("failed to chown workspace: %w", err)
+	}
+	return nil
+}
+
+// ClearWorkspace removes everything inside WorkspaceDir while keeping the
+// directory itself intact for mounted volumes.
+func (s *SandboxExecutor) ClearWorkspace() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	entries, err := os.ReadDir(s.WorkspaceDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -159,12 +180,17 @@ func (s *SandboxExecutor) Execute(ctx context.Context, lang string, script strin
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.clearWorkspace(); err != nil {
-		return nil, err
-	}
 
 	start := time.Now()
 	runAsNobody := os.Geteuid() == 0
+	if runAsNobody {
+		if err := ensureWorkspaceOwner(s.WorkspaceDir); err != nil {
+			return nil, err
+		}
+		if err := MakeTraversable("/"); err != nil {
+			return nil, err
+		}
+	}
 	var cmd *exec.Cmd
 
 	switch lang {

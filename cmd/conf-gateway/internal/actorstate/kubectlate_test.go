@@ -108,6 +108,92 @@ func TestParseActorList_RejectsGarbage(t *testing.T) {
 	}
 }
 
+func TestParseActorList_ExternalVolumes(t *testing.T) {
+	const raw = `{
+  "actors": [
+    {
+      "metadata": {"name": "attendee-01"},
+      "status": {
+        "state": "ACTOR_STATE_SUSPENDED",
+        "externalVolumes": {
+          "volumes": [
+            {
+              "name": "workspace",
+              "volumeType": "filestore.csi.storage.gke.io"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "metadata": {"name": "attendee-02"},
+      "status": {
+        "state": "ACTOR_STATE_RUNNING",
+        "workerAssignment": {"workerPod": "conf-workers-5f9b8-a1b2c"},
+        "externalVolumes": {
+          "volumes": [
+            {
+              "name": "workspace",
+              "volumeType": "filestore.csi.storage.gke.io",
+              "storageVolumeId": "volumepool://proj/us-west1/demo-pool/volumes/substrate-a2-workspace?ip=192.0.2.10",
+              "volumeContext": {
+                "fileProtocol": "NFS_V3",
+                "ip": "192.0.2.10",
+                "volume": "s0431e9f5d9e2484580f7d90c18ff1651"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "metadata": {"name": "attendee-03"},
+      "status": {
+        "state": "ACTOR_STATE_SUSPENDED",
+        "externalVolumes": {
+          "volumes": [
+            {
+              "name": "workspace",
+              "volumeType": "pd.csi.storage.gke.io",
+              "storageVolumeId": "projects/proj/zones/us-west1-c/disks/pvc-123"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}`
+	got, err := actorstate.ParseActorList([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []actorstate.Status{
+		{
+			Name:       "attendee-01",
+			State:      types.StateSuspended,
+			VolumeType: "filestore.csi.storage.gke.io",
+		},
+		{
+			Name:        "attendee-02",
+			State:       types.StateRunning,
+			WorkerPod:   "conf-workers-5f9b8-a1b2c",
+			VolumeType:  "filestore.csi.storage.gke.io",
+			VolumeShare: "192.0.2.10:/s0431e9f5d9e2484580f7d90c18ff1651",
+			VolumeURI:   "volumepool://proj/us-west1/demo-pool/volumes/substrate-a2-workspace?ip=192.0.2.10",
+		},
+		{
+			Name:        "attendee-03",
+			State:       types.StateSuspended,
+			VolumeType:  "pd.csi.storage.gke.io",
+			VolumeShare: "projects/proj/zones/us-west1-c/disks/pvc-123",
+			VolumeURI:   "projects/proj/zones/us-west1-c/disks/pvc-123",
+		},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("ParseActorList =\n%+v\nwant\n%+v", got, want)
+	}
+}
+
 type recordedCall struct {
 	name string
 	args []string

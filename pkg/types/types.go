@@ -59,7 +59,8 @@ const (
 const ModelKeyHeader = "X-Conf-Model-Key"
 
 // ClearHistoryPath is the actor endpoint the gateway POSTs to, through the
-// router, to drop the actor's conversation history and pending approval.
+// router, to drop the actor's conversation history, pending approval, and
+// workspace files.
 const ClearHistoryPath = "/api/history/clear"
 
 // ModelResultPath is the actor endpoint the gateway POSTs a ModelResult to,
@@ -136,6 +137,9 @@ type ActorView struct {
 	Activity     Activity       `json:"activity,omitempty"`
 	WorkerPod    string         `json:"worker_pod,omitempty"`
 	SnapshotURI  string         `json:"snapshot_uri,omitempty"`
+	VolumeType   string         `json:"volume_type,omitempty"`
+	VolumeShare  string         `json:"volume_share,omitempty"`
+	VolumeURI    string         `json:"volume_uri,omitempty"`
 	Source       ReplySource    `json:"source,omitempty"`
 }
 

@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -994,5 +995,33 @@ func TestClearHistory_RequiresTheGatewayKey(t *testing.T) {
 	}
 	if s.ModelKey() != "k.mac" {
 		t.Errorf("ModelKey = %q, a rejected clear must not replace it", s.ModelKey())
+	}
+}
+
+func TestClearHistory_ClearsWorkspaceFiles(t *testing.T) {
+	ws := t.TempDir()
+	fake := geminitest.New(t, geminitest.ApprovalResponse("write diary", "with open('diary.txt', 'w') as f:\n    f.write('kept')\n", "python"))
+	s := server.NewWorkloadServer(server.WithWorkspaceDir(ws), server.WithGeminiConfig(geminiConfig))
+
+	msg := postChat(t, s.Handler(), fake.URL, "k.mac", "write diary")
+	if msg.Approval == nil {
+		t.Fatal("expected approval request")
+	}
+	if rec := postApprove(t, s.Handler(), types.ApprovalResponse{ApprovalID: msg.Approval.ApprovalID, Decision: types.DecisionApprove}); rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d", rec.Code)
+	}
+
+	if code := postClear(s.Handler(), http.MethodPost, "forged.mac"); code != http.StatusForbidden {
+		t.Fatalf("forged clear status = %d, want 403", code)
+	}
+	if entries, err := os.ReadDir(ws); err != nil || len(entries) != 1 {
+		t.Fatalf("workspace entries after rejected clear = %v, err %v; want diary.txt kept", entries, err)
+	}
+
+	if code := postClear(s.Handler(), http.MethodPost, "k.mac"); code != http.StatusNoContent {
+		t.Fatalf("clear status = %d, want 204", code)
+	}
+	if entries, err := os.ReadDir(ws); err != nil || len(entries) != 0 {
+		t.Fatalf("workspace entries after clear = %v, err %v; want empty", entries, err)
 	}
 }

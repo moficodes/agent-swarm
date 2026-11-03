@@ -425,6 +425,18 @@ func TestMockEngine_GenerateTurn_TailoredSimulationPrompts(t *testing.T) {
 			wantInCode:  "os.environ",
 			wantInOut:   "[SANDBOX] Isolation",
 		},
+		{
+			prompt:      "Append the current UTC time and process PID to diary.txt in the workspace",
+			wantSummary: "Append Entry to Persistent Workspace Diary",
+			wantInCode:  "diary.txt",
+			wantInOut:   "[SANDBOX] Persistent Diary",
+		},
+		{
+			prompt:      "Compare os.statvfs('.') capacity against RLIMIT_AS in the workspace",
+			wantSummary: "Probe Persistent Filestore Workspace vs. Sandbox RAM Limit",
+			wantInCode:  "sqlite3",
+			wantInOut:   "[SANDBOX] Workspace Storage",
+		},
 	}
 
 	seenSummaries := make(map[string]bool)
@@ -527,20 +539,38 @@ func TestSandboxExecutor_OutputCapped(t *testing.T) {
 	}
 }
 
-func TestSandboxExecutor_WorkspaceClearedBetweenRuns(t *testing.T) {
+func TestSandboxExecutor_WorkspacePersistsUntilCleared(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	executor := engine.NewSandboxExecutor(t.TempDir())
-	if _, err := executor.Execute(ctx, "sh", "echo secret > leftover.txt; mkdir -p sub && touch sub/nested"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if _, err := executor.Execute(ctx, "python", "with open('diary.txt', 'w') as f:\n    f.write('turn-1\\n')\n"); err != nil {
+		t.Fatalf("unexpected error on turn 1: %v", err)
 	}
-	res, err := executor.Execute(ctx, "sh", "ls -A")
+	if _, err := executor.Execute(ctx, "sh", "mkdir -p sub && echo nested > sub/item.txt"); err != nil {
+		t.Fatalf("unexpected error creating subdir: %v", err)
+	}
+
+	res, err := executor.Execute(ctx, "sh", "cat diary.txt sub/item.txt && ls -A")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error on second run: %v", err)
 	}
-	if out := strings.TrimSpace(res.Stdout); out != "" {
-		t.Fatalf("expected empty workspace on second run, got %q", out)
+	if !strings.Contains(res.Stdout, "turn-1") || !strings.Contains(res.Stdout, "nested") {
+		t.Fatalf("expected workspace files to persist across runs, got %q", res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "script_") {
+		t.Fatalf("expected temporary script_*.py files to be removed, got %q", res.Stdout)
+	}
+
+	if err := executor.ClearWorkspace(); err != nil {
+		t.Fatalf("ClearWorkspace: %v", err)
+	}
+	after, err := executor.Execute(ctx, "sh", "ls -A")
+	if err != nil {
+		t.Fatalf("unexpected error after ClearWorkspace: %v", err)
+	}
+	if out := strings.TrimSpace(after.Stdout); out != "" {
+		t.Fatalf("expected empty workspace after ClearWorkspace, got %q", out)
 	}
 }
 

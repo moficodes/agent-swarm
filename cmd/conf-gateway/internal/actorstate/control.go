@@ -29,6 +29,9 @@ type Status struct {
 	WorkerPod             string
 	InProgressSnapshotURI string
 	SnapshotURI           string
+	VolumeType            string
+	VolumeShare           string
+	VolumeURI             string
 }
 
 // ActorControl lists, suspends and reverts the demo's actors.

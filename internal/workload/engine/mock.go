@@ -143,6 +143,73 @@ print(f"Visible Env Keys: {', '.join(env_keys)}")
 print("Boundary Status : ISOLATED (gVisor sandbox)")`,
 		riskLevel: types.RiskHigh,
 	},
+	{
+		match:   "diary.txt",
+		content: "I prepared a script to append the current UTC timestamp, process PID, and workspace path to diary.txt in your persistent workspace, then list every entry recorded so far:",
+		summary: "Append Entry to Persistent Workspace Diary",
+		code: `import datetime, os
+
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+entry = f"{now} | pid={os.getpid()} | cwd={os.getcwd()}\n"
+with open("diary.txt", "a", encoding="utf-8") as f:
+    f.write(entry)
+
+with open("diary.txt", encoding="utf-8") as f:
+    lines = [line.rstrip("\n") for line in f if line.strip()]
+
+print(f"[SANDBOX] Persistent Diary | Entries={len(lines)} | Path={os.path.abspath('diary.txt')}")
+for idx, line in enumerate(lines, 1):
+    print(f"{idx:02d}. {line}")`,
+		riskLevel: types.RiskHigh,
+	},
+	{
+		match:   "statvfs",
+		content: "I prepared a workspace storage probe that writes a 16 MiB SQLite dataset in your persistent workspace and compares filesystem capacity against the sandbox's 320 MiB process memory limit:",
+		summary: "Probe Persistent Filestore Workspace vs. Sandbox RAM Limit",
+		code: `import os, resource, sqlite3
+
+cwd = os.getcwd()
+db_path = os.path.join(cwd, "workspace_probe.db")
+conn = sqlite3.connect(db_path)
+conn.execute("CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER, payload BLOB)")
+conn.execute("DELETE FROM chunks")
+chunk = b"\x42" * (1 << 20)
+pid = os.getpid()
+for _ in range(16):
+    conn.execute("INSERT INTO chunks (pid, payload) VALUES (?, ?)", (pid, chunk))
+conn.commit()
+rows = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+conn.close()
+
+db_mib = os.path.getsize(db_path) / (1 << 20)
+st = os.statvfs(cwd)
+total_mib = (st.f_frsize * st.f_blocks) / (1 << 20)
+free_mib = (st.f_frsize * st.f_bavail) / (1 << 20)
+soft_as, _ = resource.getrlimit(resource.RLIMIT_AS)
+cap_str = f"{soft_as // (1 << 20)} MiB" if soft_as > 0 else "unlimited"
+rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+mount_line = "rootfs"
+try:
+    with open("/proc/self/mountinfo", encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 5 and parts[4] == "/workspace":
+                mount_line = " ".join(parts[4:])
+                break
+except OSError:
+    pass
+
+print(f"[SANDBOX] Workspace Storage | CWD={cwd} | SQLite={db_mib:.1f}MiB ({rows}x1MiB) | MaxRSS={rss_mib:.1f}MiB")
+print("RESOURCE              | VALUE")
+print("----------------------+----------------------------------------")
+print(f"Workspace Mount       | {mount_line}")
+print(f"Workspace Capacity    | {total_mib:.0f} MiB total ({free_mib:.0f} MiB free)")
+print(f"SQLite File Written   | {db_mib:.1f} MiB on disk ({rows} rows)")
+print(f"Process RLIMIT_AS Cap | {cap_str}")
+print(f"Process Peak RSS      | {rss_mib:.1f} MiB in RAM")`,
+		riskLevel: types.RiskHigh,
+	},
 }
 
 var defaultMockScript = mockScript{

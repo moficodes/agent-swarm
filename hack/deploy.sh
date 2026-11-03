@@ -30,7 +30,12 @@ DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
-DEMO_CONF_TEMPLATE_REVISION=7
+DEMO_CONF_TEMPLATE_REVISION=8
+# DEMO_CONF_DEFAULT_STORAGE_CLASS is auto-selected for actor /workspace
+# volumes when both this StorageClass and the Filestore CSIDriverConfig exist
+# on the cluster (set DEMO_CONF_STORAGE_CLASS=none to keep /tmp/workspace).
+DEMO_CONF_DEFAULT_STORAGE_CLASS="substrate-volumepool-sc"
+DEMO_CONF_VOLUME_BYTES="${DEMO_CONF_VOLUME_BYTES:-1073741824}"
 # DEMO_CONF_ROUTER_SPIFFE_ID is the pod identity conf-gateway presents to
 # atenet-router's mTLS ingress (:443).
 DEMO_CONF_ROUTER_SPIFFE_ID="spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway"
@@ -90,6 +95,48 @@ conf_router_allows_spiffe() {
       elif $a[.] == $f then ($a[. + 1] // "")
       else empty end
     ) | map(split(",")[]) | index($id) != null' <<<"${args_json}" >/dev/null
+}
+
+# conf_ateapi_preview_enabled returns 0 if ARGS_JSON (ate-api-server's
+# container args) enables GATE or ALL via --preview.
+conf_ateapi_preview_enabled() {
+  local args_json="$1" gate="$2"
+  jq -e --arg f "--preview" --arg g "${gate}" '
+    . as $a | [range(0; length)] | map(
+      if ($a[.] | startswith($f + "=")) then ($a[.] | ltrimstr($f + "="))
+      elif $a[.] == $f then ($a[. + 1] // "")
+      else empty end
+    ) | map(split(",")[]) | (index($g) != null or index("ALL") != null)' <<<"${args_json}" >/dev/null
+}
+
+# conf_resolve_storage_class chooses DEMO_CONF_STORAGE_CLASS when unset and
+# verifies the cluster's StorageClass and ExternalVolumes preview gate when
+# active. Setting DEMO_CONF_STORAGE_CLASS=none skips external volumes.
+conf_resolve_storage_class() {
+  if [[ -z "${DEMO_CONF_STORAGE_CLASS:-}" ]]; then
+    if run_kubectl get storageclass "${DEMO_CONF_DEFAULT_STORAGE_CLASS}" >/dev/null 2>&1 \
+        && run_kubectl get csidriverconfigs.ate.dev filestore.csi.storage.gke.io >/dev/null 2>&1; then
+      DEMO_CONF_STORAGE_CLASS="${DEMO_CONF_DEFAULT_STORAGE_CLASS}"
+      log_step "Auto-detected external volume StorageClass ${DEMO_CONF_STORAGE_CLASS}"
+    fi
+  fi
+  if ! conf_storage_class_enabled; then
+    return 0
+  fi
+  if ! run_kubectl get storageclass "${DEMO_CONF_STORAGE_CLASS}" >/dev/null 2>&1; then
+    echo "error: StorageClass ${DEMO_CONF_STORAGE_CLASS} not found on the cluster." >&2
+    echo "Create it first, or set DEMO_CONF_STORAGE_CLASS=none to use /tmp/workspace." >&2
+    exit 1
+  fi
+  local args_json
+  args_json="$(run_kubectl get deployment ate-api-server -n ate-system \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="ate-api-server")].args}')"
+  if ! conf_ateapi_preview_enabled "${args_json:-[]}" "ExternalVolumes"; then
+    echo "error: DEMO_CONF_STORAGE_CLASS=${DEMO_CONF_STORAGE_CLASS} requires --preview=ExternalVolumes on deployment/ate-api-server in ate-system." >&2
+    echo "Enable it on ate-api-server, or set DEMO_CONF_STORAGE_CLASS=none to use /tmp/workspace." >&2
+    exit 1
+  fi
+  log_step "Actor workspaces will mount external volumes from StorageClass ${DEMO_CONF_STORAGE_CLASS} at /workspace"
 }
 
 # conf_router_flags_ok prints the changes atenet-router needs for
@@ -296,11 +343,17 @@ conf_build_gateway() {
 
 conf_render() {
   local seats="${DEMO_CONF_ACTORS_PER_WORKER}"
-  sed -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
+  local sandbox_workspace="/tmp/workspace"
+  if conf_storage_class_enabled; then
+    sandbox_workspace="/workspace"
+  fi
+  local out
+  out="$(sed -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
       -e "s|\${GATEWAY_GSA}|${DEMO_CONF_GATEWAY_GSA:-}|g" \
       -e "s|\${VERTEX_PROJECT}|${DEMO_CONF_VERTEX_PROJECT:-}|g" \
       -e "s|\${VERTEX_LOCATION}|${DEMO_CONF_VERTEX_LOCATION:-us-central1}|g" \
       -e "s|\${DEMO_MOCK_LLM}|${DEMO_CONF_MOCK_LLM:-true}|g" \
+      -e "s|\${SANDBOX_WORKSPACE}|${sandbox_workspace}|g" \
       -e "s|\${ACTOR_COUNT}|${DEMO_CONF_ACTORS}|g" \
       -e "s|\${DEMO_DOMAIN}|${DEMO_DOMAIN:-}|g" \
       -e "s|\${TEMPLATE_REVISION}|${DEMO_CONF_TEMPLATE_REVISION}|g" \
@@ -316,7 +369,27 @@ conf_render() {
       -e "s|\${SESSION_RATE_LIMIT_RPM}|${SESSION_RATE_LIMIT_RPM:-10}|g" \
       -e "s|\${WORKER_CPU_LIMIT}|$((10#${seats} * 1000 + 500))m|g" \
       -e "s|\${WORKER_MEMORY_REQUEST}|$((10#${seats} * 512 + 256))Mi|g" \
-      "$1"
+      "$1")"
+  if [[ "$1" == *actortemplate.yaml.tmpl ]] && conf_storage_class_enabled; then
+    awk -v sc="${DEMO_CONF_STORAGE_CLASS}" -v cap="${DEMO_CONF_VOLUME_BYTES}" '
+      /^resources:/ {
+        print "  volumeMounts:"
+        print "  - name: workspace"
+        print "    mountPath: /workspace"
+      }
+      { print }
+      END {
+        print "volumes:"
+        print "- name: workspace"
+        print "  external:"
+        print "    template:"
+        print "      storageClassName: " sc
+        print "      capacityBytes: " cap
+      }
+    ' <<<"${out}"
+    return 0
+  fi
+  printf '%s\n' "${out}"
 }
 
 # conf_discover_google_auth populates GOOGLE_CLIENT_ID and FIREBASE_API_KEY from
@@ -382,11 +455,17 @@ conf_ensure_secret() {
 }
 
 # conf_template_current succeeds if the conf-agent template JSON in
-# $1 carries the current DEMO_CONF_TEMPLATE_REVISION.
+# $1 carries the current DEMO_CONF_TEMPLATE_REVISION and matches the
+# configured external volume StorageClass.
 conf_template_current() {
-  jq -e --arg rev "${DEMO_CONF_TEMPLATE_REVISION}" '
-    [.containers[]? | select(.name == "conf-workload")] | first // {}
-    | [.env[]? | select(.name == "CONF_TEMPLATE_REVISION" and .value == $rev)] | length > 0' <<<"$1" >/dev/null
+  local want_sc=""
+  if conf_storage_class_enabled; then
+    want_sc="${DEMO_CONF_STORAGE_CLASS}"
+  fi
+  jq -e --arg rev "${DEMO_CONF_TEMPLATE_REVISION}" --arg sc "${want_sc}" '
+    (([.containers[]? | select(.name == "conf-workload")] | first // {})
+      | [.env[]? | select(.name == "CONF_TEMPLATE_REVISION" and .value == $rev)] | length > 0)
+    and ((([.volumes[]? | select(.name == "workspace")] | first // {}).external.template.storageClassName // "") == $sc)' <<<"$1" >/dev/null
 }
 
 conf_check_template() {
@@ -399,7 +478,7 @@ conf_check_template() {
     exit 1
   fi
   if ! conf_template_current "${env}"; then
-    echo "error: actor template conf-agent is out of date (it lacks CONF_TEMPLATE_REVISION ${DEMO_CONF_TEMPLATE_REVISION}) and templates are immutable." >&2
+    echo "error: actor template conf-agent is out of date (want CONF_TEMPLATE_REVISION=${DEMO_CONF_TEMPLATE_REVISION}, storageClassName=${DEMO_CONF_STORAGE_CLASS:-}) and templates are immutable." >&2
     echo "Run: hack/deploy.sh down, then hack/deploy.sh up." >&2
     exit 1
   fi
@@ -563,6 +642,7 @@ conf_deploy() {
 
   # Read-only and cheap: run before the router check so a stale conf-agent
   # aborts the deploy before atenet-router is ever patched.
+  conf_resolve_storage_class
   conf_check_template
   conf_check_apiservice
   conf_check_router
@@ -683,6 +763,7 @@ conf_main() {
       echo "                DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO, BUCKET_NAME, SNAPSHOT_LOCATION,"
       echo "                DEMO_CONF_MIN_WORKERS (default 2), DEMO_CONF_MAX_WORKERS (default 5),"
       echo "                DEMO_CONF_ACTORS_PER_WORKER (default 4),"
+      echo "                DEMO_CONF_STORAGE_CLASS (external volume StorageClass; auto-detects substrate-volumepool-sc, set 'none' to disable),"
       echo "                KUBECTL_CONTEXT (defaults to the current kube context),"
       echo "                DEMO_CONF_CLUSTER (dashboard cluster label; defaults to the GKE context's cluster),"
       echo "                DEMO_CONF_ALLOW_DIRTY_SUBSTRATE (accept a cluster labeled <pin>-dirty),"

@@ -71,10 +71,15 @@ limitations under the License.
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
           </span> Where am I running?
         </button>
-        <button type="button" class="chip" data-prompt="Append the current time to /tmp/diary.txt, then print every entry in the diary so far, numbered">
+        <button type="button" class="chip" data-prompt="Append the current UTC time, process PID from os.getpid(), and workspace path from os.getcwd() to diary.txt in the current workspace directory, then print every entry in diary.txt so far, numbered">
           <span class="chip-icon" aria-hidden="true">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
           </span> Keep a diary
+        </button>
+        <button type="button" class="chip" data-prompt="Write a 16 MiB sqlite3 database in the current workspace directory, compare os.statvfs('.') capacity and free space against resource.getrlimit(resource.RLIMIT_AS) and resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, and print the /workspace mount from /proc/self/mountinfo">
+          <span class="chip-icon" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></svg>
+          </span> Filestore disk vs. RAM
         </button>
         <button type="button" class="chip" data-prompt="Try to fetch https://example.com with urllib, catch any error, and print whether the sandbox let the request through">
           <span class="chip-icon" aria-hidden="true">
@@ -98,7 +103,7 @@ limitations under the License.
         <div class="message-bubble">
           <p><strong>Welcome to Agent Substrate.</strong></p>
           <p>This agent is yours. Gemini writes a Python script for each request, and it runs in a gVisor sandbox only after you approve it.</p>
-          <p>Between turns your agent is suspended: its memory is saved as a snapshot and it gives up its place on the worker until your next message. Try Keep a diary twice to see its files survive.</p>
+          <p>Between turns your agent is suspended: its memory is saved as a snapshot, its <code>/workspace</code> volume stays bound to your actor, and it gives up its place on the worker until your next message. Try <strong>Keep a diary</strong> twice or <strong>Filestore disk vs. RAM</strong> to watch its files follow it across workers.</p>
           <p class="intro-hint">Pick an example above, or ask for anything a short Python script can do.</p>
         </div>
       </div>

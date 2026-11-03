@@ -105,6 +105,12 @@ func ParseActorList(data []byte) ([]Status, error) {
 			} `json:"object"`
 		} `json:"durableSnapshot"`
 	}
+	type externalVolume struct {
+		Name            string            `json:"name"`
+		VolumeType      string            `json:"volumeType"`
+		StorageVolumeID string            `json:"storageVolumeId"`
+		VolumeContext   map[string]string `json:"volumeContext"`
+	}
 	var list struct {
 		Actors []struct {
 			Metadata struct {
@@ -115,7 +121,10 @@ func ParseActorList(data []byte) ([]Status, error) {
 				WorkerAssignment struct {
 					WorkerPod string `json:"workerPod"`
 				} `json:"workerAssignment"`
-				Snapshots []snapshot `json:"snapshots"`
+				Snapshots       []snapshot `json:"snapshots"`
+				ExternalVolumes struct {
+					Volumes []externalVolume `json:"volumes"`
+				} `json:"externalVolumes"`
 			} `json:"status"`
 		} `json:"actors"`
 	}
@@ -152,12 +161,32 @@ func ParseActorList(data []byte) ([]Status, error) {
 				}
 			}
 		}
+		var volumeType, volumeShare, volumeURI string
+		if vols := a.Status.ExternalVolumes.Volumes; len(vols) > 0 {
+			vol := vols[0]
+			for _, cand := range vols {
+				if cand.Name == "workspace" {
+					vol = cand
+					break
+				}
+			}
+			volumeType = vol.VolumeType
+			volumeURI = vol.StorageVolumeID
+			if ip, share := vol.VolumeContext["ip"], vol.VolumeContext["volume"]; ip != "" && share != "" {
+				volumeShare = ip + ":/" + strings.TrimPrefix(share, "/")
+			} else {
+				volumeShare = vol.StorageVolumeID
+			}
+		}
 		out = append(out, Status{
 			Name:                  a.Metadata.Name,
 			State:                 state,
 			WorkerPod:             a.Status.WorkerAssignment.WorkerPod,
 			InProgressSnapshotURI: inProgressURI,
 			SnapshotURI:           snapshotURI,
+			VolumeType:            volumeType,
+			VolumeShare:           volumeShare,
+			VolumeURI:             volumeURI,
 		})
 	}
 	return out, nil

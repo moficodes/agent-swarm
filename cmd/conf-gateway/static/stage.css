@@ -275,6 +275,10 @@ html, body {
   letter-spacing: 0.04em;
 }
 
+.spec-note-cyan {
+  color: var(--neon-cyan);
+}
+
 .highlight-cyan {
   color: var(--neon-cyan);
   text-shadow: 0 0 10px rgba(0, 255, 204, 0.4);
@@ -295,7 +299,7 @@ html, body {
   text-shadow: 0 0 10px rgba(245, 158, 11, 0.4);
 }
 
-/* Mock LLM Banner: shown when the gateway has no real Vertex AI backend. */
+/* Mock LLM Banner: shown when the gateway has no real Gemini backend. */
 .mock-banner {
   display: inline-flex;
   align-items: center;
@@ -1556,6 +1560,11 @@ html, body {
   font-size: 0.75rem;
   color: var(--text-secondary);
   font-family: var(--font-mono);
+}
+
+.drawer-metric-value.snapshot-path.highlight-cyan {
+  color: var(--neon-cyan);
+  text-shadow: none;
 }
 
 .drawer-prompt-box {

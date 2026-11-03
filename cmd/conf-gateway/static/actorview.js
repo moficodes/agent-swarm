@@ -88,6 +88,75 @@
     return Object.keys(actorsMap || {}).sort();
   }
 
+  // volume maps an ActorView's external volume fields to how the spotlight
+  // drawer presents the actor's persistent /workspace mount.
+  function volume(view) {
+    if (view && view.volume_share) {
+      return {
+        label: view.volume_share,
+        sub: '/workspace',
+        uri: view.volume_uri || view.volume_share,
+        bound: true,
+        configured: true
+      };
+    }
+    if (view && view.volume_type) {
+      return {
+        label: 'Provisioned on first wake',
+        sub: view.volume_type,
+        uri: view.volume_type,
+        bound: false,
+        configured: true
+      };
+    }
+    return {
+      label: 'Container rootfs',
+      sub: '/tmp/workspace',
+      uri: '',
+      bound: false,
+      configured: false
+    };
+  }
+
+  // fleetVolumes summarizes external volume bindings across reported actors
+  // for the stage header spec card.
+  function fleetVolumes(actorsMap) {
+    const ids = fleetIDs(actorsMap);
+    if (ids.length === 0) {
+      return { known: false, configured: false, label: '--', sub: '', bound: 0, total: 0 };
+    }
+    let configured = 0;
+    let bound = 0;
+    let driver = '';
+    for (let i = 0; i < ids.length; i++) {
+      const v = actorsMap[ids[i]] || {};
+      if (v.volume_type || v.volume_share) {
+        configured++;
+        if (!driver && v.volume_type) driver = v.volume_type;
+      }
+      if (v.volume_share) bound++;
+    }
+    if (configured === 0) {
+      return {
+        known: true,
+        configured: false,
+        label: 'Container rootfs',
+        sub: '/tmp/workspace',
+        bound: 0,
+        total: ids.length
+      };
+    }
+    const isFilestore = driver.indexOf('filestore') !== -1;
+    return {
+      known: true,
+      configured: true,
+      label: isFilestore ? 'Filestore Agent Volumes' : (driver || 'External CSI Volumes'),
+      sub: bound + ' of ' + ids.length + ' /workspace shares bound',
+      bound: bound,
+      total: ids.length
+    };
+  }
+
   // run maps an execution result to how pages present a failed run: a chip
   // {label, cls} and one line of detail, the last line of stderr, which for
   // a Python traceback is the exception. A successful run maps to null.
@@ -203,6 +272,8 @@
     source: source,
     badge: badge,
     fleetIDs: fleetIDs,
+    volume: volume,
+    fleetVolumes: fleetVolumes,
     run: run,
     getTheme: getTheme,
     setTheme: setTheme,

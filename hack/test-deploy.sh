@@ -165,11 +165,67 @@ expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"CO
 expect_template stale '{"containers":[{"name":"conf-workload","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"$((rev + 1))"'"}]}]}'
 # The marker on another container does not count.
 expect_template stale '{"containers":[{"name":"sidecar","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"${rev}"'"}]}]}'
-# The rendered template carries the current revision.
-if ! conf_render manifests/actortemplate.yaml.tmpl | grep -A1 'name: CONF_TEMPLATE_REVISION' | grep -qF "value: \"${rev}\""; then
+# The rendered template carries the current revision and defaults to /tmp/workspace.
+tmpl_default="$(DEMO_CONF_STORAGE_CLASS="" conf_render manifests/actortemplate.yaml.tmpl)"
+if ! grep -A1 'name: CONF_TEMPLATE_REVISION' <<<"${tmpl_default}" | grep -qF "value: \"${rev}\""; then
   echo "FAIL: rendered conf-agent template lacks CONF_TEMPLATE_REVISION ${rev}" >&2
   fail=1
 fi
+if ! grep -A1 'name: SANDBOX_WORKSPACE' <<<"${tmpl_default}" | grep -qF 'value: "/tmp/workspace"'; then
+  echo "FAIL: default conf-agent template lacks SANDBOX_WORKSPACE=/tmp/workspace" >&2
+  fail=1
+fi
+if grep -qE 'volumeMounts:|volumes:' <<<"${tmpl_default}"; then
+  echo "FAIL: default conf-agent template should omit external volume fields" >&2
+  fail=1
+fi
+# DEMO_CONF_STORAGE_CLASS=none also keeps /tmp/workspace without external volumes.
+tmpl_none="$(DEMO_CONF_STORAGE_CLASS=none conf_render manifests/actortemplate.yaml.tmpl)"
+if grep -qE 'volumeMounts:|volumes:' <<<"${tmpl_none}"; then
+  echo "FAIL: DEMO_CONF_STORAGE_CLASS=none should omit external volume fields" >&2
+  fail=1
+fi
+# With DEMO_CONF_STORAGE_CLASS set, conf_render mounts a 1 GiB external volume at /workspace.
+tmpl_vol="$(DEMO_CONF_STORAGE_CLASS=substrate-volumepool-sc conf_render manifests/actortemplate.yaml.tmpl)"
+for want in 'value: "/workspace"' 'volumeMounts:' 'mountPath: /workspace' 'volumes:' \
+            'storageClassName: substrate-volumepool-sc' 'capacityBytes: 1073741824'; do
+  if ! grep -qF -- "${want}" <<<"${tmpl_vol}"; then
+    echo "FAIL: volume-enabled conf-agent template lacks ${want}" >&2
+    fail=1
+  fi
+done
+# conf_template_current enforces matching external volume StorageClass as well as revision.
+if ! DEMO_CONF_STORAGE_CLASS=substrate-volumepool-sc conf_template_current \
+    '{"containers":[{"name":"conf-workload","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"${rev}"'"}]}],"volumes":[{"name":"workspace","external":{"template":{"storageClassName":"substrate-volumepool-sc","capacityBytes":1073741824}}}]}'; then
+  echo "FAIL: conf_template_current rejected matching DEMO_CONF_STORAGE_CLASS" >&2
+  fail=1
+fi
+if DEMO_CONF_STORAGE_CLASS=substrate-volumepool-sc conf_template_current \
+    '{"containers":[{"name":"conf-workload","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"${rev}"'"}]}]}'; then
+  echo "FAIL: conf_template_current accepted missing external volume when DEMO_CONF_STORAGE_CLASS is set" >&2
+  fail=1
+fi
+if DEMO_CONF_STORAGE_CLASS="" conf_template_current \
+    '{"containers":[{"name":"conf-workload","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"${rev}"'"}]}],"volumes":[{"name":"workspace","external":{"template":{"storageClassName":"substrate-volumepool-sc"}}}]}'; then
+  echo "FAIL: conf_template_current accepted external volume when DEMO_CONF_STORAGE_CLASS is unset" >&2
+  fail=1
+fi
+
+# expect_preview checks conf_ateapi_preview_enabled.
+expect_preview() {
+  local want="$1" args="$2" got=0
+  conf_ateapi_preview_enabled "${args}" "ExternalVolumes" || got=$?
+  if [[ "${want}" == ok && "${got}" != 0 ]] || [[ "${want}" == bad && "${got}" == 0 ]]; then
+    echo "FAIL: conf_ateapi_preview_enabled ${want} for ${args}" >&2
+    fail=1
+  fi
+}
+expect_preview bad '[]'
+expect_preview bad '["--preview=OtherFeature"]'
+expect_preview ok  '["--preview=ExternalVolumes"]'
+expect_preview ok  '["--preview=OtherFeature,ExternalVolumes"]'
+expect_preview ok  '["--preview","ExternalVolumes"]'
+expect_preview ok  '["--preview=ALL"]'
 # The gateway learns the actor count from the install.
 if ! DEMO_CONF_ACTORS=7 conf_render manifests/gateway.yaml.tmpl | grep -A1 'name: ACTOR_COUNT' | grep -qF 'value: "7"'; then
   echo "FAIL: rendered gateway manifest lacks ACTOR_COUNT from DEMO_CONF_ACTORS" >&2

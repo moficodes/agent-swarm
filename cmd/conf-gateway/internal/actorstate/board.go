@@ -89,6 +89,7 @@ func (b *Board) SetStatuses(statuses []Status) {
 		s, ok := byName[v.ActorID]
 		if !ok {
 			v.State, v.StateDetail, v.WorkerPod, v.SnapshotURI, v.NeverStarted = types.StateUnknown, "not found in ateapi", "", "", false
+			v.VolumeType, v.VolumeShare, v.VolumeURI = "", "", ""
 			return
 		}
 		v.State, v.StateDetail, v.WorkerPod = s.State, "", s.WorkerPod
@@ -96,6 +97,7 @@ func (b *Board) SetStatuses(statuses []Status) {
 		if s.InProgressSnapshotURI != "" {
 			v.SnapshotURI = s.InProgressSnapshotURI
 		}
+		v.VolumeType, v.VolumeShare, v.VolumeURI = s.VolumeType, s.VolumeShare, s.VolumeURI
 		v.NeverStarted = s.State == types.StateSuspended && s.SnapshotURI == "" && s.InProgressSnapshotURI == ""
 	})
 }
