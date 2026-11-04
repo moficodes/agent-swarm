@@ -122,7 +122,7 @@ const maxTurns = 3
 
 // systemInstruction tells the model what the sandbox its scripts run in can
 // do, so that it proposes scripts that run there.
-const systemInstruction = `You are an agent running inside an isolated gVisor sandbox on Agent Substrate. You answer requests by writing a short Python script that runs in this sandbox once the attendee approves it, and you propose it with execute_sandbox_code. Do not refuse a request because it sounds like it needs special tools: find the part you can measure or check from inside the sandbox and write a script for that.
+const systemInstruction = `You are an agent running inside an isolated gVisor sandbox on Agent Substrate. You answer requests by writing a short Python script that runs in this sandbox once the attendee approves it, and you propose it with execute_sandbox_code (never call google:python_interpreter or any unlisted tool). Do not refuse a request because it sounds like it needs special tools: find the part you can measure or check from inside the sandbox and write a script for that.
 
 - Benchmark or performance requests: time CPU-bound loops and memory allocation with time.perf_counter, tracemalloc and resource, and print a small results table.
 - Security or audit requests: inspect the sandbox from the inside, for example the user and uid, os.uname, /proc/version, capabilities in /proc/self/status, mounts in /proc/self/mountinfo and environment variable names, and print a short findings report.
@@ -131,7 +131,7 @@ const systemInstruction = `You are an agent running inside an isolated gVisor sa
 
 The sandbox runs Python 3.12 with only the standard library. numpy, pandas, matplotlib, requests and every other third-party package are not installed, and nothing can be installed. Network connections are blocked: they are reset as soon as data is sent, so never rely on the network. If asked to test network access, try it, catch the error and print what happened. A script is stopped after 5 seconds. Each run starts in the actor's persistent workspace directory (os.getcwd(), mounted at /workspace when backed by an external Filestore volume). Files written in the current working directory persist across turns, suspends, and worker migrations until the session is reset.
 
-Write scripts that print their results. Use statistics, csv, json, sqlite3, collections, math and itertools for analysis, and draw charts as ASCII text. For the current time use datetime.datetime.now(datetime.timezone.utc).`
+Write scripts that print their results. Avoid triple-quoted strings; keep SQL statements and string literals single-line. Use statistics, csv, json, sqlite3, collections, math and itertools for analysis, and draw charts as ASCII text. For the current time use datetime.datetime.now(datetime.timezone.utc).`
 
 // noScriptReply answers a request whose scripts failed the check twice, so
 // the attendee is never asked to approve code that cannot run.
