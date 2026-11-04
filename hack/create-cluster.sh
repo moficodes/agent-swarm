@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 # Creates a GKE cluster that can run Substrate and this demo. It reads the
-# variable names substrate's tools/setup-gcp writes to .ate-dev-env.sh, so
+# variable names substrate-gke's tools/setup-gcp writes to .ate-dev-env.sh, so
 # sourcing that file works. The bucket, image registry and IAM bindings are
 # per project, not per cluster; README.md's Prerequisites set them up. Sourced by
 # hack/test-deploy.sh for its cluster-free tests.
@@ -186,7 +186,7 @@ cc_usage() {
   echo "  Optional env: CLUSTER_LOCATION (default us-west1-c), NETWORK, SUBNETWORK (default default),"
   echo "                NODE_MACHINE_TYPE (default c3-standard-4), NODE_COUNT (default 2),"
   echo "                GKE_RELEASE_CHANNEL (default rapid), GKE_MINOR_VERSION (default 1.37)"
-  echo "  Substrate's .ate-dev-env.sh sets these names; source it or export them yourself."
+  echo "  substrate-gke's .ate-dev-env.sh sets these names; source it or export them yourself."
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

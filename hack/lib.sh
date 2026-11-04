@@ -54,7 +54,7 @@ conf_storage_class_enabled() {
 }
 
 # run_kubectl_ate runs the kubectl-ate pinned in go.mod. ExternalVolumes is
-# preview-gated in Substrate v1.0.0-rc.1, so --preview is passed whenever an
+# preview-gated in Substrate v1.0.0-rc.2, so --preview is passed whenever an
 # external volume StorageClass is configured.
 run_kubectl_ate() {
   local flags=()
@@ -77,8 +77,8 @@ substrate_pin() {
 }
 
 # substrate_version_from_output normalizes `ateapi --version` output
-# (e.g. "v1.0.0-rc.1 commit=c27cb015... built=...")
-# to a version label ("v1.0.0-rc.1", "v1.0.0-rc.1-dirty", or a 12-character commit
+# (e.g. "v1.0.0-rc.2 commit=e59281c7... built=...")
+# to a version label ("v1.0.0-rc.2", "v1.0.0-rc.2-dirty", or a 12-character commit
 # prefix) that substrate_labels_match can compare against substrate_pin.
 substrate_version_from_output() {
   local out="$1" ver commit="" dirty=""

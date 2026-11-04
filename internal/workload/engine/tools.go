@@ -135,11 +135,15 @@ func (s *SandboxExecutor) limitMemory(cmd *exec.Cmd) {
 	cmd.Path = "/bin/sh"
 }
 
-// ensureWorkspaceOwner hands dir to sandboxUID:sandboxGID when it is owned by
-// another user. Restoring an actor from a template golden snapshot attaches a
-// fresh external volume mounted as root:root after NewSandboxExecutor has
-// already run, so Execute checks ownership before dropping privileges.
+// ensureWorkspaceOwner creates dir if needed and hands it to
+// sandboxUID:sandboxGID when it is owned by another user. Restoring an actor
+// from a template golden snapshot attaches a fresh external volume mounted as
+// root:root after NewSandboxExecutor has already run, so Execute checks
+// ownership before dropping privileges.
 func ensureWorkspaceOwner(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create workspace: %w", err)
+	}
 	fi, err := os.Stat(dir)
 	if err != nil {
 		return nil

@@ -517,8 +517,8 @@ if [[ "${out}" != *"Target cluster context: my-ctx"* ]]; then
 fi
 
 # substrate_pin reads the pinned tag (or commit) from go.mod.
-if [[ "$(substrate_pin)" != "v1.0.0-rc.1" ]]; then
-  echo "FAIL: substrate_pin = '$(substrate_pin)', want v1.0.0-rc.1" >&2
+if [[ "$(substrate_pin)" != "v1.0.0-rc.2" ]]; then
+  echo "FAIL: substrate_pin = '$(substrate_pin)', want v1.0.0-rc.2" >&2
   fail=1
 fi
 
@@ -531,6 +531,10 @@ expect_ver_out() {
     fail=1
   fi
 }
+expect_ver_out v1.0.0-rc.2 "v1.0.0-rc.2 commit=e59281c766d547689482a1fce666ca3f0f6bd008 built=2026-11-04T00:50:01Z linux/amd64"
+expect_ver_out v1.0.0-rc.2-dirty "v1.0.0-rc.2-dirty commit=e59281c766d547689482a1fce666ca3f0f6bd008 built=2026-11-04T00:50:01Z linux/amd64"
+expect_ver_out v1.0.0-rc.2 "go.ate.dev/substrate.Version=v1.0.0-rc.2 commit=e59281c766d547689482a1fce666ca3f0f6bd008 built=2026-11-04T00:50:01Z linux/amd64"
+expect_ver_out v1.0.0-rc.2-dirty "go.ate.dev/substrate.Version=v1.0.0-rc.2+dirty commit=e59281c766d547689482a1fce666ca3f0f6bd008-dirty built=2026-11-04T00:50:01Z linux/amd64"
 expect_ver_out v1.0.0-rc.1 "v1.0.0-rc.1 commit=c27cb01590a11b2f50489971985ba033b4c9eff7 built=2026-10-29T20:00:00Z linux/amd64"
 expect_ver_out v1.0.0-rc.1-dirty "v1.0.0-rc.1-dirty commit=c27cb01590a11b2f50489971985ba033b4c9eff7 built=2026-10-29T20:00:00Z linux/amd64"
 expect_ver_out v1.0.0-rc.1 "go.ate.dev/substrate.Version=v1.0.0-rc.1 commit=c27cb01590a11b2f50489971985ba033b4c9eff7 built=2026-10-29T20:00:00Z linux/amd64"
@@ -565,6 +569,7 @@ expect_pin v0.4.0 v0.4.0
 expect_pin v0.5.0 v0.5.0
 expect_pin v0.6.0 v0.6.0
 expect_pin v1.0.0-rc.1 v1.0.0-rc.1
+expect_pin v1.0.0-rc.2 v1.0.0-rc.2
 
 # cc_pick_version takes the newest release of the minor version from gcloud's
 # newest-first list, and fails when the channel has none.

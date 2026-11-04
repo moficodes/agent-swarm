@@ -20,21 +20,6 @@ This demo runs against upstream Substrate as-is, but it has to work around a
 few gaps to do it. Each is listed here with its symptom, the workaround in
 this repo, and where the real fix belongs.
 
-## The actor rootfs overlay is not traversable by a non-root user
-
-Substrate creates the actor rootfs overlay 0700, so a container that drops to
-a non-root user cannot traverse it. The `conf-workload` container needs a
-non-root workload user for the model-generated code it executes, but cannot
-have one; instead it runs as root inside gVisor and grants itself
-`CHOWN`, `SETUID`, `SETGID` and `DAC_OVERRIDE` so its executor can `setuid`
-down to `nobody` per sandboxed run
-(`manifests/actortemplate.yaml.tmpl`). The fix belongs in substrate's atelet
-([`cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/cmd/atelet/oci.go),
-which builds the overlay) and ateworker
-([`internal/imagecache/bundle_linux.go`](https://github.com/agent-substrate/substrate/blob/v1.0.0-rc.1/internal/imagecache/bundle_linux.go),
-which lays out the bundle), so the overlay is traversable by whatever user
-the image specifies.
-
 ## `atenet-router`'s defaults are too short for LLM turns
 
 `atenet-router`'s default `--parked-request-budget`, `--route-timeout` and

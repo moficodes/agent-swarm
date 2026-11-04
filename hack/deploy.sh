@@ -30,7 +30,7 @@ DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
-DEMO_CONF_TEMPLATE_REVISION=8
+DEMO_CONF_TEMPLATE_REVISION=9
 # DEMO_CONF_DEFAULT_STORAGE_CLASS is auto-selected for actor /workspace
 # volumes when both this StorageClass and the Filestore CSIDriverConfig exist
 # on the cluster (set DEMO_CONF_STORAGE_CLASS=none to keep /tmp/workspace).
@@ -495,7 +495,7 @@ conf_check_substrate() {
     if [[ -z "${SUBSTRATE_REPO:-}" ]]; then
       echo "error: Substrate is not installed (no ate-system namespace)." >&2
       echo "Install it from a clean substrate checkout at ${pin}:" >&2
-      echo "  SNAPSHOT_LOCATION=\"gs://\${BUCKET_NAME}/snapshots/\" SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer go run ./cmd/ate-setup deploy ate-system --credential-provider='{\"enabled\":false}' --ingress-allowed-spiffe-ids=${DEMO_CONF_ROUTER_SPIFFE_ID}" >&2
+      echo "  SNAPSHOT_LOCATION=\"gs://\${BUCKET_NAME}/snapshots/\" SNAPSHOT_TRANSFER_GSA_NAME=ate-snapshot-transfer go run ./cmd/ate-setup deploy ate-system --sandbox-classes=gvisor --credential-provider='{\"enabled\":false}' --ingress-allowed-spiffe-ids=${DEMO_CONF_ROUTER_SPIFFE_ID}" >&2
       echo "or set SUBSTRATE_REPO to that checkout and run this again." >&2
       exit 1
     fi
@@ -524,12 +524,14 @@ conf_check_substrate() {
       cd "${SUBSTRATE_REPO}"
       if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
         go run ./cmd/ate-setup deploy ate-system \
+          --sandbox-classes=gvisor \
           --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}" \
           --ingress-allowed-spiffe-ids="${ATE_INGRESS_ALLOWED_SPIFFE_IDS:-${DEMO_CONF_ROUTER_SPIFFE_ID}}"
       else
         SNAPSHOT_LOCATION="${SNAPSHOT_LOCATION:-gs://${BUCKET_NAME}/snapshots/}" \
         SNAPSHOT_TRANSFER_GSA_NAME="${SNAPSHOT_TRANSFER_GSA_NAME:-ate-snapshot-transfer}" \
         go run ./cmd/ate-setup deploy ate-system \
+          --sandbox-classes=gvisor \
           --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}" \
           --ingress-allowed-spiffe-ids="${ATE_INGRESS_ALLOWED_SPIFFE_IDS:-${DEMO_CONF_ROUTER_SPIFFE_ID}}"
       fi

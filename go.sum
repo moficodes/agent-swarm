@@ -172,8 +172,8 @@ github.com/vishvananda/netns v0.0.5 h1:DfiHV+j8bA32MFM7bfEunvT8IAqQ/NzSJHtcmW5zd
 github.com/vishvananda/netns v0.0.5/go.mod h1:SpkAiCQRtJ6TvvxPnOSyH3BMl6unz3xZlaprSwhNNJM=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
-go.ate.dev/substrate v1.0.0-rc.1 h1:davfE1q4OD+I/JyErP5k2ImOYvsE2mm5nG1LvA7bhjI=
-go.ate.dev/substrate v1.0.0-rc.1/go.mod h1:Y4n6FBNsJHYVcc2BerfoWV76KTtOqxLtUHYRtXgrrcQ=
+go.ate.dev/substrate v1.0.0-rc.2 h1:vz+TCwIxLERr6atPHuxdHNH2TgDAi2jGY47s/qHDMRg=
+go.ate.dev/substrate v1.0.0-rc.2/go.mod h1:iBSRX82TClE5CSsD80HoYsxVP81NSpf0zKKTW+2s/+0=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/contrib/bridges/prometheus v0.68.0 h1:w3zlHYETbDwXyWHZlyyR58ZC39XGi8rAhkBgUgJ9d5w=

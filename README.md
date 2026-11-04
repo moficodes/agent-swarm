@@ -19,7 +19,7 @@ limitations under the License.
 ## Prerequisites
 
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
-  at the version pinned in `go.mod` (currently the `v1.0.0-rc.1` release).
+  at the version pinned in `go.mod` (currently the `v1.0.0-rc.2` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
   version; see "Bumping Substrate" below to move the pin. Substrate needs
   GKE 1.37 or later, which some zones offer only in the RAPID channel.
@@ -30,7 +30,7 @@ limitations under the License.
   It takes the newest 1.37 release in RAPID and adds a maintenance exclusion
   against node and minor upgrades until the version's end of support, since a
   node upgrade recreates the worker pods mid-demo. Control-plane patches still
-  apply. It reads the variable names Substrate's `tools/setup-gcp` writes to
+  apply. It reads the variable names [substrate-gke](https://github.com/ai-on-gke/substrate-gke)'s `tools/setup-gcp` writes to
   `.ate-dev-env.sh` (`CLUSTER_LOCATION`, `NODE_MACHINE_TYPE`, ...), so you
   can source that file instead; `--help` lists them and `--dry-run` prints
   the gcloud commands. Run on an existing cluster, it adds the exclusion if
@@ -38,7 +38,7 @@ limitations under the License.
 - One-time project setup: APIs, snapshot and sandbox-assets buckets, an image
   registry and IAM bindings. These belong to the project, not the cluster, so
   they survive recreating it. Nothing in this repo creates them. From a
-  substrate checkout, with `PROJECT_ID` and `BUCKET_NAME` exported:
+  [substrate-gke](https://github.com/ai-on-gke/substrate-gke) checkout, with `PROJECT_ID` and `BUCKET_NAME` exported:
 
       go run ./tools/setup-gcp enable apis     # before hack/create-cluster.sh
       go run ./tools/setup-gcp create bucket   # BUCKET_NAME and BUCKET_NAME-assets
@@ -51,7 +51,7 @@ limitations under the License.
   ate-api-server snapshot and sandbox-assets bucket access through Workload
   Identity (atelet also gets registry access). Those principals live in the
   cluster's Workload Identity pool, which is why it runs after the cluster.
-  The table in substrate's `tools/setup-gcp/README.md` lists every binding.
+  The table in `substrate-gke`'s `tools/setup-gcp/README.md` lists every binding.
 
   setup-gcp enables the Artifact Registry API but creates no repository.
   `KO_DOCKER_REPO` must name one in the project, so the node service
@@ -427,9 +427,9 @@ export PRESENTER_TOKEN="$(kubectl get secret conf-gateway -n ate-demo-conf -o js
 between releases. `hack/deploy.sh` checks the cluster's running
 `ate-api-server` version (`/ko-app/ateapi --version`) against that pin and
 refuses to deploy on a mismatch. Install from a clean checkout of exactly the
-pinned version: a tag pin needs a version equal to the tag (`v1.0.0-rc.1`), and a
+pinned version: a tag pin needs a version equal to the tag (`v1.0.0-rc.2`), and a
 commit pin accepts the commit or the describe form after a tag
-(`v1.0.0-rc.1-5-g1a2b3c4d`). To move the pin, for example to the next release:
+(`v1.0.0-rc.2-5-g1a2b3c4d`). To move the pin, for example to the next release:
 
 ```bash
 go get -tool go.ate.dev/substrate/cmd/kubectl-ate@<tag-or-commit>
