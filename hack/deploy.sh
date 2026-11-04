@@ -469,12 +469,18 @@ conf_template_current() {
 }
 
 conf_check_template() {
-  local env
-  if ! env="$(run_kubectl_ate get actor-template conf-agent -a ate-demo-conf -o json 2>&1)"; then
-    if grep -qi "not found" <<<"${env}"; then
+  local env err_file err rc=0
+  err_file="$(mktemp)"
+  # Keep stderr separate from stdout: kubectl-ate v1.0.0-rc.2+ prints a
+  # "--token-file" warning on stderr even when "-o json" succeeds.
+  env="$(run_kubectl_ate get actor-template conf-agent -a ate-demo-conf -o json 2>"${err_file}")" || rc=$?
+  err="$(<"${err_file}")"
+  rm -f "${err_file}"
+  if ((rc != 0)); then
+    if grep -qi "not found" <<<"${err} ${env}"; then
       return 0
     fi
-    echo "error: failed to check actor template conf-agent: ${env}" >&2
+    echo "error: failed to check actor template conf-agent: ${err:-${env}}" >&2
     exit 1
   fi
   if ! conf_template_current "${env}"; then

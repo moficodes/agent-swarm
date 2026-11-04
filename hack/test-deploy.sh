@@ -210,6 +210,30 @@ if DEMO_CONF_STORAGE_CLASS="" conf_template_current \
   echo "FAIL: conf_template_current accepted external volume when DEMO_CONF_STORAGE_CLASS is unset" >&2
   fail=1
 fi
+# conf_check_template ignores stderr warnings (e.g. kubectl-ate's --token-file warning)
+# when "-o json" succeeds on stdout, and still treats NotFound on stderr as absent.
+if ! (
+  DEMO_CONF_STORAGE_CLASS=""
+  run_kubectl_ate() {
+    echo "Warning: no --token-file given; acting as ate-client." >&2
+    echo '{"containers":[{"name":"conf-workload","env":[{"name":"CONF_TEMPLATE_REVISION","value":"'"${rev}"'"}]}]}'
+  }
+  conf_check_template
+); then
+  echo "FAIL: conf_check_template failed when kubectl-ate emitted a stderr warning" >&2
+  fail=1
+fi
+if ! (
+  DEMO_CONF_STORAGE_CLASS=""
+  run_kubectl_ate() {
+    echo "Error from server (NotFound): actor template conf-agent not found" >&2
+    return 1
+  }
+  conf_check_template
+); then
+  echo "FAIL: conf_check_template did not ignore NotFound on stderr" >&2
+  fail=1
+fi
 
 # expect_preview checks conf_ateapi_preview_enabled.
 expect_preview() {
