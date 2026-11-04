@@ -89,15 +89,23 @@
   }
 
   // volume maps an ActorView's external volume fields to how the spotlight
-  // drawer presents the actor's persistent /workspace mount.
+  // drawer presents the actor's persistent /workspace mount and whether the
+  // Filestore starter prompt applies on /chat.
   function volume(view) {
+    const isFilestore = Boolean(
+      view && (
+        (view.volume_type || '').indexOf('filestore') !== -1 ||
+        (view.volume_uri || '').indexOf('volumepool://') !== -1
+      )
+    );
     if (view && view.volume_share) {
       return {
         label: view.volume_share,
         sub: '/workspace',
         uri: view.volume_uri || view.volume_share,
         bound: true,
-        configured: true
+        configured: true,
+        filestore: isFilestore
       };
     }
     if (view && view.volume_type) {
@@ -106,7 +114,8 @@
         sub: view.volume_type,
         uri: view.volume_type,
         bound: false,
-        configured: true
+        configured: true,
+        filestore: isFilestore
       };
     }
     return {
@@ -114,7 +123,8 @@
       sub: '/tmp/workspace',
       uri: '',
       bound: false,
-      configured: false
+      configured: false,
+      filestore: false
     };
   }
 

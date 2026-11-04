@@ -76,7 +76,9 @@ limitations under the License.
   `DEMO_CONF_ACTORS` (default 50), `DEMO_CONF_MIN_WORKERS` (default 2) and
   `DEMO_CONF_MAX_WORKERS` (default 5), the `conf-workers` autoscaling range,
   `DEMO_CONF_ACTORS_PER_WORKER` (default 4, the actors each worker hosts at
-  once),
+  once), `DEMO_CONF_STORAGE_CLASS` (auto-detects `substrate-volumepool-sc` when
+  Filestore Agent Volumes are installed on the cluster, or set `none` to keep
+  `/tmp/workspace` in the container rootfs),
   `SUBSTRATE_REPO` (a clean substrate checkout
   at the pin; `hack/deploy.sh` installs Substrate from it via `ate-setup` when the
   `ate-system` namespace is missing, using `SNAPSHOT_LOCATION` or `BUCKET_NAME`), `KUBECTL_CONTEXT` (which kube context
@@ -100,6 +102,15 @@ survives Substrate suspending and resuming the actor on a different worker
 pod. A stage reset, or handing an `attendee-NN` slot to a new visitor, has
 the gateway clear that history through the actor's `/api/history/clear`
 endpoint.
+
+When Filestore Agent Volumes are installed on the cluster (or
+`DEMO_CONF_STORAGE_CLASS` is set), each actor also mounts a 1 GiB external
+volume at `/workspace` that stays bound to the actor across suspends and worker
+migrations; otherwise actors use `/tmp/workspace` in the container rootfs,
+which travels with the actor's snapshot. Clearing history wipes the workspace
+directory in both modes, `/stage` reports whichever workspace mode is active,
+and `/chat` shows the `Filestore disk vs. RAM` starter chip only when Filestore
+is enabled.
 
 The `/stage` header is live. The pod count is the `conf-workers` HPA's
 current replicas ("3 of 5"), or the WorkerPool's replicas when there is no
@@ -256,6 +267,17 @@ admit the gateway over mTLS; `--patch-router` sets
 and the grace period to 120 (`conf_check_router` in `hack/deploy.sh`).
 Without it, the deploy fails with the specific changes needed instead of
 silently deploying a router that will 503 or get killed mid-drain.
+
+`hack/deploy.sh` works both with and without Filestore Agent Volumes. When both
+`StorageClass/substrate-volumepool-sc` and
+`CSIDriverConfig/filestore.csi.storage.gke.io` exist on the cluster, it enables
+1 GiB external `/workspace` volumes automatically (requiring
+`--preview=ExternalVolumes` on `ate-api-server`). On clusters without
+Filestore — or when `DEMO_CONF_STORAGE_CLASS=none` is set — it skips external
+volumes and uses `/tmp/workspace` in the container rootfs with no preview flag
+needed (`conf_resolve_storage_class` in `hack/deploy.sh`). Because
+`ActorTemplate` is immutable, run `make undeploy` before redeploying if you
+switch an existing deployment between the two modes.
 
 `make undeploy` (`hack/deploy.sh down`) does not revert these router
 flags, and does not delete the `conf-gateway` GCP service account or its IAM

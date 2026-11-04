@@ -34,12 +34,13 @@
     statusText: document.getElementById('status-text'),
     statusSub: document.getElementById('status-sub'),
     activityChip: document.getElementById('activity-chip'),
+    filestoreChip: document.getElementById('chip-filestore'),
     approvalTemplate: document.getElementById('approval-card-template'),
   };
 
-  // renderActorView applies an ActorView pushed over SSE to the status pill
-  // and activity chip. Views for another attendee (e.g. a stale event from a
-  // previous session) are ignored.
+  // renderActorView applies an ActorView pushed over SSE to the status pill,
+  // activity chip, and Filestore-only starter prompt chip. Views for another
+  // attendee (e.g. a stale event from a previous session) are ignored.
   function renderActorView(view) {
     if (!view || (state.attendeeId && view.actor_id !== state.attendeeId)) return;
     const s = window.ActorView.state(view);
@@ -53,6 +54,9 @@
         el.activityChip.className = 'activity-chip ' + a.cls;
         el.activityChip.textContent = a.label;
       }
+    }
+    if (el.filestoreChip) {
+      el.filestoreChip.hidden = !window.ActorView.volume(view).filestore;
     }
   }
 

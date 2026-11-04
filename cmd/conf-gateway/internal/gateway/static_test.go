@@ -301,3 +301,23 @@ func TestStatic_SubstrateLogoPresentAndServed(t *testing.T) {
 		t.Errorf("GET /static/ate-logo.svg = %d", rec.Code)
 	}
 }
+
+// TestStatic_ChatFilestoreChipHiddenUnlessFilestoreEnabled checks that /chat
+// starts the Filestore starter prompt chip hidden and reveals it only when the
+// attendee's ActorView reports a Filestore external volume.
+func TestStatic_ChatFilestoreChipHiddenUnlessFilestoreEnabled(t *testing.T) {
+	html := readStatic(t, "chat.html")
+	if !strings.Contains(html, `<button id="chip-filestore" type="button" class="chip" hidden `) {
+		t.Error("chat.html must render #chip-filestore with the hidden attribute by default")
+	}
+	js := readStatic(t, "chat.js")
+	for _, want := range []string{`getElementById('chip-filestore')`, `el.filestoreChip.hidden = !window.ActorView.volume(view).filestore`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("chat.js lacks %q", want)
+		}
+	}
+	css := readStatic(t, "chat.css")
+	if !strings.Contains(css, "[hidden]") || !strings.Contains(css, "display: none !important") {
+		t.Error("chat.css must keep [hidden] hidden over .chip's display: inline-flex")
+	}
+}

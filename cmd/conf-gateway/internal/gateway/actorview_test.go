@@ -133,6 +133,7 @@ type volumeBadge struct {
 	URI        string `json:"uri"`
 	Bound      bool   `json:"bound"`
 	Configured bool   `json:"configured"`
+	Filestore  bool   `json:"filestore"`
 }
 
 type fleetVolumeSummary struct {
@@ -164,6 +165,7 @@ func TestActorView_VolumeAndFleetVolumes(t *testing.T) {
 				URI:        "volumepool://proj/us-west1/demo-pool/volumes/v1?ip=192.0.2.10",
 				Bound:      true,
 				Configured: true,
+				Filestore:  true,
 			},
 		},
 		{
@@ -179,6 +181,22 @@ func TestActorView_VolumeAndFleetVolumes(t *testing.T) {
 				URI:        "filestore.csi.storage.gke.io",
 				Bound:      false,
 				Configured: true,
+				Filestore:  true,
+			},
+		},
+		{
+			name: "non-filestore external volume",
+			view: map[string]any{
+				"state":       "SUSPENDED",
+				"volume_type": "pd.csi.storage.gke.io",
+			},
+			want: volumeBadge{
+				Label:      "Provisioned on first wake",
+				Sub:        "pd.csi.storage.gke.io",
+				URI:        "pd.csi.storage.gke.io",
+				Bound:      false,
+				Configured: true,
+				Filestore:  false,
 			},
 		},
 		{
@@ -190,6 +208,7 @@ func TestActorView_VolumeAndFleetVolumes(t *testing.T) {
 				URI:        "",
 				Bound:      false,
 				Configured: false,
+				Filestore:  false,
 			},
 		},
 	}
