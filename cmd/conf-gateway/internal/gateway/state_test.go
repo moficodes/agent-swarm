@@ -475,3 +475,53 @@ func TestState_NonChatReplyLeavesActivityIdle(t *testing.T) {
 		t.Errorf("Activity = %q, want idle", v.Activity)
 	}
 }
+
+func TestState_IgnoresNonAttendeeActors(t *testing.T) {
+	const goldenActorUID = "b2efa702-029c-4b4b-b219-d383126e0592"
+	ctrl := newFakeControl(
+		actorstate.Status{Name: "attendee-01", State: types.StateRunning, WorkerPod: "pool-a"},
+		actorstate.Status{Name: goldenActorUID, State: types.StateRunning, WorkerPod: "pool-a"},
+		actorstate.Status{Name: "attendee-04", State: types.StateSuspended},
+	)
+	gw := newTestGateway(t, "",
+		gateway.WithActorControl(ctrl),
+		gateway.WithPollInterval(time.Millisecond),
+		gateway.WithMaxActors(2),
+	)
+	sc := openEvents(t, gw, "attendee-01")
+	waitView(t, sc, func(v types.ActorView) bool { return v.State == types.StateRunning })
+
+	tel := getTelemetry(t, gw)
+	if _, ok := tel.Actors[goldenActorUID]; ok {
+		t.Fatalf("telemetry exposed golden-snapshot builder actor %q: %+v", goldenActorUID, tel.Actors)
+	}
+	if _, ok := tel.Actors["attendee-04"]; ok {
+		t.Fatalf("telemetry exposed out-of-range actor attendee-04 with maxActors=2: %+v", tel.Actors)
+	}
+	wantWorkers := []types.WorkerStatus{
+		{PodName: "pool-a", Actors: []types.WorkerActor{
+			{ActorID: "attendee-01", State: types.StateRunning},
+		}},
+	}
+	if diff := cmp.Diff(wantWorkers, tel.Workers); diff != "" {
+		t.Errorf("Workers mismatch while golden actor running (-want +got):\n%s", diff)
+	}
+
+	// Reset must not suspend the non-attendee golden-snapshot builder actor.
+	if body := postReset(t, gw); body.ActorsReset != 1 {
+		t.Errorf("reset = %+v, want only attendee-01 reset", body)
+	}
+	if got := drain(ctrl.suspended); len(got) != 1 || !got["attendee-01"] {
+		t.Errorf("suspended %v, want only attendee-01", got)
+	}
+
+	// Once Substrate deletes the golden-snapshot actor, it must not linger in
+	// telemetry as UNKNOWN ("not found in ateapi").
+	ctrl.set(actorstate.Status{Name: "attendee-01", State: types.StateSuspended})
+	waitView(t, sc, func(v types.ActorView) bool { return v.State == types.StateSuspended })
+
+	tel = getTelemetry(t, gw)
+	if len(tel.Actors) != 1 || tel.Actors["attendee-01"].State != types.StateSuspended {
+		t.Errorf("Actors after golden actor deletion = %+v, want only attendee-01 SUSPENDED", tel.Actors)
+	}
+}

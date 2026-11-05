@@ -70,6 +70,29 @@ func WithActorControl(c actorstate.ActorControl) Option {
 	return func(g *Gateway) { g.control = c }
 }
 
+// attendeeControl filters ActorControl.List to the gateway's pre-provisioned
+// attendee-NN slots so transient actors in the same atespace (such as the
+// golden-snapshot builder actor Substrate creates under the ActorTemplate UID
+// and then deletes) never enter the stage board or remain stuck as UNKNOWN.
+type attendeeControl struct {
+	actorstate.ActorControl
+	maxActors int
+}
+
+func (c attendeeControl) List(ctx context.Context) ([]actorstate.Status, error) {
+	statuses, err := c.ActorControl.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]actorstate.Status, 0, len(statuses))
+	for _, s := range statuses {
+		if auth.ValidAttendeeID(s.Name, c.maxActors) {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered, nil
+}
+
 // WithPollInterval sets how often actor state is read from ateapi.
 func WithPollInterval(d time.Duration) Option {
 	return func(g *Gateway) {
@@ -349,6 +372,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		go gw.pollWorkerScale(ctx)
 	}
 	if gw.control != nil {
+		gw.control = attendeeControl{ActorControl: gw.control, maxActors: gw.maxActors}
 		gw.wg.Add(1)
 		go func() {
 			defer gw.wg.Done()
