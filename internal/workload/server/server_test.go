@@ -33,7 +33,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
-var geminiConfig = gemini.Config{Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}
+var geminiConfig = gemini.Config{Project: "proj", Location: "loc", Model: "gemini-3.8-flash"}
 
 func chatRequest(key, msg string) *http.Request {
 	body, _ := json.Marshal(types.ChatRequest{Message: msg})
@@ -720,7 +720,7 @@ func TestChat_HandsModelCallToGatewayAndRepliesAfterResult(t *testing.T) {
 	s := server.NewWorkloadServer(server.WithWorkspaceDir(t.TempDir()), server.WithGeminiConfig(geminiConfig))
 
 	call := modelCall(t, serve(s.Handler(), chatRequest("k.mac", "hi")))
-	want := "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-2.5-flash:generateContent"
+	want := "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-3.8-flash:generateContent"
 	if call.Path != want || !strings.Contains(string(call.Body), "hi") {
 		t.Errorf("call = %s %s, want %s carrying the prompt", call.Path, call.Body, want)
 	}

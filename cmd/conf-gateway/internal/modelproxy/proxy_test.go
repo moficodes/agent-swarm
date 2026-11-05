@@ -29,14 +29,14 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
-const goodPath = "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-2.5-flash:generateContent"
+const goodPath = "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-3.8-flash:generateContent"
 
 func newProxy(t *testing.T, upstream string, mutate ...func(*modelproxy.Config)) *modelproxy.Proxy {
 	t.Helper()
 	cfg := modelproxy.Config{
 		Project:     "proj",
 		Location:    "loc",
-		Models:      []string{"gemini-2.5-flash"},
+		Models:      []string{"gemini-3.8-flash"},
 		Upstream:    upstream,
 		TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "adc-token"}),
 	}
@@ -87,12 +87,12 @@ func TestCall_AllowsOnlyConfiguredGenerateContent(t *testing.T) {
 	for name, path := range map[string]string{
 		"other project":     strings.Replace(goodPath, "/proj/", "/evil/", 1),
 		"other location":    strings.Replace(goodPath, "/loc/", "/us-east1/", 1),
-		"model not allowed": strings.Replace(goodPath, "gemini-2.5-flash", "gemini-2.5-pro", 1),
+		"model not allowed": strings.Replace(goodPath, "gemini-3.8-flash", "gemini-3.8-pro", 1),
 		"streaming":         strings.Replace(goodPath, ":generateContent", ":streamGenerateContent", 1),
 		"other method":      strings.Replace(goodPath, ":generateContent", ":countTokens", 1),
 		"old proxy prefix":  "/model" + goodPath,
 		"encoded slash":     strings.Replace(goodPath, "/models/", "/models%2F", 1),
-		"encoded model":     strings.Replace(goodPath, "gemini-2.5-flash", "gemini-2.5-flash%3F", 1),
+		"encoded model":     strings.Replace(goodPath, "gemini-3.8-flash", "gemini-3.8-flash%3F", 1),
 		"query":             goodPath + "?alt=sse",
 		"fragment":          goodPath + "#x",
 		"traversal":         "/v1beta1/projects/proj/locations/loc/publishers/google/models/../../x:generateContent",
@@ -210,6 +210,7 @@ func TestNew_ValidatesLocationAndUpstream(t *testing.T) {
 		location, upstream string
 		ok                 bool
 	}{
+		{"global", "", true},
 		{"us-central1", "", true},
 		{"europe-west4", "https://europe-west4-aiplatform.googleapis.com", true},
 		{"loc", "http://127.0.0.1:8080", true},
@@ -225,5 +226,48 @@ func TestNew_ValidatesLocationAndUpstream(t *testing.T) {
 		if (err == nil) != tc.ok {
 			t.Errorf("New(location %q, upstream %q) error = %v, want ok=%v", tc.location, tc.upstream, err, tc.ok)
 		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestCall_DefaultUpstreamMatchesLocation(t *testing.T) {
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "adc-token"})
+	for _, tc := range []struct {
+		location string
+		wantHost string
+	}{
+		{"global", "aiplatform.googleapis.com"},
+		{"us-central1", "us-central1-aiplatform.googleapis.com"},
+	} {
+		t.Run(tc.location, func(t *testing.T) {
+			var gotScheme, gotHost, gotPath string
+			p, err := modelproxy.New(modelproxy.Config{
+				Project:     "proj",
+				Location:    tc.location,
+				Models:      []string{"gemini-3.8-flash"},
+				TokenSource: ts,
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					gotScheme, gotHost, gotPath = r.URL.Scheme, r.URL.Host, r.URL.Path
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       http.NoBody,
+						Header:     make(http.Header),
+					}, nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := "/v1beta1/projects/proj/locations/" + tc.location + "/publishers/google/models/gemini-3.8-flash:generateContent"
+			if res := call(p, "attendee-01", path, []byte(`{}`)); res.Status != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", res.Status, res.Body)
+			}
+			if gotScheme != "https" || gotHost != tc.wantHost || gotPath != path {
+				t.Errorf("upstream URL = %s://%s%s, want https://%s%s", gotScheme, gotHost, gotPath, tc.wantHost, path)
+			}
+		})
 	}
 }

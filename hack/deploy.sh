@@ -30,7 +30,7 @@ DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
-DEMO_CONF_TEMPLATE_REVISION=9
+DEMO_CONF_TEMPLATE_REVISION=10
 # DEMO_CONF_DEFAULT_STORAGE_CLASS is auto-selected for actor /workspace
 # volumes when both this StorageClass and the Filestore CSIDriverConfig exist
 # on the cluster (set DEMO_CONF_STORAGE_CLASS=none to keep /tmp/workspace).
@@ -351,7 +351,7 @@ conf_render() {
   out="$(sed -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
       -e "s|\${GATEWAY_GSA}|${DEMO_CONF_GATEWAY_GSA:-}|g" \
       -e "s|\${VERTEX_PROJECT}|${DEMO_CONF_VERTEX_PROJECT:-}|g" \
-      -e "s|\${VERTEX_LOCATION}|${DEMO_CONF_VERTEX_LOCATION:-us-central1}|g" \
+      -e "s|\${VERTEX_LOCATION}|${DEMO_CONF_VERTEX_LOCATION:-global}|g" \
       -e "s|\${DEMO_MOCK_LLM}|${DEMO_CONF_MOCK_LLM:-true}|g" \
       -e "s|\${SANDBOX_WORKSPACE}|${sandbox_workspace}|g" \
       -e "s|\${ACTOR_COUNT}|${DEMO_CONF_ACTORS}|g" \
@@ -640,7 +640,7 @@ conf_deploy() {
 
   if [[ -n "${PROJECT_ID:-}" ]]; then
     DEMO_CONF_VERTEX_PROJECT="${PROJECT_ID}"
-    DEMO_CONF_VERTEX_LOCATION="${VERTEX_LOCATION:-us-central1}"
+    DEMO_CONF_VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
     DEMO_CONF_MOCK_LLM=false
   else
     log_step "PROJECT_ID is unset: deploying with DEMO_MOCK_LLM=true (no model calls)."

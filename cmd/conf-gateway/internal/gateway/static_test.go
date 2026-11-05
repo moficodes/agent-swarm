@@ -331,3 +331,20 @@ func TestStatic_ChatFilestoreChipHiddenUnlessFilestoreEnabled(t *testing.T) {
 	}
 }
 
+// TestStatic_ChatDisplaysModelName checks that /chat labels the assistant and
+// top header pill with the active Gemini model rather than "Gemini Agent".
+func TestStatic_ChatDisplaysModelName(t *testing.T) {
+	html := readStatic(t, "chat.html")
+	if !strings.Contains(html, `<span class="badge model-badge">Gemini 3.8 Flash</span>`) {
+		t.Error("chat.html lacks Gemini 3.8 Flash model badge")
+	}
+	js := readStatic(t, "chat.js")
+	if !strings.Contains(js, `'Gemini 3.8 Flash'`) {
+		t.Error("chat.js does not label assistant messages with Gemini 3.8 Flash")
+	}
+	for _, banned := range []string{"Gemini Agent", ">Gemini Flash<"} {
+		if strings.Contains(html, banned) || strings.Contains(js, banned) {
+			t.Errorf("chat static assets still contain retired label %q", banned)
+		}
+	}
+}

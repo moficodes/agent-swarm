@@ -31,7 +31,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
-const defaultModel = "gemini-2.5-flash"
+const defaultModel = "gemini-3.8-flash"
 
 // ErrDisabled means no Vertex project and location are configured.
 var ErrDisabled = errors.New("gemini: no Vertex project and location configured")
@@ -194,7 +194,9 @@ func (c *Client) run(ctx context.Context, contents []*genai.Content) (*types.Cha
 		var research, unknown []*genai.FunctionCall
 		if cand != nil {
 			for _, part := range cand.Parts {
-				text.WriteString(part.Text)
+				if !part.Thought {
+					text.WriteString(part.Text)
+				}
 				if part.FunctionCall == nil {
 					continue
 				}

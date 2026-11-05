@@ -227,7 +227,7 @@ conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
   project, location and models, `generateContent` only, a body size cap and
   a per-actor in-flight limit) before making it
   (`cmd/conf-gateway/internal/modelproxy/proxy.go`).
-- The gateway calls Vertex AI with its own Workload
+- The gateway calls Gemini on Agent Platform with its own Workload
   Identity: the `conf-gateway` `ServiceAccount` is annotated with a GCP
   service account that holds `roles/aiplatform.user` only
   (`hack/deploy.sh`'s `conf_ensure_gsa`,
@@ -240,7 +240,7 @@ Required environment: `KO_DOCKER_REPO` (actors use the cluster's
 `--snapshot-location`, though `BUCKET_NAME` or `SNAPSHOT_LOCATION` is needed
 when `SUBSTRATE_REPO` installs Substrate). Optional: `PROJECT_ID` (enables
 Gemini on Agent Platform; unset runs in mock mode with `DEMO_MOCK_LLM=true`), `VERTEX_LOCATION` (default
-`us-central1`), `DEMO_DOMAIN` (fronts the gateway with a TLS Ingress). See
+`global`), `DEMO_DOMAIN` (fronts the gateway with a TLS Ingress). See
 "Prerequisites" above for the full list.
 
 ```bash

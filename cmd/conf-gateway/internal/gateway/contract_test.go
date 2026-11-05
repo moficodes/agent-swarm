@@ -53,7 +53,7 @@ type contractEnv struct {
 func newContractEnv(t *testing.T, vertex *geminitest.Server, opts ...gateway.Option) *contractEnv {
 	t.Helper()
 	proxy, err := modelproxy.New(modelproxy.Config{
-		Project: "proj", Location: "loc", Models: []string{"gemini-2.5-flash"},
+		Project: "proj", Location: "global", Models: []string{"gemini-3.8-flash"},
 		Upstream:    vertex.URL,
 		TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "adc-token"}),
 	})
@@ -64,7 +64,7 @@ func newContractEnv(t *testing.T, vertex *geminitest.Server, opts ...gateway.Opt
 	router := localactors.New("ate-demo-conf", func(name string) http.Handler {
 		ws := server.NewWorkloadServer(
 			server.WithWorkspaceDir(t.TempDir()),
-			server.WithGeminiConfig(gemini.Config{Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}),
+			server.WithGeminiConfig(gemini.Config{Project: "proj", Location: "global", Model: "gemini-3.8-flash"}),
 		)
 		env.mu.Lock()
 		env.actors[name] = ws

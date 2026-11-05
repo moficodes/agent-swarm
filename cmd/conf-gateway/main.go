@@ -150,7 +150,7 @@ func LoadConfig() Config {
 	}
 	vertexLocation := os.Getenv("VERTEX_LOCATION")
 	if vertexLocation == "" {
-		vertexLocation = "us-central1"
+		vertexLocation = "global"
 	}
 
 	kubectlATE := os.Getenv("KUBECTL_ATE")
@@ -186,7 +186,7 @@ func LoadConfig() Config {
 		LocalMode:             os.Getenv("LOCAL_MODE") == "true",
 		VertexProject:         vertexProject,
 		VertexLocation:        vertexLocation,
-		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-2.5-flash"),
+		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-3.8-flash"),
 		ActorCount:            envPositiveInt("ACTOR_COUNT", 50),
 		ActorsPerWorker:       envPositiveInt("ACTORS_PER_WORKER", 1),
 		AllowedGoogleDomains:  auth.NormalizeDomains([]string{os.Getenv("ALLOWED_GOOGLE_DOMAINS")}),

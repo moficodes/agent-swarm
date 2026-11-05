@@ -27,7 +27,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
-var testConfig = gemini.Config{Project: "proj", Location: "loc", Model: "gemini-2.5-flash"}
+var testConfig = gemini.Config{Project: "proj", Location: "loc", Model: "gemini-3.8-flash"}
 
 func newClient(fake *geminitest.Server, opts ...gemini.Option) *gemini.Client {
 	return gemini.New(testConfig, append([]gemini.Option{gemini.WithTransport(fake.Transport())}, opts...)...)
@@ -48,7 +48,7 @@ func TestGenerate_SendsVertexPathWithoutCredentials(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("got %d requests, want 1", len(reqs))
 	}
-	wantPath := "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-2.5-flash:generateContent"
+	wantPath := "/v1beta1/projects/proj/locations/loc/publishers/google/models/gemini-3.8-flash:generateContent"
 	if reqs[0].Method != "POST" || reqs[0].Path != wantPath {
 		t.Errorf("request = %s %s, want POST %s", reqs[0].Method, reqs[0].Path, wantPath)
 	}
@@ -172,7 +172,7 @@ func TestConfigFromEnv(t *testing.T) {
 	t.Setenv("VERTEX_LOCATION", "l")
 	t.Setenv("GEMINI_MODEL", "")
 	cfg := gemini.ConfigFromEnv()
-	want := gemini.Config{Project: "p", Location: "l", Model: "gemini-2.5-flash"}
+	want := gemini.Config{Project: "p", Location: "l", Model: "gemini-3.8-flash"}
 	if cfg != want {
 		t.Errorf("ConfigFromEnv() = %+v, want %+v", cfg, want)
 	}
@@ -506,5 +506,16 @@ func TestGenerate_BadReplyAfterABrokenScriptGetsThePlainReply(t *testing.T) {
 	}
 	if n := len(fake.Requests()); n != 2 {
 		t.Errorf("got %d requests, want 2", n)
+	}
+}
+
+func TestGenerate_SkipsThoughtParts(t *testing.T) {
+	fake := geminitest.New(t, `{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"internal reasoning"},{"text":"visible answer"}]}}]}`)
+	msg, err := newClient(fake).Generate(context.Background(), nil, "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "visible answer" {
+		t.Errorf("Content = %q, want %q without thought text", msg.Content, "visible answer")
 	}
 }

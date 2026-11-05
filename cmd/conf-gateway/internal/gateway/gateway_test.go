@@ -1215,7 +1215,7 @@ func TestChatRoute(t *testing.T) {
 		`id="send-btn"`,
 		`id="status-pill"`,
 		`id="attendee-badge"`,
-		`Gemini Flash`,
+		`Gemini 3.8 Flash`,
 		`Roll the dice`,
 		`Where am I running?`,
 		`Keep a diary`,

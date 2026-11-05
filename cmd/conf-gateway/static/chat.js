@@ -242,7 +242,7 @@
 
     const senderSpan = document.createElement('span');
     senderSpan.className = 'sender-label';
-    senderSpan.textContent = sender === 'user' ? formatAttendeeBadge(state.attendeeId) : 'Gemini Agent';
+    senderSpan.textContent = sender === 'user' ? formatAttendeeBadge(state.attendeeId) : 'Gemini 3.8 Flash';
 
     const timeSpan = document.createElement('span');
     timeSpan.className = 'timestamp';

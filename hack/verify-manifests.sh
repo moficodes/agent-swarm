@@ -37,7 +37,7 @@ render() {
   sed -e "s|\${GATEWAY_IMAGE}|gcr.io/p/conf-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000|g" \
       -e "s|\${GATEWAY_GSA}|conf-gateway@p.iam.gserviceaccount.com|g" \
       -e "s|\${VERTEX_PROJECT}|p|g" \
-      -e "s|\${VERTEX_LOCATION}|us-central1|g" \
+      -e "s|\${VERTEX_LOCATION}|global|g" \
       -e "s|\${DEMO_MOCK_LLM}|false|g" \
       -e "s|\${SANDBOX_WORKSPACE}|/tmp/workspace|g" \
       -e "s|\${ACTOR_COUNT}|50|g" \
@@ -137,7 +137,7 @@ for f in "${WORKERPOOL_MANIFEST}" "${AUTOSCALING_MANIFEST}" "${APISERVICE_MANIFE
 done
 
 out_template="$(render "${ACTOR_TEMPLATE}" "")"
-for want in "preferredFidelity: SNAPSHOT_FIDELITY_MEMORY" "cpuMillicores: 1000" "memoryBytes: 536870912" "name: SANDBOX_WORKSPACE"; do
+for want in "preferredFidelity: SNAPSHOT_FIDELITY_MEMORY" "cpuMillicores: 1000" "memoryBytes: 536870912" "name: SANDBOX_WORKSPACE" "gemini-3.8-flash"; do
   if ! grep -qF -- "${want}" <<<"${out_template}"; then
     echo "error: actor template manifest lacks ${want}" >&2
     status=1

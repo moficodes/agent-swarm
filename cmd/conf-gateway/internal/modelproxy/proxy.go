@@ -45,8 +45,9 @@ const (
 	maxResponseBody    = 8 << 20
 )
 
-// locationPattern matches a GCP region such as us-central1. The location
-// becomes part of the host that receives the gateway's access token.
+// locationPattern matches "global" or a GCP region such as us-central1.
+// Regional locations become part of the host that receives the gateway's access
+// token, while "global" targets https://aiplatform.googleapis.com.
 var locationPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 var generatePath = regexp.MustCompile(`^/(v1[a-z0-9]*)/projects/([^/]+)/locations/([^/]+)/publishers/google/models/([^/:]+):generateContent$`)
@@ -95,7 +96,11 @@ func New(cfg Config) (*Proxy, error) {
 		}
 	}
 	if cfg.Upstream == "" {
-		cfg.Upstream = "https://" + cfg.Location + "-aiplatform.googleapis.com"
+		if cfg.Location == "global" {
+			cfg.Upstream = "https://aiplatform.googleapis.com"
+		} else {
+			cfg.Upstream = "https://" + cfg.Location + "-aiplatform.googleapis.com"
+		}
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = defaultTimeout

@@ -232,18 +232,18 @@ func TestGatewayInstanceCreation(t *testing.T) {
 func TestLoadConfig_ModelDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := LoadConfig()
-	if cfg.VertexLocation != "us-central1" {
+	if cfg.VertexLocation != "global" {
 		t.Errorf("VertexLocation = %q", cfg.VertexLocation)
 	}
-	if !slices.Equal(cfg.ModelAllowlist, []string{"gemini-2.5-flash"}) {
+	if !slices.Equal(cfg.ModelAllowlist, []string{"gemini-3.8-flash"}) {
 		t.Errorf("ModelAllowlist = %v", cfg.ModelAllowlist)
 	}
 }
 
 func TestLoadConfig_ModelAllowlistTrimsEntries(t *testing.T) {
 	clearConfigEnv(t)
-	t.Setenv("MODEL_ALLOWLIST", " gemini-2.5-flash , gemini-2.5-pro ,")
-	if got := LoadConfig().ModelAllowlist; !slices.Equal(got, []string{"gemini-2.5-flash", "gemini-2.5-pro"}) {
+	t.Setenv("MODEL_ALLOWLIST", " gemini-3.8-flash , gemini-3.8-pro ,")
+	if got := LoadConfig().ModelAllowlist; !slices.Equal(got, []string{"gemini-3.8-flash", "gemini-3.8-pro"}) {
 		t.Errorf("ModelAllowlist = %v", got)
 	}
 }
