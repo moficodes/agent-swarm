@@ -509,7 +509,7 @@ func (g *Gateway) routes() {
 		http.Redirect(w, r, "/chat", http.StatusFound)
 	})
 	if g.staticFS != nil {
-		g.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(g.staticFS))))
+		g.mux.Handle("/static/", http.StripPrefix("/static/", web.StaticHandler(g.staticFS)))
 	}
 }
 

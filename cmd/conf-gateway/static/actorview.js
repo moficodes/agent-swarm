@@ -183,6 +183,29 @@
     return { label: "Didn't run", cls: 'run-failed', detail: detail };
   }
 
+  // tokenUsable reports whether an attendee JWT is structurally valid, names
+  // attendeeId, and has more than 60 seconds left before expiry.
+  function tokenUsable(token, attendeeId, nowMs) {
+    if (!token || typeof token !== 'string' || !attendeeId) return false;
+    const parts = token.split('.');
+    if (parts.length !== 3) return false;
+    try {
+      let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4 !== 0) b64 += '=';
+      const raw = typeof atob === 'function'
+        ? atob(b64)
+        : Buffer.from(b64, 'base64').toString('utf8');
+      const claims = JSON.parse(raw);
+      if (!claims || claims.sub !== attendeeId || typeof claims.exp !== 'number') {
+        return false;
+      }
+      const now = typeof nowMs === 'number' ? nowMs : Date.now();
+      return claims.exp * 1000 > now + 60000;
+    } catch (_) {
+      return false;
+    }
+  }
+
   const THEME_KEY = 'conf_theme';
 
   function getTheme() {
@@ -285,6 +308,7 @@
     volume: volume,
     fleetVolumes: fleetVolumes,
     run: run,
+    tokenUsable: tokenUsable,
     getTheme: getTheme,
     setTheme: setTheme,
     toggleTheme: toggleTheme

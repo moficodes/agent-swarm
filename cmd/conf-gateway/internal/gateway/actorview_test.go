@@ -15,6 +15,7 @@
 package gateway_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os/exec"
 	"path/filepath"
@@ -281,6 +282,65 @@ func TestActorView_VolumeAndFleetVolumes(t *testing.T) {
 	for i, c := range fleetCases {
 		if gotFleet[i] != c.want {
 			t.Errorf("%s: fleetVolumes = %+v, want %+v", c.name, gotFleet[i], c.want)
+		}
+	}
+}
+
+func TestActorView_TokenUsable(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	script, err := filepath.Abs(filepath.Join(staticDir, "actorview.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeJWT := func(sub string, expSec int64) string {
+		hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+		payloadBytes, _ := json.Marshal(map[string]any{"sub": sub, "exp": expSec})
+		payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+		return hdr + "." + payload + ".sig"
+	}
+	const nowMs = int64(1_700_000_000_000)
+	const nowSec = nowMs / 1000
+	cases := []struct {
+		name       string
+		token      string
+		attendeeID string
+		want       bool
+	}{
+		{"fresh matching token", makeJWT("attendee-05", nowSec+3600), "attendee-05", true},
+		{"expired token", makeJWT("attendee-05", nowSec-10), "attendee-05", false},
+		{"expiring within 60s grace window", makeJWT("attendee-05", nowSec+30), "attendee-05", false},
+		{"different attendee sub", makeJWT("attendee-05", nowSec+3600), "attendee-06", false},
+		{"malformed token", "not-a-jwt", "attendee-05", false},
+		{"empty token", "", "attendee-05", false},
+	}
+	args := make([][]any, len(cases))
+	for i, c := range cases {
+		args[i] = []any{c.token, c.attendeeID, nowMs}
+	}
+	in, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const driver = `
+globalThis.window = {};
+require(process.argv[1]);
+const args = JSON.parse(process.argv[2]);
+process.stdout.write(JSON.stringify(args.map((a) => window.ActorView.tokenUsable(...a))));
+`
+	b, err := exec.Command(node, "-e", driver, script, string(in)).Output()
+	if err != nil {
+		t.Fatalf("node: %v", err)
+	}
+	var got []bool
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("decoding %s: %v", b, err)
+	}
+	for i, c := range cases {
+		if got[i] != c.want {
+			t.Errorf("%s: tokenUsable = %v, want %v", c.name, got[i], c.want)
 		}
 	}
 }

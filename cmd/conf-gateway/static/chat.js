@@ -63,7 +63,7 @@
   // -------------------------------------------------------------------------
   // Server-Sent Events (SSE) Real-Time State Sync
   // -------------------------------------------------------------------------
-  function connectEventSource() {
+  function connectEventSource(allowRefreshOnClose) {
     if (!state.attendeeId || !state.token) return;
     if (state.eventSource) {
       state.eventSource.close();
@@ -88,7 +88,13 @@
     });
 
     es.onerror = function() {
-      // EventSource automatically handles reconnection
+      // A 401/403 handshake rejection permanently closes EventSource
+      // (readyState === 2) instead of reconnecting; mint a fresh session once.
+      if (es.readyState === 2 && state.eventSource === es && allowRefreshOnClose) {
+        es.close();
+        state.eventSource = null;
+        initSession(true);
+      }
     };
   }
 
@@ -177,32 +183,34 @@
   }
 
   // Session Management
-  async function initSession() {
+  async function initSession(forceRefresh) {
     const storedId = localStorage.getItem('conf_attendee_id');
     const storedToken = localStorage.getItem('conf_attendee_token');
 
-    // If query string has reset, clear stored session
+    // If query string has reset (or an SSE/HTTP 401 forced refresh), clear stored session
     const urlParams = new URLSearchParams(window.location.search);
-    const forceReset = urlParams.get('reset') === '1';
+    const forceReset = forceRefresh === true || urlParams.get('reset') === '1';
     const attendeeParam = urlParams.get('attendee') || urlParams.get('attendee_id');
 
     if (attendeeParam) {
       state.attendeeId = attendeeParam;
-      if (storedId === attendeeParam && storedToken) {
+      if (!forceReset && storedId === attendeeParam && window.ActorView.tokenUsable(storedToken, attendeeParam)) {
         state.token = storedToken;
-      }
-      if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
-      if (!forceReset && state.token) {
-        connectEventSource();
+        if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
+        connectEventSource(true);
         return;
       }
-    } else if (!forceReset && storedId && storedToken) {
+      if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
+    } else if (!forceReset && storedId && window.ActorView.tokenUsable(storedToken, storedId)) {
       state.attendeeId = storedId;
       state.token = storedToken;
       if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
-      connectEventSource();
+      connectEventSource(true);
       return;
     }
+
+    localStorage.removeItem('conf_attendee_token');
+    state.token = '';
 
     try {
       const sessionURL = attendeeParam ? ('/api/session?attendee_id=' + encodeURIComponent(attendeeParam)) : '/api/session';
@@ -217,7 +225,7 @@
       localStorage.setItem('conf_attendee_token', state.token);
 
       if (el.attendeeBadge) el.attendeeBadge.textContent = formatAttendeeBadge(state.attendeeId);
-      connectEventSource();
+      connectEventSource(false);
     } catch (err) {
       console.error('Failed to init session:', err);
       appendSystemMessage('Unable to connect to gateway session. Please refresh the page.');
@@ -445,7 +453,7 @@
       if (resp.status === 401) {
         // Token expired or invalid: refresh session
         localStorage.removeItem('conf_attendee_token');
-        await initSession();
+        await initSession(true);
         appendSystemMessage('⚠️ Session was refreshed. Please re-submit your prompt.');
         return;
       }
@@ -501,7 +509,7 @@
 
       if (resp.status === 401) {
         localStorage.removeItem('conf_attendee_token');
-        await initSession();
+        await initSession(true);
         appendSystemMessage('⚠️ Session was refreshed. Please re-submit your decision.');
         if (btnReject) btnReject.disabled = false;
         if (btnApprove) btnApprove.disabled = false;

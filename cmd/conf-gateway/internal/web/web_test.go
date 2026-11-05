@@ -114,3 +114,66 @@ func TestJSONPOST(t *testing.T) {
 		t.Errorf("oversized body: %d", rec.Code)
 	}
 }
+
+func TestPage_VersionsStaticRefsAndDisablesHeuristicCache(t *testing.T) {
+	fsys := fstest.MapFS{
+		"chat.html":    {Data: []byte(`<link href="/static/chat.css"><script src="/static/actorview.js"></script><script src="/static/missing.js"></script>`)},
+		"chat.css":     {Data: []byte("body { color: red; }")},
+		"actorview.js": {Data: []byte("window.ActorView = {};")},
+	}
+	p := Pages{FS: fsys}
+	chat := p.Page("chat.html", false, "/chat")
+
+	rec := httptest.NewRecorder()
+	chat(rec, httptest.NewRequest(http.MethodGet, "/chat", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /chat = %d", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `href="/static/chat.css?v=`) || !strings.Contains(body, `src="/static/actorview.js?v=`) {
+		t.Errorf("expected versioned /static/ URLs, got %q", body)
+	}
+	if !strings.Contains(body, `src="/static/missing.js"`) {
+		t.Errorf("missing asset ref should remain untouched, got %q", body)
+	}
+
+	// Updating actorview.js must change its ?v= hash automatically.
+	fsys["actorview.js"] = &fstest.MapFile{Data: []byte("window.ActorView = { v: 2 };")}
+	rec2 := httptest.NewRecorder()
+	chat(rec2, httptest.NewRequest(http.MethodGet, "/chat", nil))
+	if rec2.Body.String() == body {
+		t.Errorf("changing asset bytes did not change ?v= hash: %q", rec2.Body.String())
+	}
+}
+
+func TestStaticHandler_ETagAndNoCache(t *testing.T) {
+	fsys := fstest.MapFS{
+		"actorview.js": {Data: []byte("window.ActorView = {};")},
+	}
+	h := StaticHandler(fsys)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/actorview.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /actorview.js = %d", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("missing ETag header on static asset")
+	}
+
+	// Revalidation with matching If-None-Match returns 304 Not Modified.
+	req304 := httptest.NewRequest(http.MethodGet, "/actorview.js", nil)
+	req304.Header.Set("If-None-Match", etag)
+	rec304 := httptest.NewRecorder()
+	h.ServeHTTP(rec304, req304)
+	if rec304.Code != http.StatusNotModified {
+		t.Errorf("If-None-Match %s = %d, want 304", etag, rec304.Code)
+	}
+}

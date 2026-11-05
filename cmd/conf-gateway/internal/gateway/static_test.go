@@ -320,4 +320,14 @@ func TestStatic_ChatFilestoreChipHiddenUnlessFilestoreEnabled(t *testing.T) {
 	if !strings.Contains(css, "[hidden]") || !strings.Contains(css, "display: none !important") {
 		t.Error("chat.css must keep [hidden] hidden over .chip's display: inline-flex")
 	}
+	// An expired or rejected conf_attendee_token in localStorage would silently
+	// close EventSource (readyState === 2) before actor_view arrives and leave
+	// #chip-filestore permanently hidden unless initSession checks expiry and
+	// refreshes on closed SSE handshakes.
+	for _, want := range []string{"ActorView.tokenUsable(", "es.readyState === 2", "initSession(true)"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("chat.js lacks expired/rejected SSE session recovery %q", want)
+		}
+	}
 }
+

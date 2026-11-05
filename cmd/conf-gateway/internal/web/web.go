@@ -18,6 +18,7 @@ package web
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -28,10 +29,13 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
 )
@@ -381,6 +385,8 @@ func (p Pages) Page(file string, presenter bool, paths ...string) http.HandlerFu
 			http.Error(w, fmt.Sprintf("Failed to read %s: %v", file, err), http.StatusNotFound)
 			return
 		}
+		data = versionStaticRefs(p.FS, data)
+		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(http.StatusOK)
@@ -388,6 +394,46 @@ func (p Pages) Page(file string, presenter bool, paths ...string) http.HandlerFu
 			_, _ = w.Write(data)
 		}
 	}
+}
+
+var staticRefPattern = regexp.MustCompile(`"/static/([a-zA-Z0-9._/-]+)"`)
+
+// versionStaticRefs appends a content-hash ?v= query parameter to double-quoted
+// /static/<asset> URLs whose target file exists in fsys, ensuring browsers bust
+// stale cached JS/CSS immediately after a gateway update.
+func versionStaticRefs(fsys fs.FS, html []byte) []byte {
+	if fsys == nil || !bytes.Contains(html, []byte(`"/static/`)) {
+		return html
+	}
+	return staticRefPattern.ReplaceAllFunc(html, func(match []byte) []byte {
+		name := string(match[len(`"/static/`) : len(match)-1])
+		asset, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			return match
+		}
+		sum := sha256.Sum256(asset)
+		return []byte(fmt.Sprintf(`"/static/%s?v=%x"`, name, sum[:8]))
+	})
+}
+
+// StaticHandler serves static assets from fsys with strong SHA-256 ETags and
+// Cache-Control: no-cache so browsers revalidate embedded assets cleanly across
+// gateway rollouts instead of relying on heuristic caching.
+func StaticHandler(fsys fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(fsys))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fsys != nil {
+			clean := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+			if clean != "" {
+				if data, err := fs.ReadFile(fsys, clean); err == nil {
+					sum := sha256.Sum256(data)
+					w.Header().Set("Cache-Control", "no-cache")
+					w.Header().Set("ETag", fmt.Sprintf(`"%x"`, sum[:8]))
+				}
+			}
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 func (p Pages) renderGoogleSignInPage(w http.ResponseWriter) {
