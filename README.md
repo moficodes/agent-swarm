@@ -19,7 +19,7 @@ limitations under the License.
 ## Prerequisites
 
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
-  at the version pinned in `go.mod` (currently the `v1.0.0-rc.2` release).
+  at the version pinned in `go.mod` (currently the `v1.0.0` release).
   `hack/deploy.sh` refuses to deploy against a cluster running any other
   version; see "Bumping Substrate" below to move the pin. Substrate needs
   GKE 1.37 or later, which some zones offer only in the RAPID channel.
@@ -449,9 +449,9 @@ export PRESENTER_TOKEN="$(kubectl get secret conf-gateway -n ate-demo-conf -o js
 between releases. `hack/deploy.sh` checks the cluster's running
 `ate-api-server` version (`/ko-app/ateapi --version`) against that pin and
 refuses to deploy on a mismatch. Install from a clean checkout of exactly the
-pinned version: a tag pin needs a version equal to the tag (`v1.0.0-rc.2`), and a
+pinned version: a tag pin needs a version equal to the tag (`v1.0.0`), and a
 commit pin accepts the commit or the describe form after a tag
-(`v1.0.0-rc.2-5-g1a2b3c4d`). To move the pin, for example to the next release:
+(`v1.0.0-5-g1a2b3c4d`). To move the pin, for example to the next release:
 
 ```bash
 go get -tool go.ate.dev/substrate/cmd/kubectl-ate@<tag-or-commit>

@@ -30,7 +30,7 @@ DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
-DEMO_CONF_TEMPLATE_REVISION=10
+DEMO_CONF_TEMPLATE_REVISION=11
 # DEMO_CONF_DEFAULT_STORAGE_CLASS is auto-selected for actor /workspace
 # volumes when both this StorageClass and the Filestore CSIDriverConfig exist
 # on the cluster (set DEMO_CONF_STORAGE_CLASS=none to keep /tmp/workspace).
