@@ -378,6 +378,7 @@
   // Telemetry Updates
   // -------------------------------------------------------------------------
   let isTelemetryFetching = false;
+  let currentAtespace = 'ate-demo-conf';
   async function fetchTelemetry() {
     if (isTelemetryFetching) return;
     isTelemetryFetching = true;
@@ -399,6 +400,9 @@
 
   function updateDashboard(data) {
     if (!data) return;
+    if (data.atespace) {
+      currentAtespace = data.atespace;
+    }
 
     // 1. Update Envoy L7 Parking Meter
     updateParkingMeter(data.parked_requests || 0, data.parking_available);
@@ -1183,7 +1187,7 @@
           <span>Action ID: <code>${escapeHTML(entry.id)}</code></span>
         </div>
         <div class="footer-right">
-          <span>Target: <code>ate-demo-conf/${escapeHTML(attendeeId)}</code></span>
+          <span>Target: <code>${escapeHTML(currentAtespace)}/${escapeHTML(attendeeId)}</code></span>
         </div>
       </div>
     `;

@@ -76,6 +76,7 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	telem := types.StageTelemetry{
+		Atespace:         g.atespace,
 		ParkedRequests:   parked,
 		ParkingAvailable: parkingOK,
 		Workers:          workers,

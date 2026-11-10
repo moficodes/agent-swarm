@@ -24,13 +24,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: conf-prometheus
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 ---
 # Pod discovery for the scrape targets in ate-system.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: conf-prometheus
+  name: ${RBAC_PREFIX}conf-prometheus
   namespace: ate-system
 rules:
 - apiGroups: [""]
@@ -40,22 +40,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: conf-prometheus
+  name: ${RBAC_PREFIX}conf-prometheus
   namespace: ate-system
 subjects:
 - kind: ServiceAccount
   name: conf-prometheus
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 roleRef:
   kind: Role
-  name: conf-prometheus
+  name: ${RBAC_PREFIX}conf-prometheus
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: conf-prometheus-config
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 data:
   prometheus.yml: |
     global:
@@ -87,7 +87,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: conf-prometheus
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
   labels:
     app: conf-prometheus
 spec:
@@ -151,7 +151,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: conf-prometheus
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 spec:
   type: ClusterIP
   selector:
@@ -165,7 +165,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: conf-prometheus-adapter
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 ---
 # conf_worker_demand = conf-workers hosting at least one actor (partial or
 # at_capacity) + ceil(parked requests / ACTORS_PER_WORKER), in workers.
@@ -181,23 +181,23 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: conf-prometheus-adapter-config
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 data:
   config.yaml: |
     externalRules:
-    - seriesQuery: '{__name__="ate_workerpool_workers",ate_workerpool_namespace="ate-demo-conf",ate_workerpool_name="conf-workers"}'
+    - seriesQuery: '{__name__="ate_workerpool_workers",ate_workerpool_namespace="${NAMESPACE}",ate_workerpool_name="${WORKER_POOL}"}'
       resources:
         namespaced: false
       name:
         matches: "^ate_workerpool_workers$"
-        as: "conf_worker_demand"
-      metricsQuery: '(max(ate_workerpool_workers{ate_workerpool_namespace="ate-demo-conf",ate_workerpool_name="conf-workers",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="ate-demo-conf",ate_workerpool_name="conf-workers",ate_worker_state="at_capacity"}) or vector(0)) + ceil((sum(atenet_router_parking_active) or vector(0)) / ${ACTORS_PER_WORKER})'
+        as: "${EXTERNAL_METRIC}"
+      metricsQuery: '(max(ate_workerpool_workers{ate_workerpool_namespace="${NAMESPACE}",ate_workerpool_name="${WORKER_POOL}",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="${NAMESPACE}",ate_workerpool_name="${WORKER_POOL}",ate_worker_state="at_capacity"}) or vector(0)) + ceil((sum(atenet_router_parking_active) or vector(0)) / ${ACTORS_PER_WORKER})'
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: conf-prometheus-adapter
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
   labels:
     app: conf-prometheus-adapter
 spec:
@@ -221,7 +221,7 @@ spec:
         args:
         - --secure-port=6443
         - --cert-dir=/tmp/cert
-        - --prometheus-url=http://conf-prometheus.ate-demo-conf.svc:9090/
+        - --prometheus-url=http://conf-prometheus.${NAMESPACE}.svc:9090/
         - --metrics-relist-interval=30s
         - --config=/etc/adapter/config.yaml
         ports:
@@ -271,7 +271,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: conf-prometheus-adapter
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 spec:
   type: ClusterIP
   selector:
@@ -285,7 +285,7 @@ spec:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: conf-prometheus-adapter-auth-delegator
+  name: ${RBAC_PREFIX}conf-prometheus-adapter-auth-delegator
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -293,12 +293,12 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: conf-prometheus-adapter
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: conf-prometheus-adapter-auth-reader
+  name: ${RBAC_PREFIX}conf-prometheus-adapter-auth-reader
   namespace: kube-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -307,14 +307,14 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: conf-prometheus-adapter
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 ---
 # The adapter resolves namespaces and pods at startup even for external
 # metrics.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: conf-prometheus-adapter-resource-reader
+  name: ${RBAC_PREFIX}conf-prometheus-adapter-resource-reader
 rules:
 - apiGroups: [""]
   resources: ["namespaces", "pods", "services", "configmaps"]
@@ -323,15 +323,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: conf-prometheus-adapter-resource-reader
+  name: ${RBAC_PREFIX}conf-prometheus-adapter-resource-reader
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: conf-prometheus-adapter-resource-reader
+  name: ${RBAC_PREFIX}conf-prometheus-adapter-resource-reader
 subjects:
 - kind: ServiceAccount
   name: conf-prometheus-adapter
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 ---
 # GKE's HPA controller can already read external metrics and scale any
 # /scale subresource, so no extra binding is needed for it.
@@ -340,20 +340,20 @@ subjects:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: conf-workers
-  namespace: ate-demo-conf
+  name: ${WORKER_POOL}
+  namespace: ${NAMESPACE}
 spec:
   scaleTargetRef:
     apiVersion: ate.dev/v1
     kind: WorkerPool
-    name: conf-workers
+    name: ${WORKER_POOL}
   minReplicas: ${MIN_WORKERS}
   maxReplicas: ${MAX_WORKERS}
   metrics:
   - type: External
     external:
       metric:
-        name: conf_worker_demand
+        name: ${EXTERNAL_METRIC}
       target:
         type: AverageValue
         averageValue: "1"

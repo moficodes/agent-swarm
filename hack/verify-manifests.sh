@@ -34,7 +34,14 @@ APISERVICE_MANIFEST="manifests/autoscaling-apiservice.yaml.tmpl"
 # and a non-empty domain, since the install script applies it only when
 # DEMO_DOMAIN is set.
 render() {
-  sed -e "s|\${GATEWAY_IMAGE}|gcr.io/p/conf-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000|g" \
+  sed -e "s|\${NAMESPACE}|ate-demo-conf|g" \
+      -e "s|\${WORKER_POOL}|conf-workers|g" \
+      -e "s|\${WORKLOAD_LABEL}|conference|g" \
+      -e "s|\${TEMPLATE_NAME}|conf-agent|g" \
+      -e "s|\${RBAC_PREFIX}||g" \
+      -e "s|\${EXTERNAL_METRIC}|conf_worker_demand|g" \
+      -e "s|\${DASHBOARD_SUFFIX}||g" \
+      -e "s|\${GATEWAY_IMAGE}|gcr.io/p/conf-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000|g" \
       -e "s|\${GATEWAY_GSA}|conf-gateway@p.iam.gserviceaccount.com|g" \
       -e "s|\${VERTEX_PROJECT}|p|g" \
       -e "s|\${VERTEX_LOCATION}|global|g" \

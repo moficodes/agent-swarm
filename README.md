@@ -73,6 +73,10 @@ limitations under the License.
 - Environment variables: `KO_DOCKER_REPO` is required.
   `PROJECT_ID` is optional and enables Gemini on Agent Platform; leave it unset to run with
   mock replies. Also optional: `VERTEX_LOCATION`, `DEMO_DOMAIN`,
+  `DEMO_CONF_STATIC_IP_NAME` (global static IP name for the GKE Ingress),
+  `DEMO_CONF_NAMESPACE` (default `ate-demo-conf`; setting e.g.
+  `ate-demo-conf-live` deploys a separate namespace, atespace, `WorkerPool`,
+  `ActorTemplate` and golden snapshot on the same cluster),
   `DEMO_CONF_ACTORS` (default 50), `DEMO_CONF_MIN_WORKERS` (default 2) and
   `DEMO_CONF_MAX_WORKERS` (default 5), the `conf-workers` autoscaling range,
   `DEMO_CONF_ACTORS_PER_WORKER` (default 4, the actors each worker hosts at

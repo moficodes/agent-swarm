@@ -55,24 +55,23 @@ const (
 	routerStatusPort      = 9090
 )
 
-// workerPoolNamespace and workerPoolName identify the WorkerPool, and the
-// HPA of the same name, whose size the stage header shows.
-const (
-	workerPoolNamespace = "ate-demo-conf"
-	workerPoolName      = "conf-workers"
-)
+// defaultWorkerPoolName is the default WorkerPool, and HPA of the same name,
+// whose size the stage header shows.
+const defaultWorkerPoolName = "conf-workers"
 
 //go:embed static/*
 var staticFS embed.FS
 
 // Config holds the configuration for the conference edge gateway.
 type Config struct {
-	Port         string
-	RouterURL    string
-	StatusURL    string
-	HMACSecret   string
-	PresenterKey string
-	Atespace     string
+	Port                string
+	RouterURL           string
+	StatusURL           string
+	HMACSecret          string
+	PresenterKey        string
+	Atespace            string
+	WorkerPoolNamespace string
+	WorkerPoolName      string
 
 	// RouterStatusDiscovery selects how router pods are found for parking
 	// aggregation: "static" polls StatusURL alone, "endpointslices" discovers
@@ -148,6 +147,14 @@ func LoadConfig() Config {
 	if atespace == "" {
 		atespace = "ate-demo-conf"
 	}
+	workerPoolNamespace := strings.TrimSpace(os.Getenv("WORKER_POOL_NAMESPACE"))
+	if workerPoolNamespace == "" {
+		workerPoolNamespace = atespace
+	}
+	workerPoolName := strings.TrimSpace(os.Getenv("WORKER_POOL_NAME"))
+	if workerPoolName == "" {
+		workerPoolName = defaultWorkerPoolName
+	}
 	vertexLocation := os.Getenv("VERTEX_LOCATION")
 	if vertexLocation == "" {
 		vertexLocation = "global"
@@ -175,6 +182,8 @@ func LoadConfig() Config {
 		HMACSecret:            hmacSecret,
 		PresenterKey:          presenterKey,
 		Atespace:              atespace,
+		WorkerPoolNamespace:   workerPoolNamespace,
+		WorkerPoolName:        workerPoolName,
 		RouterStatusDiscovery: routerStatusDiscovery,
 		RouterCAFile:          os.Getenv("ROUTER_CA_FILE"),
 		RouterCredBundle:      os.Getenv("ROUTER_CRED_BUNDLE"),
@@ -338,9 +347,9 @@ func newActorControl(cfg Config) (*actorstate.KubectlATE, error) {
 	return actorstate.NewKubectlATE(resolved, cfg.ATEAPIEndpoint, cfg.Atespace), nil
 }
 
-// newWorkerScaleReader builds a reader for the conf-workers pool's size from
-// the in-cluster Kubernetes API.
-func newWorkerScaleReader() (*workerscale.Reader, error) {
+// newWorkerScaleReader builds a reader for the configured worker pool's size
+// from the in-cluster Kubernetes API.
+func newWorkerScaleReader(cfg Config) (*workerscale.Reader, error) {
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("loading in-cluster config: %w", err)
@@ -353,7 +362,7 @@ func newWorkerScaleReader() (*workerscale.Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building dynamic client: %w", err)
 	}
-	return workerscale.New(client, dyn, workerPoolNamespace, workerPoolName), nil
+	return workerscale.New(client, dyn, cfg.WorkerPoolNamespace, cfg.WorkerPoolName), nil
 }
 
 func main() {
@@ -417,7 +426,7 @@ func main() {
 			log.Fatal(err)
 		}
 		opts = append(opts, gateway.WithActorControl(ctrl))
-		if r, err := newWorkerScaleReader(); err != nil {
+		if r, err := newWorkerScaleReader(cfg); err != nil {
 			log.Printf("Worker pod counts are unavailable: %v", err)
 		} else {
 			opts = append(opts, gateway.WithWorkerScale(r))

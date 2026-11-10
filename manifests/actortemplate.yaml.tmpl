@@ -13,11 +13,11 @@
 # limitations under the License.
 
 metadata:
-  atespace: ate-demo-conf
-  name: conf-agent
+  atespace: ${NAMESPACE}
+  name: ${TEMPLATE_NAME}
 workerSelector:
   matchLabels:
-    workload: conference
+    workload: ${WORKLOAD_LABEL}
 containers:
 - name: conf-workload
   image: ko://github.com/agent-substrate/agent-swarm/cmd/conf-workload

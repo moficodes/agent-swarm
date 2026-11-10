@@ -19,7 +19,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
   annotations:
     iam.gke.io/gcp-service-account: ${GATEWAY_GSA}
 ---
@@ -27,7 +27,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: conf-gateway-ate-client
+  name: ${RBAC_PREFIX}conf-gateway-ate-client
   namespace: ate-system
 rules:
 - apiGroups: [""]
@@ -42,22 +42,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: conf-gateway-ate-client
+  name: ${RBAC_PREFIX}conf-gateway-ate-client
   namespace: ate-system
 subjects:
 - kind: ServiceAccount
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 roleRef:
   kind: Role
-  name: conf-gateway-ate-client
+  name: ${RBAC_PREFIX}conf-gateway-ate-client
   apiGroup: rbac.authorization.k8s.io
 ---
 # kubectl-ate reads the ateapi CA from a ClusterTrustBundle.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: conf-gateway-trust-bundles
+  name: ${RBAC_PREFIX}conf-gateway-trust-bundles
 rules:
 - apiGroups: ["certificates.k8s.io"]
   resources: ["clustertrustbundles"]
@@ -66,14 +66,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: conf-gateway-trust-bundles
+  name: ${RBAC_PREFIX}conf-gateway-trust-bundles
 subjects:
 - kind: ServiceAccount
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 roleRef:
   kind: ClusterRole
-  name: conf-gateway-trust-bundles
+  name: ${RBAC_PREFIX}conf-gateway-trust-bundles
   apiGroup: rbac.authorization.k8s.io
 ---
 # The stage header and worker pool view read the worker pool's size from its
@@ -82,17 +82,17 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: conf-gateway-worker-scale
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 rules:
 - apiGroups: ["autoscaling"]
   resources: ["horizontalpodautoscalers"]
   resourceNames:
-  - conf-workers
+  - ${WORKER_POOL}
   verbs: ["get"]
 - apiGroups: ["ate.dev"]
   resources: ["workerpools"]
   resourceNames:
-  - conf-workers
+  - ${WORKER_POOL}
   verbs: ["get"]
 - apiGroups: [""]
   resources: ["pods"]
@@ -102,11 +102,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: conf-gateway-worker-scale
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 subjects:
 - kind: ServiceAccount
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 roleRef:
   kind: Role
   name: conf-gateway-worker-scale
@@ -116,7 +116,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
   labels:
     app: conf-gateway
 spec:
@@ -146,6 +146,12 @@ spec:
         env:
         - name: PORT
           value: "8090"
+        - name: ATESPACE
+          value: "${NAMESPACE}"
+        - name: WORKER_POOL_NAMESPACE
+          value: "${NAMESPACE}"
+        - name: WORKER_POOL_NAME
+          value: "${WORKER_POOL}"
         - name: ROUTER_URL
           value: "https://atenet-router.ate-system.svc:443"
         - name: ROUTER_CA_FILE
@@ -234,7 +240,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
   annotations:
     # Used only by the GKE Ingress in gateway-ingress.yaml.tmpl, which
     # defines this BackendConfig; harmless without it.

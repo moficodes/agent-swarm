@@ -346,6 +346,57 @@ expect_apiservice_delete delete 0 '{"spec":{"service":{"namespace":"ate-demo-con
 expect_apiservice_delete delete 0 ''
 expect_apiservice_delete keep   0 '{"spec":{"service":{"namespace":"custom-metrics","name":"custom-metrics-stackdriver-adapter"}}}'
 expect_apiservice_delete keep   1 ''   # the read failed: owner unknown
+# A second demo namespace (e.g. ate-demo-conf-live) shares ate-demo-conf's
+# adapter on deploy and must not delete ate-demo-conf's APIService on teardown.
+if ! DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_apiservice_ok '{"spec":{"service":{"namespace":"ate-demo-conf","name":"conf-prometheus-adapter"}}}'; then
+  echo "FAIL: conf_apiservice_ok rejected sharing ate-demo-conf's conf-prometheus-adapter" >&2
+  fail=1
+fi
+if DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_apiservice_deletable 0 '{"spec":{"service":{"namespace":"ate-demo-conf","name":"conf-prometheus-adapter"}}}'; then
+  echo "FAIL: conf_apiservice_deletable allowed ate-demo-conf-live to delete ate-demo-conf's APIService" >&2
+  fail=1
+fi
+
+# DEMO_CONF_NAMESPACE=ate-demo-conf-live isolates the worker pool, workload
+# selector, actor template, RBAC names, external metric, SPIFFE ID, and static IP.
+live_pool="$(DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_render manifests/workerpool.yaml.tmpl)"
+for want in "name: ate-demo-conf-live" "name: conf-workers-live" "workload: conference-live"; do
+  if ! grep -qF -- "${want}" <<<"${live_pool}"; then
+    echo "FAIL: live workerpool manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+live_tmpl="$(DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_render manifests/actortemplate.yaml.tmpl)"
+for want in "atespace: ate-demo-conf-live" "name: conf-agent-live" "workload: conference-live"; do
+  if ! grep -qF -- "${want}" <<<"${live_tmpl}"; then
+    echo "FAIL: live actortemplate manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+live_gw="$(DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_render manifests/gateway.yaml.tmpl)"
+for want in "name: ate-demo-conf-live-conf-gateway-ate-client" "name: ate-demo-conf-live-conf-gateway-trust-bundles" \
+            'value: "ate-demo-conf-live"' 'value: "conf-workers-live"' "- conf-workers-live"; do
+  if ! grep -qF -- "${want}" <<<"${live_gw}"; then
+    echo "FAIL: live gateway manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+live_ing="$(DEMO_CONF_NAMESPACE=ate-demo-conf-live DEMO_DOMAIN=live.swarm.example.com DEMO_CONF_STATIC_IP_NAME=live-ip conf_render manifests/gateway-ingress.yaml.tmpl)"
+if ! grep -qF 'kubernetes.io/ingress.global-static-ip-name: "live-ip"' <<<"${live_ing}"; then
+  echo "FAIL: live ingress manifest lacks global-static-ip-name annotation" >&2
+  fail=1
+fi
+live_hpa="$(DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_render_hpa)"
+for want in "kind: HorizontalPodAutoscaler" "name: conf-workers-live" "namespace: ate-demo-conf-live" "name: conf_worker_demand_live"; do
+  if ! grep -qF -- "${want}" <<<"${live_hpa}"; then
+    echo "FAIL: live HPA manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+if [[ "$(DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_router_spiffe_id)" != "spiffe://cluster.local/ns/ate-demo-conf-live/sa/conf-gateway" ]]; then
+  echo "FAIL: conf_router_spiffe_id did not follow DEMO_CONF_NAMESPACE" >&2
+  fail=1
+fi
 
 # The APIService is registered only after the adapter is ready, so a broken
 # adapter never leaves an unavailable aggregated API on the cluster.

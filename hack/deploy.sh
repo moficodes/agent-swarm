@@ -36,9 +36,83 @@ DEMO_CONF_TEMPLATE_REVISION=11
 # on the cluster (set DEMO_CONF_STORAGE_CLASS=none to keep /tmp/workspace).
 DEMO_CONF_DEFAULT_STORAGE_CLASS="substrate-volumepool-sc"
 DEMO_CONF_VOLUME_BYTES="${DEMO_CONF_VOLUME_BYTES:-1073741824}"
-# DEMO_CONF_ROUTER_SPIFFE_ID is the pod identity conf-gateway presents to
-# atenet-router's mTLS ingress (:443).
-DEMO_CONF_ROUTER_SPIFFE_ID="spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway"
+DEMO_CONF_NAMESPACE="${DEMO_CONF_NAMESPACE:-ate-demo-conf}"
+# DEMO_CONF_ROUTER_SPIFFE_ID is the default pod identity conf-gateway presents
+# to atenet-router's mTLS ingress (:443). conf_router_spiffe_id derives it from
+# DEMO_CONF_NAMESPACE on each call so inline overrides work in tests.
+DEMO_CONF_ROUTER_SPIFFE_ID="spiffe://cluster.local/ns/${DEMO_CONF_NAMESPACE}/sa/conf-gateway"
+
+conf_ns() {
+  echo "${DEMO_CONF_NAMESPACE:-ate-demo-conf}"
+}
+
+conf_suffix() {
+  local ns
+  ns="$(conf_ns)"
+  if [[ "${ns}" == "ate-demo-conf" ]]; then
+    echo ""
+  elif [[ "${ns}" == ate-demo-conf-* ]]; then
+    echo "${ns#ate-demo-conf-}"
+  else
+    echo "${ns}"
+  fi
+}
+
+conf_worker_pool() {
+  if [[ -n "${DEMO_CONF_WORKER_POOL:-}" ]]; then
+    echo "${DEMO_CONF_WORKER_POOL}"
+    return
+  fi
+  local s
+  s="$(conf_suffix)"
+  [[ -z "${s}" ]] && echo "conf-workers" || echo "conf-workers-${s}"
+}
+
+conf_workload_label() {
+  if [[ -n "${DEMO_CONF_WORKLOAD_LABEL:-}" ]]; then
+    echo "${DEMO_CONF_WORKLOAD_LABEL}"
+    return
+  fi
+  local s
+  s="$(conf_suffix)"
+  [[ -z "${s}" ]] && echo "conference" || echo "conference-${s}"
+}
+
+conf_template_name() {
+  if [[ -n "${DEMO_CONF_TEMPLATE_NAME:-}" ]]; then
+    echo "${DEMO_CONF_TEMPLATE_NAME}"
+    return
+  fi
+  local s
+  s="$(conf_suffix)"
+  [[ -z "${s}" ]] && echo "conf-agent" || echo "conf-agent-${s}"
+}
+
+conf_rbac_prefix() {
+  local ns
+  ns="$(conf_ns)"
+  [[ "${ns}" == "ate-demo-conf" ]] && echo "" || echo "${ns}-"
+}
+
+conf_external_metric() {
+  if [[ -n "${DEMO_CONF_EXTERNAL_METRIC:-}" ]]; then
+    echo "${DEMO_CONF_EXTERNAL_METRIC}"
+    return
+  fi
+  local s
+  s="$(conf_suffix)"
+  [[ -z "${s}" ]] && echo "conf_worker_demand" || echo "conf_worker_demand_${s//-/_}"
+}
+
+conf_dashboard_suffix() {
+  local ns
+  ns="$(conf_ns)"
+  [[ "${ns}" == "ate-demo-conf" ]] && echo "" || echo " / ${ns}"
+}
+
+conf_router_spiffe_id() {
+  echo "spiffe://cluster.local/ns/$(conf_ns)/sa/conf-gateway"
+}
 
 # conf_seconds converts a Go duration made of h/m/s parts to
 # whole seconds, or prints nothing if it cannot parse it.
@@ -146,7 +220,7 @@ conf_resolve_storage_class() {
 # acceptable: a low grace period is only unsafe once --parked-request-budget
 # is raised to 60s, so there is nothing to say about it before that.
 conf_router_flags_ok() {
-  local args_json="$1" grace="${2:-}" spiffe="${3-${DEMO_CONF_ROUTER_SPIFFE_ID}}" missing=() v s
+  local args_json="$1" grace="${2:-}" spiffe="${3-$(conf_router_spiffe_id)}" missing=() v s
   v="$(conf_flag_value "${args_json}" --parked-request-budget)"
   s="$(conf_seconds "${v:-5s}")"
   if [[ -z "${s}" || "${s}" -lt 60 ]]; then
@@ -252,22 +326,34 @@ conf_worker_replicas() {
   fi
 }
 
+# conf_apiservice_owner prints the namespace owning v1beta1.external.metrics.k8s.io
+# when served by a conf-prometheus-adapter instance, or nothing otherwise.
+conf_apiservice_owner() {
+  local json="$1"
+  [[ -z "${json}" ]] && return 0
+  jq -r '(.spec.service // {}) | if .name == "conf-prometheus-adapter" and (.namespace // "") != "" then .namespace else empty end' \
+    <<<"${json}"
+}
+
 # conf_apiservice_ok returns 0 if APISERVICE_JSON (the
 # v1beta1.external.metrics.k8s.io APIService, empty when it does not exist)
-# is absent or already served by this demo's adapter.
+# is absent or already served by a conf-prometheus-adapter instance on the cluster.
 conf_apiservice_ok() {
   local json="$1"
   [[ -z "${json}" ]] && return 0
-  jq -e '(.spec.service // {}) | .namespace == "ate-demo-conf" and .name == "conf-prometheus-adapter"' \
-    <<<"${json}" >/dev/null
+  [[ -n "$(conf_apiservice_owner "${json}")" ]]
 }
 
 # conf_apiservice_deletable returns 0 if teardown may delete the APIService:
 # GET_RC (the exit status of reading it) is 0 and APISERVICE_JSON is absent
-# or ours. A failed read leaves the owner unknown, so it is kept.
+# or owned by DEMO_CONF_NAMESPACE. A failed read or an adapter in another
+# demo namespace leaves the APIService intact.
 conf_apiservice_deletable() {
-  local rc="$1" json="$2"
-  [[ "${rc}" == 0 ]] && conf_apiservice_ok "${json}"
+  local rc="$1" json="$2" owner
+  [[ "${rc}" == 0 ]] || return 1
+  [[ -z "${json}" ]] && return 0
+  owner="$(conf_apiservice_owner "${json}")"
+  [[ "${owner}" == "$(conf_ns)" ]]
 }
 
 # conf_check_apiservice refuses to take over the cluster's external metrics
@@ -319,7 +405,7 @@ conf_ensure_gsa() {
     --condition=None --member "serviceAccount:${gsa}" --role roles/aiplatform.user
   conf_iam_retry "${created}" gcloud iam service-accounts add-iam-policy-binding "${gsa}" \
     --project "${PROJECT_ID}" \
-    --member "serviceAccount:${PROJECT_ID}.svc.id.goog[ate-demo-conf/conf-gateway]" \
+    --member "serviceAccount:${PROJECT_ID}.svc.id.goog[$(conf_ns)/conf-gateway]" \
     --role roles/iam.workloadIdentityUser
   DEMO_CONF_GATEWAY_GSA="${gsa}"
 }
@@ -348,7 +434,14 @@ conf_render() {
     sandbox_workspace="/workspace"
   fi
   local out
-  out="$(sed -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
+  out="$(sed -e "s|\${NAMESPACE}|$(conf_ns)|g" \
+      -e "s|\${WORKER_POOL}|$(conf_worker_pool)|g" \
+      -e "s|\${WORKLOAD_LABEL}|$(conf_workload_label)|g" \
+      -e "s|\${TEMPLATE_NAME}|$(conf_template_name)|g" \
+      -e "s|\${RBAC_PREFIX}|$(conf_rbac_prefix)|g" \
+      -e "s|\${EXTERNAL_METRIC}|$(conf_external_metric)|g" \
+      -e "s|\${DASHBOARD_SUFFIX}|$(conf_dashboard_suffix)|g" \
+      -e "s|\${GATEWAY_IMAGE}|${DEMO_CONF_GATEWAY_IMAGE:-placeholder}|g" \
       -e "s|\${GATEWAY_GSA}|${DEMO_CONF_GATEWAY_GSA:-}|g" \
       -e "s|\${VERTEX_PROJECT}|${DEMO_CONF_VERTEX_PROJECT:-}|g" \
       -e "s|\${VERTEX_LOCATION}|${DEMO_CONF_VERTEX_LOCATION:-global}|g" \
@@ -389,7 +482,52 @@ conf_render() {
     ' <<<"${out}"
     return 0
   fi
+  if [[ "$1" == *gateway-ingress.yaml.tmpl && -n "${DEMO_CONF_STATIC_IP_NAME:-}" ]]; then
+    awk -v ip="${DEMO_CONF_STATIC_IP_NAME}" '
+      /kubernetes\.io\/ingress\.class:/ {
+        print
+        print "    kubernetes.io/ingress.global-static-ip-name: \"" ip "\""
+        next
+      }
+      { print }
+    ' <<<"${out}"
+    return 0
+  fi
   printf '%s\n' "${out}"
+}
+
+conf_render_hpa() {
+  conf_render manifests/autoscaling.yaml.tmpl | sed -n '/^apiVersion: autoscaling\/v2$/,$p'
+}
+
+conf_adapter_series_query() {
+  printf '{__name__="ate_workerpool_workers",ate_workerpool_namespace="%s",ate_workerpool_name="%s"}' \
+    "$(conf_ns)" "$(conf_worker_pool)"
+}
+
+conf_adapter_metrics_query() {
+  local ns pool
+  ns="$(conf_ns)"
+  pool="$(conf_worker_pool)"
+  printf '(max(ate_workerpool_workers{ate_workerpool_namespace="%s",ate_workerpool_name="%s",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="%s",ate_workerpool_name="%s",ate_worker_state="at_capacity"}) or vector(0)) + ceil((sum(atenet_router_parking_active) or vector(0)) / %s)' \
+    "${ns}" "${pool}" "${ns}" "${pool}" "${DEMO_CONF_ACTORS_PER_WORKER}"
+}
+
+conf_update_adapter_configmap() {
+  local adapter_ns="$1" mode="$2" existing updated tmp_cfg
+  existing="$(run_kubectl get configmap conf-prometheus-adapter-config -n "${adapter_ns}" \
+    -o jsonpath='{.data.config\.yaml}' --ignore-not-found)"
+  if [[ "${mode}" == "upsert" ]]; then
+    updated="$(go run ./hack/adapterconfig upsert \
+      "$(conf_external_metric)" "$(conf_adapter_series_query)" "$(conf_adapter_metrics_query)" <<<"${existing}")"
+  else
+    updated="$(go run ./hack/adapterconfig delete "$(conf_external_metric)" <<<"${existing}")"
+  fi
+  tmp_cfg="$(mktemp)"
+  printf '%s' "${updated}" >"${tmp_cfg}"
+  run_kubectl create configmap conf-prometheus-adapter-config -n "${adapter_ns}" \
+    --from-file="config.yaml=${tmp_cfg}" --dry-run=client -o yaml | run_kubectl_fatal apply -f -
+  rm -f "${tmp_cfg}"
 }
 
 # conf_discover_google_auth populates GOOGLE_CLIENT_ID and FIREBASE_API_KEY from
@@ -399,7 +537,7 @@ conf_discover_google_auth() {
   [[ -n "${ALLOWED_GOOGLE_DOMAINS:-}" && -n "${PROJECT_ID:-}" ]] || return 0
   command -v curl >/dev/null 2>&1 || return 0
   local tok idp_json key_name cfg_json domains_json
-  tok="$(gcloud auth print-access-token 2>/dev/null || true)"
+  tok="$(gcloud auth application-default print-access-token 2>/dev/null || gcloud auth print-access-token 2>/dev/null || true)"
   [[ -n "${tok}" ]] || return 0
 
   if [[ -z "${GOOGLE_CLIENT_ID:-}" ]]; then
@@ -434,7 +572,9 @@ conf_discover_google_auth() {
 }
 
 conf_ensure_secret() {
-  if run_kubectl get secret conf-gateway -n ate-demo-conf >/dev/null 2>&1; then
+  local ns
+  ns="$(conf_ns)"
+  if run_kubectl get secret conf-gateway -n "${ns}" >/dev/null 2>&1; then
     return 0
   fi
   # Generated into locals first: a command substitution embedded directly in
@@ -450,7 +590,7 @@ conf_ensure_secret() {
   # --from-env-file reads the values from a file (here, a process
   # substitution backed by the printf builtin), so neither value ever
   # appears in this or any other process's argv.
-  run_kubectl_fatal create secret generic conf-gateway -n ate-demo-conf \
+  run_kubectl_fatal create secret generic conf-gateway -n "${ns}" \
     --from-env-file=<(printf 'HMAC_SECRET=%s\nPRESENTER_TOKEN=%s\n' "${hmac}" "${token}")
 }
 
@@ -469,23 +609,25 @@ conf_template_current() {
 }
 
 conf_check_template() {
-  local env err_file err rc=0
+  local ns tmpl env err_file err rc=0
+  ns="$(conf_ns)"
+  tmpl="$(conf_template_name)"
   err_file="$(mktemp)"
   # Keep stderr separate from stdout: kubectl-ate v1.0.0-rc.2+ prints a
   # "--token-file" warning on stderr even when "-o json" succeeds.
-  env="$(run_kubectl_ate get actor-template conf-agent -a ate-demo-conf -o json 2>"${err_file}")" || rc=$?
+  env="$(run_kubectl_ate get actor-template "${tmpl}" -a "${ns}" -o json 2>"${err_file}")" || rc=$?
   err="$(<"${err_file}")"
   rm -f "${err_file}"
   if ((rc != 0)); then
     if grep -qi "not found" <<<"${err} ${env}"; then
       return 0
     fi
-    echo "error: failed to check actor template conf-agent: ${err:-${env}}" >&2
+    echo "error: failed to check actor template ${ns}/${tmpl}: ${err:-${env}}" >&2
     exit 1
   fi
   if ! conf_template_current "${env}"; then
-    echo "error: actor template conf-agent is out of date (want CONF_TEMPLATE_REVISION=${DEMO_CONF_TEMPLATE_REVISION}, storageClassName=${DEMO_CONF_STORAGE_CLASS:-}) and templates are immutable." >&2
-    echo "Run: hack/deploy.sh down, then hack/deploy.sh up." >&2
+    echo "error: actor template ${ns}/${tmpl} is out of date (want CONF_TEMPLATE_REVISION=${DEMO_CONF_TEMPLATE_REVISION}, storageClassName=${DEMO_CONF_STORAGE_CLASS:-}) and templates are immutable." >&2
+    echo "Run: DEMO_CONF_NAMESPACE=${ns} hack/deploy.sh down, then up." >&2
     exit 1
   fi
 }
@@ -589,7 +731,8 @@ conf_apply_dashboard() {
     log_step "Skipping the dashboard: not a GKE context; set DEMO_CONF_CLUSTER to the cluster name."
     return 0
   fi
-  local display="Conference demo (${DEMO_CONF_CLUSTER})" name etag config
+  local display name etag config
+  display="Conference demo (${DEMO_CONF_CLUSTER}$(conf_dashboard_suffix))"
   log_step "Applying the \"${display}\" dashboard..."
   config="$(mktemp)"
   if ! name="$(gcloud monitoring dashboards list --project "${PROJECT_ID}" \
@@ -659,27 +802,46 @@ conf_deploy() {
     conf_discover_google_auth
   fi
 
-  local current_workers
-  if ! current_workers="$(run_kubectl get workerpools.ate.dev conf-workers -n ate-demo-conf \
+  local ns pool tmpl current_workers apiservice_json apiservice_owner existing_adapter_cfg
+  ns="$(conf_ns)"
+  pool="$(conf_worker_pool)"
+  tmpl="$(conf_template_name)"
+  if ! current_workers="$(run_kubectl get workerpools.ate.dev "${pool}" -n "${ns}" \
       -o jsonpath='{.spec.replicas}' --ignore-not-found)"; then
-    echo "error: cannot read WorkerPool conf-workers" >&2
+    echo "error: cannot read WorkerPool ${ns}/${pool}" >&2
     exit 1
   fi
   DEMO_CONF_WORKER_REPLICAS="$(conf_worker_replicas "${current_workers}" \
     "${DEMO_CONF_MIN_WORKERS}" "${DEMO_CONF_MAX_WORKERS}")"
   conf_render manifests/workerpool.yaml.tmpl | ko resolve -f - | run_kubectl_fatal apply -f -
-  log_step "Waiting for the conf-workers worker pool rollout..."
-  wait_for_pool_rollout_fatal conf-workers ate-demo-conf
+  log_step "Waiting for the ${ns}/${pool} worker pool rollout..."
+  wait_for_pool_rollout_fatal "${pool}" "${ns}"
 
-  log_step "Installing Prometheus, prometheus-adapter and the conf-workers HPA..."
-  conf_render manifests/autoscaling.yaml.tmpl | run_kubectl_fatal apply -f -
-  run_kubectl_fatal rollout status deployment/conf-prometheus -n ate-demo-conf --timeout=180s
-  run_kubectl_fatal rollout status deployment/conf-prometheus-adapter -n ate-demo-conf --timeout=180s
-  # Register the aggregated API only once the adapter serves it; an
-  # unavailable APIService breaks discovery for the whole cluster.
-  conf_render manifests/autoscaling-apiservice.yaml.tmpl | run_kubectl_fatal apply -f -
-  ensure_atespace ate-demo-conf
-  create_actor_template conf_render manifests/actortemplate.yaml.tmpl ate-demo-conf conf-agent 300
+  apiservice_json="$(run_kubectl get apiservice v1beta1.external.metrics.k8s.io -o json --ignore-not-found)"
+  apiservice_owner="$(conf_apiservice_owner "${apiservice_json}")"
+  if [[ -z "${apiservice_owner}" || "${apiservice_owner}" == "${ns}" ]]; then
+    log_step "Installing Prometheus, prometheus-adapter and the ${pool} HPA in ${ns}..."
+    existing_adapter_cfg="$(run_kubectl get configmap conf-prometheus-adapter-config -n "${ns}" \
+      -o jsonpath='{.data.config\.yaml}' --ignore-not-found)"
+    conf_render manifests/autoscaling.yaml.tmpl | run_kubectl_fatal apply -f -
+    if [[ -n "${existing_adapter_cfg}" ]]; then
+      conf_update_adapter_configmap "${ns}" upsert
+      run_kubectl_fatal rollout restart deployment/conf-prometheus-adapter -n "${ns}"
+    fi
+    run_kubectl_fatal rollout status deployment/conf-prometheus -n "${ns}" --timeout=180s
+    run_kubectl_fatal rollout status deployment/conf-prometheus-adapter -n "${ns}" --timeout=180s
+    # Register the aggregated API only once the adapter serves it; an
+    # unavailable APIService breaks discovery for the whole cluster.
+    conf_render manifests/autoscaling-apiservice.yaml.tmpl | run_kubectl_fatal apply -f -
+  else
+    log_step "Registering $(conf_external_metric) in shared ${apiservice_owner}/conf-prometheus-adapter and installing the ${pool} HPA..."
+    conf_update_adapter_configmap "${apiservice_owner}" upsert
+    run_kubectl_fatal rollout restart deployment/conf-prometheus-adapter -n "${apiservice_owner}"
+    run_kubectl_fatal rollout status deployment/conf-prometheus-adapter -n "${apiservice_owner}" --timeout=180s
+    conf_render_hpa | run_kubectl_fatal apply -f -
+  fi
+  ensure_atespace "${ns}"
+  create_actor_template conf_render manifests/actortemplate.yaml.tmpl "${ns}" "${tmpl}" 300
 
   log_step "Building conf-gateway image..."
   DEMO_CONF_GATEWAY_IMAGE="$(conf_build_gateway)"
@@ -688,15 +850,15 @@ conf_deploy() {
   if [[ -n "${DEMO_DOMAIN:-}" ]]; then
     conf_render manifests/gateway-ingress.yaml.tmpl | run_kubectl_fatal apply -f -
   fi
-  run_kubectl_fatal rollout status deployment/conf-gateway -n ate-demo-conf --timeout=180s
+  run_kubectl_fatal rollout status deployment/conf-gateway -n "${ns}" --timeout=180s
 
-  log_step "Creating ${DEMO_CONF_ACTORS} attendee actors in ate-demo-conf..."
+  log_step "Creating ${DEMO_CONF_ACTORS} attendee actors in ${ns}..."
   local i actor err_out
   for i in $(seq 1 "${DEMO_CONF_ACTORS}"); do
     actor="$(printf "attendee-%02d" "${i}")"
-    if ! err_out="$(run_kubectl_ate create actor "${actor}" -a ate-demo-conf --template conf-agent 2>&1)"; then
+    if ! err_out="$(run_kubectl_ate create actor "${actor}" -a "${ns}" --template "${tmpl}" 2>&1)"; then
       if [[ "${err_out}" != *"AlreadyExists"* && "${err_out}" != *"already exists"* ]] \
-          && ! run_kubectl_ate get actor "${actor}" -a ate-demo-conf >/dev/null 2>&1; then
+          && ! run_kubectl_ate get actor "${actor}" -a "${ns}" >/dev/null 2>&1; then
         echo "error: failed to create actor ${actor}: ${err_out}" >&2
         exit 1
       fi
@@ -707,33 +869,43 @@ conf_deploy() {
     conf_apply_dashboard
   fi
 
-  log_step "Conference demo deployed."
-  echo "Presenter: kubectl port-forward -n ate-demo-conf svc/conf-gateway 8090:80"
-  echo "  then open http://localhost:8090/stage?key=\$(kubectl get secret conf-gateway -n ate-demo-conf -o jsonpath='{.data.PRESENTER_TOKEN}' | base64 -d)"
+  log_step "Conference demo deployed in ${ns}."
+  echo "Presenter: kubectl port-forward -n ${ns} svc/conf-gateway 8090:80"
+  echo "  then open http://localhost:8090/stage?key=\$(kubectl get secret conf-gateway -n ${ns} -o jsonpath='{.data.PRESENTER_TOKEN}' | base64 -d)"
   echo "Attendees: http://<conf-gateway EXTERNAL-IP>/chat (plain HTTP unless DEMO_DOMAIN is set)"
 }
 
 conf_delete() {
-  log_step "Deleting the conference demo"
+  local ns tmpl apiservice apiservice_rc=0 apiservice_owner
+  ns="$(conf_ns)"
+  tmpl="$(conf_template_name)"
+  log_step "Deleting the conference demo in ${ns}"
   log_target_context
   run_kubectl delete -f <(conf_render manifests/gateway.yaml.tmpl) --ignore-not-found
   if [[ -n "${DEMO_DOMAIN:-}" ]]; then
     run_kubectl delete -f <(conf_render manifests/gateway-ingress.yaml.tmpl) --ignore-not-found
   fi
-  run_kubectl delete secret conf-gateway -n ate-demo-conf --ignore-not-found
-  delete_actor_template ate-demo-conf conf-agent
-  run_kubectl_ate delete atespace ate-demo-conf 2>/dev/null \
-    || log_step "atespace ate-demo-conf not deleted (may not exist or is not empty)"
-  local apiservice apiservice_rc=0
+  run_kubectl delete secret conf-gateway -n "${ns}" --ignore-not-found
+  delete_actor_template "${ns}" "${tmpl}"
+  run_kubectl_ate delete atespace "${ns}" 2>/dev/null \
+    || log_step "atespace ${ns} not deleted (may not exist or is not empty)"
   apiservice="$(run_kubectl get apiservice v1beta1.external.metrics.k8s.io -o json --ignore-not-found)" || apiservice_rc=$?
+  apiservice_owner="$(conf_apiservice_owner "${apiservice}")"
   if conf_apiservice_deletable "${apiservice_rc}" "${apiservice}"; then
     run_kubectl delete -f <(conf_render manifests/autoscaling-apiservice.yaml.tmpl) --ignore-not-found
+    run_kubectl delete -f <(conf_render manifests/autoscaling.yaml.tmpl) --ignore-not-found
   elif [[ "${apiservice_rc}" != 0 ]]; then
     log_step "cannot read v1beta1.external.metrics.k8s.io; leaving it."
+    run_kubectl delete -f <(conf_render manifests/autoscaling.yaml.tmpl) --ignore-not-found
+  elif [[ -n "${apiservice_owner}" && "${apiservice_owner}" != "${ns}" ]]; then
+    log_step "v1beta1.external.metrics.k8s.io belongs to ${apiservice_owner}; removing $(conf_external_metric) rule and keeping shared adapter."
+    conf_update_adapter_configmap "${apiservice_owner}" delete
+    run_kubectl rollout restart deployment/conf-prometheus-adapter -n "${apiservice_owner}" || true
+    run_kubectl delete -f <(conf_render_hpa) --ignore-not-found
   else
     log_step "v1beta1.external.metrics.k8s.io belongs to another adapter; leaving it."
+    run_kubectl delete -f <(conf_render manifests/autoscaling.yaml.tmpl) --ignore-not-found
   fi
-  run_kubectl delete -f <(conf_render manifests/autoscaling.yaml.tmpl) --ignore-not-found
   conf_render manifests/workerpool.yaml.tmpl | run_kubectl delete --ignore-not-found -f -
   log_step "atenet-router flags are left as they are."
   if [[ -n "${PROJECT_ID:-}" ]]; then
@@ -766,7 +938,9 @@ conf_main() {
       echo "  --patch-router  patch atenet-router's timeouts and grace period instead of failing"
       echo "  Required env: KO_DOCKER_REPO"
       echo "  Optional env: PROJECT_ID (enables Gemini on Agent Platform; unset runs mock replies), VERTEX_LOCATION,"
-      echo "                DEMO_DOMAIN, ALLOWED_GOOGLE_DOMAINS, GOOGLE_CLIENT_ID, FIREBASE_API_KEY,"
+      echo "                DEMO_DOMAIN, DEMO_CONF_STATIC_IP_NAME, ALLOWED_GOOGLE_DOMAINS, GOOGLE_CLIENT_ID, FIREBASE_API_KEY,"
+      echo "                DEMO_CONF_NAMESPACE (default ate-demo-conf; isolates namespace, atespace, worker pool and template),"
+      echo "                DEMO_CONF_WORKER_POOL, DEMO_CONF_WORKLOAD_LABEL, DEMO_CONF_TEMPLATE_NAME, DEMO_CONF_EXTERNAL_METRIC,"
       echo "                CHAT_RATE_LIMIT_RPM (default 10), SESSION_RATE_LIMIT_RPM (default 10),"
       echo "                DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO, BUCKET_NAME, SNAPSHOT_LOCATION,"
       echo "                DEMO_CONF_MIN_WORKERS (default 2), DEMO_CONF_MAX_WORKERS (default 5),"

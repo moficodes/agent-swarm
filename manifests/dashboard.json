@@ -1,5 +1,5 @@
 {
-  "displayName": "Conference demo (${CLUSTER})",
+  "displayName": "Conference demo (${CLUSTER}${DASHBOARD_SUFFIX})",
   "mosaicLayout": {
     "columns": 12,
     "tiles": [
@@ -9,7 +9,7 @@
         "width": 6,
         "height": 4,
         "widget": {
-          "title": "Workers by state (conf-workers)",
+          "title": "Workers by state (${WORKER_POOL})",
           "xyChart": {
             "dataSets": [
               {
@@ -17,7 +17,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "${metric.labels.ate.worker.state}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "max by (\"ate.worker.state\") ({\"ate.workerpool.workers\", cluster=\"${CLUSTER}\", \"ate.workerpool.name\"=\"conf-workers\"})"
+                  "prometheusQuery": "max by (\"ate.worker.state\") ({\"ate.workerpool.workers\", cluster=\"${CLUSTER}\", \"ate.workerpool.name\"=\"${WORKER_POOL}\"})"
                 }
               }
             ],
@@ -42,7 +42,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "${metric.labels.ate.actor.operation.name}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (\"ate.actor.operation.name\") (rate({\"ate.actor.lifecycle.operation.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[2m]))"
+                  "prometheusQuery": "sum by (\"ate.actor.operation.name\") (rate({\"ate.actor.lifecycle.operation.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\"}[2m]))"
                 }
               }
             ],
@@ -67,7 +67,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "${metric.labels.ate.actor.operation.name}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.actor.operation.name\") (rate({\"ate.actor.lifecycle.operation.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[5m])))"
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.actor.operation.name\") (rate({\"ate.actor.lifecycle.operation.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\"}[5m])))"
                 }
               }
             ],
@@ -92,7 +92,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "${metric.labels.ate.actor.operation.name} ${metric.labels.error.type}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (\"ate.actor.operation.name\", \"error.type\") (increase({\"ate.actor.lifecycle.operation.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\", \"error.type\"!=\"\"}[5m]))"
+                  "prometheusQuery": "sum by (\"ate.actor.operation.name\", \"error.type\") (increase({\"ate.actor.lifecycle.operation.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\", \"error.type\"!=\"\"}[5m]))"
                 }
               }
             ],
@@ -117,7 +117,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "${metric.labels.ate.scheduler.outcome}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (\"ate.scheduler.outcome\") (rate({\"ate.scheduler.assignment.duration_count\", cluster=\"${CLUSTER}\", \"ate.workerpool.name\"=\"conf-workers\"}[2m]))"
+                  "prometheusQuery": "sum by (\"ate.scheduler.outcome\") (rate({\"ate.scheduler.assignment.duration_count\", cluster=\"${CLUSTER}\", \"ate.workerpool.name\"=\"${WORKER_POOL}\"}[2m]))"
                 }
               }
             ],
@@ -142,7 +142,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "resume=${metric.labels.ate.router.resume} ${metric.labels.ate.router.outcome}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (\"ate.router.resume\", \"ate.router.outcome\") (rate({\"atenet.router.route.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\", top_level_controller_name=\"atenet-router\"}[2m]))"
+                  "prometheusQuery": "sum by (\"ate.router.resume\", \"ate.router.outcome\") (rate({\"atenet.router.route.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\", top_level_controller_name=\"atenet-router\"}[2m]))"
                 }
               }
             ],
@@ -167,7 +167,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "resume=${metric.labels.ate.router.resume}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.router.resume\") (rate({\"atenet.router.route.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\", top_level_controller_name=\"atenet-router\"}[5m])))"
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.router.resume\") (rate({\"atenet.router.route.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\", top_level_controller_name=\"atenet-router\"}[5m])))"
                 }
               }
             ],
@@ -225,7 +225,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "${metric.labels.ate.snapshot.phase}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.snapshot.phase\") (rate({\"ate.actor.restore.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[5m])))"
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, \"ate.snapshot.phase\") (rate({\"ate.actor.restore.duration_bucket\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\"}[5m])))"
                 }
               }
             ],
@@ -250,7 +250,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "${metric.labels.ate.snapshot.kind}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (\"ate.snapshot.kind\") (rate({\"ate.actor.restore.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\", \"ate.snapshot.phase\"=\"total\"}[5m]))"
+                  "prometheusQuery": "sum by (\"ate.snapshot.kind\") (rate({\"ate.actor.restore.duration_count\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\", \"ate.snapshot.phase\"=\"total\"}[5m]))"
                 }
               }
             ],
@@ -267,7 +267,7 @@
         "width": 6,
         "height": 4,
         "widget": {
-          "title": "Actor CPU (conf-agent)",
+          "title": "Actor CPU (${TEMPLATE_NAME})",
           "xyChart": {
             "dataSets": [
               {
@@ -275,7 +275,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "cpu",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum(rate({\"ate.actor.stats.cpu.time\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[5m]))"
+                  "prometheusQuery": "sum(rate({\"ate.actor.stats.cpu.time\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\"}[5m]))"
                 }
               }
             ],
@@ -300,7 +300,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "crashes",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum(increase({\"ate.actor.crashes\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"conf-agent\"}[15m])) or vector(0)"
+                  "prometheusQuery": "sum(increase({\"ate.actor.crashes\", cluster=\"${CLUSTER}\", \"ate.template.name\"=\"${TEMPLATE_NAME}\"}[15m])) or vector(0)"
                 }
               }
             ],
@@ -317,9 +317,9 @@
         "width": 12,
         "height": 6,
         "widget": {
-          "title": "Actor state changes (ate-demo-conf)",
+          "title": "Actor state changes (${NAMESPACE})",
           "logsPanel": {
-            "filter": "resource.type=\"k8s_container\"\nresource.labels.cluster_name=\"${CLUSTER}\"\njsonPayload.msg=\"Actor state changed\"\njsonPayload.\"ate.atespace\"=\"ate-demo-conf\""
+            "filter": "resource.type=\"k8s_container\"\nresource.labels.cluster_name=\"${CLUSTER}\"\njsonPayload.msg=\"Actor state changed\"\njsonPayload.\"ate.atespace\"=\"${NAMESPACE}\""
           }
         }
       }

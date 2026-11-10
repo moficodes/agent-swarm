@@ -15,7 +15,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: ate-demo-conf
+  name: ${NAMESPACE}
   labels:
     ate.dev/api-access: "true"
 
@@ -24,10 +24,10 @@ metadata:
 apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
-  name: conf-workers
-  namespace: ate-demo-conf
+  name: ${WORKER_POOL}
+  namespace: ${NAMESPACE}
   labels:
-    workload: conference
+    workload: ${WORKLOAD_LABEL}
 spec:
   # hack/deploy.sh keeps the size the conf-workers HPA chose on a re-deploy
   # (manifests/autoscaling.yaml.tmpl).

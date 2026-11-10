@@ -19,7 +19,7 @@ apiVersion: networking.gke.io/v1
 kind: ManagedCertificate
 metadata:
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 spec:
   domains:
   - ${DEMO_DOMAIN}
@@ -30,7 +30,7 @@ apiVersion: cloud.google.com/v1
 kind: BackendConfig
 metadata:
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
 spec:
   timeoutSec: 3600
 ---
@@ -38,7 +38,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: conf-gateway
-  namespace: ate-demo-conf
+  namespace: ${NAMESPACE}
   annotations:
     networking.gke.io/managed-certificates: conf-gateway
     kubernetes.io/ingress.class: "gce"

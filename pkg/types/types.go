@@ -205,6 +205,7 @@ type ExecutionResult struct {
 
 // StageTelemetry is the stage view of the router, workers and actors.
 type StageTelemetry struct {
+	Atespace         string               `json:"atespace,omitempty"`
 	ParkedRequests   int                  `json:"parked_requests"`
 	ParkingAvailable bool                 `json:"parking_available"`
 	Workers          []WorkerStatus       `json:"workers"`

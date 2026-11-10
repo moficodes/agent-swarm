@@ -348,3 +348,23 @@ func TestStatic_ChatDisplaysModelName(t *testing.T) {
 		}
 	}
 }
+
+// TestStatic_ChatMobileResponsiveLayout checks that /chat styles .header-badges
+// and .attendee-badge against clipping on narrow phone screens, uses a 16px
+// input font to prevent iOS Safari auto-zoom, and collapses the starter chips
+// into a single-row horizontal scroll strip on mobile viewports.
+func TestStatic_ChatMobileResponsiveLayout(t *testing.T) {
+	css := readStatic(t, "chat.css")
+	for _, want := range []string{
+		".header-badges",
+		"flex-shrink: 0;",
+		"font-size: 16px;",
+		"@media (max-width: 560px)",
+		"grid-template-columns: auto minmax(0, 1fr);",
+		"overflow-x: auto;",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("chat.css lacks mobile layout rule %q", want)
+		}
+	}
+}

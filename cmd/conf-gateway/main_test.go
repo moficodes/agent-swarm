@@ -30,6 +30,7 @@ import (
 
 var configEnvVars = []string{
 	"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE",
+	"WORKER_POOL_NAMESPACE", "WORKER_POOL_NAME",
 	"ROUTER_CA_FILE", "ROUTER_CRED_BUNDLE", "ATEAPI_ENDPOINT", "KUBECTL_ATE",
 	"STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE",
 	"VERTEX_PROJECT", "VERTEX_LOCATION", "MODEL_ALLOWLIST", "ROUTER_STATUS_DISCOVERY",
@@ -81,6 +82,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.Atespace != "ate-demo-conf" {
 		t.Errorf("expected default Atespace 'ate-demo-conf', got %q", cfg.Atespace)
+	}
+	if cfg.WorkerPoolNamespace != "ate-demo-conf" || cfg.WorkerPoolName != "conf-workers" {
+		t.Errorf("expected default worker pool ate-demo-conf/conf-workers, got %s/%s", cfg.WorkerPoolNamespace, cfg.WorkerPoolName)
 	}
 	if cfg.RouterStatusDiscovery != "static" {
 		t.Errorf("expected default RouterStatusDiscovery 'static', got %q", cfg.RouterStatusDiscovery)
@@ -163,6 +167,14 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	}
 	if cfg.Atespace != "custom-ns" {
 		t.Errorf("expected Atespace 'custom-ns', got %q", cfg.Atespace)
+	}
+	if cfg.WorkerPoolNamespace != "custom-ns" {
+		t.Errorf("expected WorkerPoolNamespace to default to Atespace 'custom-ns', got %q", cfg.WorkerPoolNamespace)
+	}
+	t.Setenv("WORKER_POOL_NAMESPACE", "pool-ns")
+	t.Setenv("WORKER_POOL_NAME", "conf-workers-live")
+	if override := LoadConfig(); override.WorkerPoolNamespace != "pool-ns" || override.WorkerPoolName != "conf-workers-live" {
+		t.Errorf("worker pool override = %s/%s, want pool-ns/conf-workers-live", override.WorkerPoolNamespace, override.WorkerPoolName)
 	}
 	if cfg.ATEAPIEndpoint != "ateapi.example:443" || cfg.KubectlATE != "/bin/kubectl-ate" {
 		t.Errorf("kubectl-ate config = %q %q", cfg.ATEAPIEndpoint, cfg.KubectlATE)
@@ -295,8 +307,8 @@ func TestResolveSecret(t *testing.T) {
 func TestNewWorkerScaleReader_OutsideCluster(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "")
-	if _, err := newWorkerScaleReader(); err == nil {
-		t.Fatal("newWorkerScaleReader() outside a cluster returned no error")
+	if _, err := newWorkerScaleReader(Config{}); err == nil {
+		t.Fatal("newWorkerScaleReader(Config{}) outside a cluster returned no error")
 	}
 }
 

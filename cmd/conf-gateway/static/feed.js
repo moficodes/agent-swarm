@@ -30,6 +30,7 @@
   // State
   let currentFilter = 'all';
   let searchQuery = '';
+  let currentAtespace = 'ate-demo-conf';
   const MAX_CARDS = 100;
   let eventSource = null;
   let parkingPollTimer = null;
@@ -246,7 +247,7 @@
           <span>Action ID: <code>${escapeHtml(entry.id)}</code></span>
         </div>
         <div class="footer-right">
-          <span>Target: <code>ate-demo-conf/${escapeHtml(attendeeId)}</code></span>
+          <span>Target: <code>${escapeHtml(currentAtespace)}/${escapeHtml(attendeeId)}</code></span>
         </div>
       </div>
     `;
@@ -448,6 +449,9 @@
       if (!resp.ok) return;
       const telem = await resp.json();
       const parked = telem.parked_requests || 0;
+      if (telem.atespace) {
+        currentAtespace = telem.atespace;
+      }
       if (el.parkingCount) {
         el.parkingCount.textContent = parked;
       }
