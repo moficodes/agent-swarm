@@ -20,10 +20,60 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
+
+const attendeeLeaseTTL = 30 * time.Minute
+
+// LeaseAttendee marks an attendee slot as leased by a live QR-code user.
+func (g *Gateway) LeaseAttendee(attendeeID string) {
+	if attendeeID == "" {
+		return
+	}
+	g.mu.Lock()
+	g.leasedUntil[attendeeID] = time.Now().Add(attendeeLeaseTTL)
+	g.mu.Unlock()
+}
+
+// IsLeased reports whether an attendee slot currently holds an active human lease.
+func (g *Gateway) IsLeased(attendeeID string) bool {
+	g.mu.RLock()
+	until, ok := g.leasedUntil[attendeeID]
+	g.mu.RUnlock()
+	return ok && time.Now().Before(until)
+}
+
+// IsReservedForHuman reports whether the background simulation should skip this slot.
+func (g *Gateway) IsReservedForHuman(attendeeID string, slotIndex int) bool {
+	if g.maxActors > actorstate.CompactFleetThreshold && slotIndex%16 == 0 {
+		return true
+	}
+	return g.IsLeased(attendeeID)
+}
+
+func (g *Gateway) selectEvery16thAttendeeSlot(maxActors int) string {
+	numBuckets := maxActors / 16
+	if numBuckets < 1 {
+		return g.selectAttendeeSlot(0, maxActors)
+	}
+	var firstCandidate string
+	for attempt := 0; attempt < numBuckets; attempt++ {
+		seq := atomic.AddUint64(&g.attendeeSeq, 1)
+		slotIndex := (int((seq-1)%uint64(numBuckets)) + 1) * 16
+		candidate := fmt.Sprintf("attendee-%02d", slotIndex)
+		if attempt == 0 {
+			firstCandidate = candidate
+		}
+		if !g.isSlotActive(candidate) && !g.IsLeased(candidate) {
+			return candidate
+		}
+	}
+	return firstCandidate
+}
 
 // Claims represents the decoded JWT payload.
 type Claims = auth.Claims
@@ -49,6 +99,13 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 	var attendeeID string
 	if requestedID != "" && presenter && auth.ValidAttendeeID(requestedID, maxActors) {
 		attendeeID = requestedID
+		if maxActors > actorstate.CompactFleetThreshold {
+			g.LeaseAttendee(attendeeID)
+		}
+	} else if maxActors > actorstate.CompactFleetThreshold {
+		attendeeID = g.selectEvery16thAttendeeSlot(maxActors)
+		g.LeaseAttendee(attendeeID)
+		g.forgetAttendee(attendeeID)
 	} else {
 
 		startOffset := 0
@@ -119,12 +176,17 @@ func (g *Gateway) isSlotActive(attendee string) bool {
 // forgetAttendee drops everything kept for the attendee's previous visitor,
 // in the gateway and in the actor's memory, before the slot is handed out.
 func (g *Gateway) forgetAttendee(attendee string) {
+	v, hasView := g.board.View(attendee)
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	_, hadHistory := g.chatHistories[attendee]
 	delete(g.chatHistories, attendee)
 	delete(g.lastResults, attendee)
 	delete(g.currentActionID, attendee)
 	g.proxy.ClearPending(attendee)
+	if g.maxActors > actorstate.CompactFleetThreshold && !hadHistory && (!hasView || v.NeverStarted || strings.Contains(v.SnapshotURI, "/tags/")) {
+		return
+	}
 	g.requestHistoryClearLocked(attendee)
 }
 

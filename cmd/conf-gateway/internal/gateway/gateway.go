@@ -153,6 +153,17 @@ func WithMockLLM(on bool) Option {
 	return func(g *Gateway) { g.mockLLM = on }
 }
 
+// WithMockTurnDelays sets optional simulated thinking and execution durations
+// held while an actor is running on a worker seat during mock turns.
+func WithMockTurnDelays(thinkMin, thinkMax, execMin, execMax time.Duration) Option {
+	return func(g *Gateway) {
+		g.mockThinkMin = thinkMin
+		g.mockThinkMax = thinkMax
+		g.mockExecMin = execMin
+		g.mockExecMax = execMax
+	}
+}
+
 // WithStatusInterval sets the polling interval for the statusz endpoint.
 func WithStatusInterval(d time.Duration) Option {
 	return func(g *Gateway) {
@@ -195,6 +206,15 @@ func WithSimulationController(sc SimulationController) Option {
 		if sc != nil {
 			g.simController = sc
 		}
+	}
+}
+
+// WithDataGenerator configures the gateway's default SimulationRunner to use
+// an external data-generator orchestrator and turn callback URL.
+func WithDataGenerator(orchestratorURL, callbackTurnURL string) Option {
+	return func(g *Gateway) {
+		g.dataGeneratorURL = orchestratorURL
+		g.simulationTurnURL = callbackTurnURL
 	}
 }
 
@@ -280,6 +300,10 @@ type Gateway struct {
 	usage                UsageSource
 	model                actorproxy.ModelCaller
 	mockLLM              bool
+	mockThinkMin         time.Duration
+	mockThinkMax         time.Duration
+	mockExecMin          time.Duration
+	mockExecMax          time.Duration
 	statePollMs          atomic.Int64
 
 	mux         *http.ServeMux
@@ -289,13 +313,19 @@ type Gateway struct {
 	// inside actorproxy (approvals) and feed (Log, Broker) as leaves. Those
 	// packages never call back into the gateway while holding their own lock.
 	mu              sync.RWMutex
-	chatHistories   map[string][]types.ChatMessage
-	lastResults     map[string]*types.ExecutionResult
-	currentActionID map[string]string
-	recentEvents    []string
-	parking         atomic.Pointer[routerstatus.Snapshot]
-	workerPods      atomic.Pointer[types.WorkerPods]
-	simController   SimulationController
+	chatHistories     map[string][]types.ChatMessage
+	lastResults       map[string]*types.ExecutionResult
+	currentActionID   map[string]string
+	sampledActions    map[string]bool
+	lastActionSample  time.Time
+	recentEvents      []string
+	parking           atomic.Pointer[routerstatus.Snapshot]
+	workerPods        atomic.Pointer[types.WorkerPods]
+	simController     SimulationController
+	dataGeneratorURL  string
+	simulationTurnURL string
+	// suspendSem bounds concurrent SuspendActor RPCs to ate-api-server.
+	suspendSem chan struct{}
 	// suspendTimers holds each attendee's pending auto-suspend when
 	// suspendAfter is positive. Each pending timer holds one wg count.
 	suspendTimers map[string]*time.Timer
@@ -317,6 +347,8 @@ type Gateway struct {
 	beforeSuspendCheck func(attendee string)
 	// historyClears tracks the actor history clears owed per attendee.
 	historyClears map[string]*historyClear
+	// leasedUntil tracks live human QR-code session leases per attendee ID.
+	leasedUntil map[string]time.Time
 	// waitingForHistoryClear, when set by tests, runs when a caller starts
 	// waiting for another's clear to finish.
 	waitingForHistoryClear func(attendee string)
@@ -348,7 +380,9 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		chatHistories:        make(map[string][]types.ChatMessage),
 		lastResults:          make(map[string]*types.ExecutionResult),
 		currentActionID:      make(map[string]string),
+		sampledActions:       make(map[string]bool),
 		recentEvents:         make([]string, 0),
+		suspendSem:           make(chan struct{}, 256),
 		suspendTimers:        make(map[string]*time.Timer),
 		suspendsInFlight:     make(map[string]int),
 		suspendingSince:      make(map[string]time.Time),
@@ -356,6 +390,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		turnsInFlight:        make(map[string]int),
 		turnSeq:              make(map[string]uint64),
 		historyClears:        make(map[string]*historyClear),
+		leasedUntil:          make(map[string]time.Time),
 		maxActors:            50,
 		seatsPerWorker:       1,
 	}
@@ -375,7 +410,11 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw.sessionLimiter = newRateLimiter(gw.sessionRateLimitRPM, nil)
 
 	if gw.simController == nil {
-		gw.simController = NewSimulationRunner(gw)
+		var simOpts []SimulationOption
+		if gw.dataGeneratorURL != "" {
+			simOpts = append(simOpts, WithDataGeneratorExecutor(gw.dataGeneratorURL, gw.simulationTurnURL, gw.presenterKey))
+		}
+		gw.simController = NewSimulationRunner(gw, simOpts...)
 	}
 
 	if gw.staticFS == nil {
@@ -440,6 +479,14 @@ func (g *Gateway) StopSimulation() {
 	g.mu.Unlock()
 	if sc != nil {
 		sc.Stop()
+	}
+}
+
+// ClearSimulatedActivity resets gateway-side activity (Thinking, AwaitingApproval,
+// Executing) to ActivityIdle on every actor that is not leased by a live attendee.
+func (g *Gateway) ClearSimulatedActivity() {
+	if g.board != nil {
+		g.board.ClearUnleasedActivity(g.IsLeased)
 	}
 }
 
@@ -549,6 +596,7 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/stage/telemetry", g.requirePresenter(g.handleTelemetry))
 	g.mux.HandleFunc("/api/reset", g.requirePresenter(g.handleReset))
 	g.mux.HandleFunc("/api/simulation", g.requirePresenter(web.JSONPOST(g.handleSimulation)))
+	g.mux.HandleFunc("/api/simulation/turn", g.requirePresenter(web.JSONPOST(g.handleSimulationTurn)))
 	g.mux.HandleFunc("/api/auth/google", web.JSONPOST(g.handleGoogleAuth))
 	g.mux.HandleFunc("/api/auth/logout", g.handleLogout)
 	g.mux.HandleFunc("/api/chat", web.JSONPOST(g.proxyToActor))

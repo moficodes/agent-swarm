@@ -126,6 +126,18 @@ type Config struct {
 	// SessionRateLimitRPM is the per-IP rate limit (requests per minute) on
 	// GET /api/session for non-presenter requests. Zero disables the limit.
 	SessionRateLimitRPM int
+	// DataGeneratorURL is the optional base URL of the in-cluster data-generator
+	// orchestrator used to drive externalized simulation load.
+	DataGeneratorURL string
+	// SimulationTurnURL is the in-cluster callback URL that data-generator
+	// worker pods POST each simulated turn to.
+	SimulationTurnURL string
+	// MockThinkMin, MockThinkMax, MockExecMin, and MockExecMax configure
+	// realistic active compute durations on worker seats during mock turns.
+	MockThinkMin time.Duration
+	MockThinkMax time.Duration
+	MockExecMin  time.Duration
+	MockExecMax  time.Duration
 }
 
 // LoadConfig loads the configuration from environment variables with defaults.
@@ -175,6 +187,10 @@ func LoadConfig() Config {
 	if firebaseProjectID == "" {
 		firebaseProjectID = vertexProject
 	}
+	simulationTurnURL := strings.TrimSpace(os.Getenv("SIMULATION_TURN_URL"))
+	if simulationTurnURL == "" {
+		simulationTurnURL = "http://conf-gateway/api/simulation/turn"
+	}
 
 	return Config{
 		Port:                  port,
@@ -207,6 +223,12 @@ func LoadConfig() Config {
 		FirebaseProjectID:     firebaseProjectID,
 		ChatRateLimitRPM:      envNonNegativeInt("CHAT_RATE_LIMIT_RPM", 10),
 		SessionRateLimitRPM:   envNonNegativeInt("SESSION_RATE_LIMIT_RPM", 10),
+		DataGeneratorURL:      strings.TrimSpace(os.Getenv("DATA_GENERATOR_URL")),
+		SimulationTurnURL:     simulationTurnURL,
+		MockThinkMin:          time.Duration(envNonNegativeInt("MOCK_THINK_MIN_MS", 0)) * time.Millisecond,
+		MockThinkMax:          time.Duration(envNonNegativeInt("MOCK_THINK_MAX_MS", 0)) * time.Millisecond,
+		MockExecMin:           time.Duration(envNonNegativeInt("MOCK_EXEC_MIN_MS", 0)) * time.Millisecond,
+		MockExecMax:           time.Duration(envNonNegativeInt("MOCK_EXEC_MAX_MS", 0)) * time.Millisecond,
 	}
 }
 
@@ -349,6 +371,20 @@ func newActorControl(cfg Config) (*actorstate.KubectlATE, error) {
 	return actorstate.NewKubectlATE(resolved, cfg.ATEAPIEndpoint, cfg.Atespace), nil
 }
 
+// newInClusterGRPCControl builds a direct gRPC ActorControl client when running
+// inside a Kubernetes cluster, avoiding per-poll kubectl-ate subprocesses.
+func newInClusterGRPCControl(cfg Config) (*actorstate.GRPCControl, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	client, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, err
+	}
+	return actorstate.NewGRPCControl(client, cfg.ATEAPIEndpoint, cfg.Atespace, cfg.RouterCAFile)
+}
+
 // newWorkerScaleReader builds a reader for the configured worker pool's size
 // from the in-cluster Kubernetes API.
 func newWorkerScaleReader(cfg Config) (*workerscale.Reader, error) {
@@ -418,15 +454,24 @@ func main() {
 		gateway.WithUsage(proxy),
 		gateway.WithModel(proxy),
 		gateway.WithMockLLM(cfg.MockLLM || !proxy.Enabled()),
+		gateway.WithMockTurnDelays(cfg.MockThinkMin, cfg.MockThinkMax, cfg.MockExecMin, cfg.MockExecMax),
 		gateway.WithStaticFS(staticFS),
 		gateway.WithRouterStatus(routerstatus.NewAggregator(routerStatusSrc, http.DefaultClient)),
+		gateway.WithDataGenerator(cfg.DataGeneratorURL, cfg.SimulationTurnURL),
 	}
 	if cfg.LocalMode {
 		log.Printf("LOCAL_MODE=true; actor state is not read from ateapi and actors are never suspended.")
 	} else {
-		ctrl, err := newActorControl(cfg)
+		var ctrl actorstate.ActorControl
+		cliCtrl, err := newActorControl(cfg)
 		if err != nil {
 			log.Fatal(err)
+		}
+		ctrl = cliCtrl
+		if grpcCtrl, err := newInClusterGRPCControl(cfg); err == nil {
+			log.Printf("Using persistent direct gRPC ActorControl for ateapi (%s)", cfg.ATEAPIEndpoint)
+			ctrl = grpcCtrl
+			defer grpcCtrl.Close()
 		}
 		opts = append(opts, gateway.WithActorControl(ctrl))
 		if r, err := newWorkerScaleReader(cfg); err != nil {

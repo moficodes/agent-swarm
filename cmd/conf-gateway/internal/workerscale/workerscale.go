@@ -65,7 +65,8 @@ func (r *Reader) Fetch(ctx context.Context) types.WorkerPods {
 		if !ok {
 			return types.WorkerPods{}
 		}
-		return types.WorkerPods{Current: n, Desired: n, Max: n, Available: true, PodNames: r.poolPodNames(ctx)}
+		names, nodes := r.poolPods(ctx)
+		return types.WorkerPods{Current: n, Desired: n, Max: n, Available: true, PodNames: names, PodNodes: nodes}
 	}
 	if err != nil {
 		return types.WorkerPods{}
@@ -83,33 +84,42 @@ func (r *Reader) Fetch(ctx context.Context) types.WorkerPods {
 	if desired == 0 {
 		desired = current
 	}
+	names, nodes := r.poolPods(ctx)
 	return types.WorkerPods{
 		Current:   current,
 		Desired:   desired,
 		Max:       int(hpa.Spec.MaxReplicas),
 		Available: true,
-		PodNames:  r.poolPodNames(ctx),
+		PodNames:  names,
+		PodNodes:  nodes,
 	}
 }
 
-// poolPodNames lists non-terminating pods belonging to the worker pool.
-func (r *Reader) poolPodNames(ctx context.Context) []string {
+// poolPods lists non-terminating pods belonging to the worker pool and their assigned node names.
+func (r *Reader) poolPods(ctx context.Context) ([]string, map[string]string) {
 	list, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "ate.dev/worker-pool=" + r.name,
 	})
 	if err != nil || len(list.Items) == 0 {
-		return nil
+		return nil, nil
 	}
 	var names []string
+	var nodes map[string]string
 	for i := range list.Items {
 		p := &list.Items[i]
 		if p.DeletionTimestamp != nil || p.Name == "" {
 			continue
 		}
 		names = append(names, p.Name)
+		if p.Spec.NodeName != "" {
+			if nodes == nil {
+				nodes = make(map[string]string)
+			}
+			nodes[p.Name] = p.Spec.NodeName
+		}
 	}
 	slices.Sort(names)
-	return names
+	return names, nodes
 }
 
 // poolReplicas returns the WorkerPool's spec.replicas.

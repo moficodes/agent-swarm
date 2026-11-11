@@ -191,6 +191,20 @@ spec:
           value: "${CHAT_RATE_LIMIT_RPM}"
         - name: SESSION_RATE_LIMIT_RPM
           value: "${SESSION_RATE_LIMIT_RPM}"
+        - name: SUSPEND_AFTER
+          value: "${SUSPEND_AFTER}"
+        - name: MOCK_THINK_MIN_MS
+          value: "${MOCK_THINK_MIN_MS}"
+        - name: MOCK_THINK_MAX_MS
+          value: "${MOCK_THINK_MAX_MS}"
+        - name: MOCK_EXEC_MIN_MS
+          value: "${MOCK_EXEC_MIN_MS}"
+        - name: MOCK_EXEC_MAX_MS
+          value: "${MOCK_EXEC_MAX_MS}"
+        - name: DATA_GENERATOR_URL
+          value: "${DATA_GENERATOR_URL}"
+        - name: SIMULATION_TURN_URL
+          value: "${SIMULATION_TURN_URL}"
         - name: HMAC_SECRET
           valueFrom:
             secretKeyRef:
@@ -207,10 +221,10 @@ spec:
             port: http
         resources:
           requests:
-            cpu: 250m
-            memory: 256Mi
-          limits:
+            cpu: 1000m
             memory: 512Mi
+          limits:
+            memory: 4Gi
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

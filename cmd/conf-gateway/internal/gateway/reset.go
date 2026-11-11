@@ -68,15 +68,29 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	// Actors that held a conversation get their history cleared; the clear
 	// suspends them again once it is done, so the reset leaves them alone.
+	// In large-swarm mode (>64 chat histories), defer the in-actor /clear
+	// until the actor's next turn so reset does not wake thousands of
+	// already-suspended actors at once.
 	cleared := make(map[string]bool, len(g.chatHistories))
+	deferHistoryClear := len(g.chatHistories) > 64
 	for name := range g.chatHistories {
-		cleared[name] = true
-		g.requestHistoryClearLocked(name)
+		if deferHistoryClear {
+			c := g.historyClears[name]
+			if c == nil {
+				c = &historyClear{}
+				g.historyClears[name] = c
+			}
+			c.want++
+		} else {
+			cleared[name] = true
+			g.requestHistoryClearLocked(name)
+		}
 	}
 	g.proxy.ResetPending()
 	g.chatHistories = make(map[string][]types.ChatMessage)
 	g.lastResults = make(map[string]*types.ExecutionResult)
 	g.currentActionID = make(map[string]string)
+	g.leasedUntil = make(map[string]time.Time)
 	g.actions.Reset()
 	g.addEventLocked("Stage reset: chats cleared, running actors suspended")
 	g.mu.Unlock()
@@ -119,7 +133,7 @@ func (g *Gateway) forEachActor(ctx context.Context, names []string, verb string,
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var failed atomic.Int64
-	sem := make(chan struct{}, 8)
+	sem := make(chan struct{}, 64)
 	var wg sync.WaitGroup
 	for _, name := range names {
 		wg.Add(1)

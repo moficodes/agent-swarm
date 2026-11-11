@@ -15,9 +15,12 @@
 package simulation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,12 +89,132 @@ func TestRunner_StartRejectsBadCountAndClosedTarget(t *testing.T) {
 	if err := NewRunner(f).Start(0); err == nil {
 		t.Error("Start(0) succeeded")
 	}
-	if err := NewRunner(f).Start(101); err == nil {
-		t.Error("Start(101) succeeded")
+	if err := NewRunner(f).Start(types.MaxSimulationAttendees + 1); err == nil {
+		t.Errorf("Start(%d) succeeded", types.MaxSimulationAttendees+1)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := NewRunner(&fakeTarget{ctx: ctx}).Start(1); err == nil {
 		t.Error("Start succeeded on a closed target")
 	}
+}
+
+type approvalFakeTarget struct {
+	ctx       context.Context
+	mu        sync.Mutex
+	chats     []string
+	approvals []string
+}
+
+func (f *approvalFakeTarget) Context() context.Context         { return f.ctx }
+func (f *approvalFakeTarget) MintToken(attendee string) string { return "tok-" + attendee }
+func (f *approvalFakeTarget) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attendee := r.Header.Get("X-Attendee-ID")
+		switch r.URL.Path {
+		case "/api/chat":
+			f.mu.Lock()
+			f.chats = append(f.chats, attendee)
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{
+				ID:      "m-" + attendee,
+				Sender:  types.SenderAssistant,
+				Content: "proposing action",
+				Approval: &types.ApprovalRequest{
+					ApprovalID: "appr-" + attendee,
+					Code:       "echo ok",
+					Language:   "bash",
+				},
+			})
+		case "/api/approve":
+			f.mu.Lock()
+			f.approvals = append(f.approvals, attendee)
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{
+				ID:      "m-exec-" + attendee,
+				Sender:  types.SenderAssistant,
+				Content: "done",
+			})
+		}
+	})
+}
+
+func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
+	var orchMu sync.Mutex
+	var configs []dataGeneratorOrchestratorPayload
+	orchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/config" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var p dataGeneratorOrchestratorPayload
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		orchMu.Lock()
+		configs = append(configs, p)
+		orchMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer orchSrv.Close()
+
+	target := &approvalFakeTarget{ctx: context.Background()}
+	r := NewRunner(target,
+		WithSimulationDelays(10*time.Millisecond, 10*time.Millisecond),
+		WithDataGenerator(orchSrv.URL, "http://conf-gateway/api/simulation/turn", "test-key"),
+	)
+
+	if err := r.Start(4096); err != nil {
+		t.Fatalf("Start(4096): %v", err)
+	}
+	orchMu.Lock()
+	if len(configs) != 1 || configs[0].IsPaused || configs[0].GlobalTargetMPS != 96 {
+		t.Fatalf("orchestrator configs after Start = %+v", configs)
+	}
+	orchMu.Unlock()
+
+	// Drive a chat turn via HandleTurn with a short 5ms review delay.
+	turnBody, _ := json.Marshal(TurnPayload{
+		TurnID:        "t1",
+		Prompt:        "Run benchmark sandbox test",
+		ReviewDelayMs: 5,
+		IdleDelayMs:   50,
+	})
+	req1 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader(turnBody))
+	rec1 := httptest.NewRecorder()
+	r.HandleTurn(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first HandleTurn status = %d, want 200", rec1.Code)
+	}
+
+	target.mu.Lock()
+	if len(target.chats) != 1 || len(target.approvals) != 0 {
+		t.Fatalf("after first turn chats=%v approvals=%v", target.chats, target.approvals)
+	}
+	firstAttendee := target.chats[0]
+	target.mu.Unlock()
+
+	// Wait for the 5ms review delay to mature, then drive the next turn; Priority 1
+	// must approve the awaiting actor before starting another chat.
+	time.Sleep(15 * time.Millisecond)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader(turnBody))
+	rec2 := httptest.NewRecorder()
+	r.HandleTurn(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second HandleTurn status = %d, want 200", rec2.Code)
+	}
+
+	target.mu.Lock()
+	if len(target.approvals) != 1 || target.approvals[0] != firstAttendee {
+		t.Fatalf("after second turn approvals=%v, want [%s]", target.approvals, firstAttendee)
+	}
+	target.mu.Unlock()
+
+	r.Stop()
+	orchMu.Lock()
+	if len(configs) != 2 || !configs[1].IsPaused || configs[1].GlobalTargetMPS != 0 {
+		t.Fatalf("orchestrator configs after Stop = %+v", configs)
+	}
+	orchMu.Unlock()
 }

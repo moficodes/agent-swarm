@@ -85,7 +85,46 @@
 
   // fleetIDs returns the actor IDs in a telemetry actors map, sorted.
   function fleetIDs(actorsMap) {
-    return Object.keys(actorsMap || {}).sort();
+    return Object.keys(actorsMap || {}).sort(function(a, b) {
+      const ma = /^attendee-(\d+)$/.exec(a);
+      const mb = /^attendee-(\d+)$/.exec(b);
+      if (ma && mb) {
+        const diff = parseInt(ma[1], 10) - parseInt(mb[1], 10);
+        if (diff !== 0) return diff;
+      }
+      return a < b ? -1 : (a > b ? 1 : 0);
+    });
+  }
+
+  const COMPACT_BADGES = [
+    { label: 'Never started', sub: 'No snapshot yet', cls: 'never-started', state: 'SUSPENDED', never_started: true },
+    { label: 'Suspended', sub: 'Snapshot saved', cls: 'suspended', state: 'SUSPENDED', never_started: false },
+    { label: 'Resuming', sub: 'Restoring on a worker', cls: 'resuming', state: 'RESUMING', never_started: false },
+    { label: 'Suspending', sub: 'Writing snapshot', cls: 'suspending', state: 'SUSPENDING', never_started: false },
+    { label: 'Running', sub: '', cls: 'running', state: 'RUNNING', never_started: false },
+    { label: 'Thinking', sub: 'Running', cls: 'thinking', state: 'RUNNING', activity: 'THINKING', never_started: false },
+    { label: 'Awaiting approval', sub: 'Running', cls: 'awaiting', state: 'RUNNING', activity: 'AWAITING_APPROVAL', never_started: false },
+    { label: 'Executing', sub: 'Running', cls: 'executing', state: 'RUNNING', activity: 'EXECUTING', never_started: false },
+    { label: 'Crashed', sub: '', cls: 'problem', state: 'CRASHED', never_started: false },
+    { label: 'Unknown', sub: '', cls: 'unknown', state: 'UNKNOWN', never_started: false }
+  ];
+
+  // decodeCompactBadge decodes one character code from StageTelemetry.fleet_compact.
+  function decodeCompactBadge(charCode) {
+    const raw = (typeof charCode === 'number' ? charCode : 64) - 64;
+    const code = raw & 15;
+    const leased = (raw & 16) !== 0;
+    const base = COMPACT_BADGES[code] || COMPACT_BADGES[9];
+    return {
+      code: code,
+      leased: leased,
+      label: base.label,
+      sub: base.sub,
+      cls: base.cls,
+      state: base.state,
+      activity: base.activity || '',
+      never_started: base.never_started
+    };
   }
 
   // volume maps an ActorView's external volume fields to how the spotlight
@@ -305,6 +344,7 @@
     source: source,
     badge: badge,
     fleetIDs: fleetIDs,
+    decodeCompactBadge: decodeCompactBadge,
     volume: volume,
     fleetVolumes: fleetVolumes,
     run: run,

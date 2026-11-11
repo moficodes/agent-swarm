@@ -248,6 +248,9 @@ limitations under the License.
             </div>
             <div id="fleet-grid" class="fleet-grid">
           </div>
+          <div id="fleet-canvas-wrap" class="fleet-canvas-wrap" hidden>
+            <canvas id="fleet-canvas" class="fleet-canvas" aria-label="Attendee Agent Fleet Matrix"></canvas>
+          </div>
         </div>
 
         <!-- Integrated Live Stream View Mode -->
@@ -382,6 +385,18 @@ limitations under the License.
       </div>
     </div>
   </aside>
+
+  <!-- Floating Stage Hover Tooltip (for 4x4 worker seat grids & 65,536-dot fleet canvas) -->
+  <div id="stage-hover-tooltip" class="stage-hover-tooltip" role="tooltip" hidden>
+    <div class="hover-tip-header">
+      <span id="hover-tip-dot" class="hover-tip-dot"></span>
+      <span id="hover-tip-title" class="hover-tip-title"></span>
+      <span id="hover-tip-tag" class="hover-tip-tag" hidden></span>
+    </div>
+    <div id="hover-tip-state" class="hover-tip-state"></div>
+    <div id="hover-tip-meta" class="hover-tip-meta"></div>
+    <div id="hover-tip-list" class="hover-tip-list" hidden></div>
+  </div>
 
   <script src="/static/actorview.js"></script>
   <script src="/static/stage.js"></script>

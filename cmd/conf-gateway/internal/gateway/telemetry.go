@@ -72,7 +72,7 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		pods = *p
 	}
 
-	views := g.board.Views()
+	views, fleetCompact, runningActors, suspendedActors := g.board.TelemetrySnapshot(g.maxActors, g.IsLeased)
 	names := slices.Sorted(maps.Keys(views))
 	var workers []types.WorkerStatus
 	podIndex := make(map[string]int)
@@ -112,6 +112,9 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		ParkingAvailable: parkingOK,
 		Workers:          workers,
 		Actors:           views,
+		FleetCompact:     fleetCompact,
+		RunningActors:    runningActors,
+		SuspendedActors:  suspendedActors,
 		RecentEvents:     eventsCopy,
 		MockLLM:          g.mockLLM,
 		StatePollMs:      g.statePollMs.Load(),
@@ -141,6 +144,7 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := g.currentView(actorID)
+	view.Leased = g.IsLeased(actorID)
 
 	g.mu.RLock()
 	var history []types.ChatMessage

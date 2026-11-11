@@ -239,6 +239,12 @@ conf_router_flags_ok() {
   if [[ -n "${spiffe}" ]] && ! conf_router_allows_spiffe "${args_json}" "${spiffe}"; then
     missing+=("--ingress-allowed-spiffe-ids=${spiffe}")
   fi
+  if ((10#${DEMO_CONF_ACTORS:-50} > 1024)); then
+    v="$(conf_flag_value "${args_json}" --parked-request-max)"
+    if [[ ! "${v}" =~ ^[0-9]+$ ]] || ((10#${v} < 4096)); then
+      missing+=("--parked-request-max=4096")
+    fi
+  fi
   if ((${#missing[@]} > 0)); then
     printf '%s\n' "${missing[@]}"
     return 1
@@ -383,7 +389,7 @@ conf_iam_retry() {
     if out="$("$@" 2>&1)"; then
       return 0
     fi
-    if [[ "${created}" != true ]] || ((attempt >= max)); then
+    if { [[ "${created}" != true ]] && [[ "${out}" != *"gcloud crashed (FileNotFoundError)"* ]]; } || ((attempt >= max)); then
       echo "error: $* failed:" >&2
       echo "${out}" >&2
       exit 1
@@ -429,6 +435,15 @@ conf_build_gateway() {
 
 conf_render() {
   local seats="${DEMO_CONF_ACTORS_PER_WORKER}"
+  local actor_cpu="${DEMO_CONF_ACTOR_CPU_MILLICORES:-1000}"
+  local actor_mem="${DEMO_CONF_ACTOR_MEMORY_BYTES:-536870912}"
+  local cpu_headroom=$((10#${actor_cpu} / 2))
+  local worker_cpu_req="${DEMO_CONF_WORKER_CPU_REQUEST:-500m}"
+  local worker_mem_req="${DEMO_CONF_WORKER_MEMORY_REQUEST:-$((10#${seats} * 512 + 256))Mi}"
+  if ((10#${actor_cpu} < 1000)); then
+    worker_cpu_req="${DEMO_CONF_WORKER_CPU_REQUEST:-300m}"
+    worker_mem_req="${DEMO_CONF_WORKER_MEMORY_REQUEST:-1024Mi}"
+  fi
   local sandbox_workspace="/tmp/workspace"
   if conf_storage_class_enabled; then
     sandbox_workspace="/workspace"
@@ -447,6 +462,10 @@ conf_render() {
       -e "s|\${VERTEX_LOCATION}|${DEMO_CONF_VERTEX_LOCATION:-global}|g" \
       -e "s|\${DEMO_MOCK_LLM}|${DEMO_CONF_MOCK_LLM:-true}|g" \
       -e "s|\${SANDBOX_WORKSPACE}|${sandbox_workspace}|g" \
+      -e "s|\${MOCK_THINK_MIN_MS}|${DEMO_CONF_MOCK_THINK_MIN_MS:-1200}|g" \
+      -e "s|\${MOCK_THINK_MAX_MS}|${DEMO_CONF_MOCK_THINK_MAX_MS:-2200}|g" \
+      -e "s|\${MOCK_EXEC_MIN_MS}|${DEMO_CONF_MOCK_EXEC_MIN_MS:-800}|g" \
+      -e "s|\${MOCK_EXEC_MAX_MS}|${DEMO_CONF_MOCK_EXEC_MAX_MS:-1600}|g" \
       -e "s|\${ACTOR_COUNT}|${DEMO_CONF_ACTORS}|g" \
       -e "s|\${DEMO_DOMAIN}|${DEMO_DOMAIN:-}|g" \
       -e "s|\${TEMPLATE_REVISION}|${DEMO_CONF_TEMPLATE_REVISION}|g" \
@@ -455,13 +474,22 @@ conf_render() {
       -e "s|\${MIN_WORKERS}|${DEMO_CONF_MIN_WORKERS}|g" \
       -e "s|\${MAX_WORKERS}|${DEMO_CONF_MAX_WORKERS}|g" \
       -e "s|\${ACTORS_PER_WORKER}|${seats}|g" \
+      -e "s|\${ACTOR_CPU_MILLICORES}|${actor_cpu}|g" \
+      -e "s|\${ACTOR_MEMORY_BYTES}|${actor_mem}|g" \
       -e "s|\${ALLOWED_GOOGLE_DOMAINS}|${ALLOWED_GOOGLE_DOMAINS:-}|g" \
       -e "s|\${GOOGLE_CLIENT_ID}|${GOOGLE_CLIENT_ID:-}|g" \
       -e "s|\${FIREBASE_API_KEY}|${FIREBASE_API_KEY:-}|g" \
       -e "s|\${CHAT_RATE_LIMIT_RPM}|${CHAT_RATE_LIMIT_RPM:-10}|g" \
       -e "s|\${SESSION_RATE_LIMIT_RPM}|${SESSION_RATE_LIMIT_RPM:-10}|g" \
-      -e "s|\${WORKER_CPU_LIMIT}|$((10#${seats} * 1000 + 500))m|g" \
-      -e "s|\${WORKER_MEMORY_REQUEST}|$((10#${seats} * 512 + 256))Mi|g" \
+      -e "s|\${SUSPEND_AFTER}|${DEMO_CONF_SUSPEND_AFTER:-2s}|g" \
+      -e "s|\${DATA_GENERATOR_URL}|${DEMO_CONF_DATA_GENERATOR_URL:-}|g" \
+      -e "s|\${SIMULATION_TURN_URL}|${DEMO_CONF_SIMULATION_TURN_URL:-http://conf-gateway/api/simulation/turn}|g" \
+      -e "s|\${DATAGEN_ORCHESTRATOR_IMAGE}|${DEMO_CONF_DATAGEN_ORCHESTRATOR_IMAGE:-placeholder}|g" \
+      -e "s|\${DATAGEN_WORKER_IMAGE}|${DEMO_CONF_DATAGEN_WORKER_IMAGE:-placeholder}|g" \
+      -e "s|\${DATAGEN_WORKER_REPLICAS}|${DEMO_CONF_DATAGEN_WORKER_REPLICAS:-8}|g" \
+      -e "s|\${WORKER_CPU_REQUEST}|${worker_cpu_req}|g" \
+      -e "s|\${WORKER_CPU_LIMIT}|$((10#${seats} * 10#${actor_cpu} + cpu_headroom))m|g" \
+      -e "s|\${WORKER_MEMORY_REQUEST}|${worker_mem_req}|g" \
       "$1")"
   if [[ "$1" == *actortemplate.yaml.tmpl ]] && conf_storage_class_enabled; then
     awk -v sc="${DEMO_CONF_STORAGE_CLASS}" -v cap="${DEMO_CONF_VOLUME_BYTES}" '
@@ -859,6 +887,19 @@ conf_deploy() {
   ensure_atespace "${ns}"
   create_actor_template conf_render manifests/actortemplate.yaml.tmpl "${ns}" "${tmpl}" 300
 
+  if [[ -n "${DATA_GENERATOR_REPO:-}" ]]; then
+    log_step "Building data-generator orchestrator and worker images from ${DATA_GENERATOR_REPO}..."
+    DEMO_CONF_DATAGEN_ORCHESTRATOR_IMAGE="$(cd "${DATA_GENERATOR_REPO}" && ko build ./cmd/orchestrator)"
+    DEMO_CONF_DATAGEN_WORKER_IMAGE="$(cd "${DATA_GENERATOR_REPO}" && ko build ./cmd/generator)"
+  fi
+  if [[ -n "${DEMO_CONF_DATAGEN_ORCHESTRATOR_IMAGE:-}" && -n "${DEMO_CONF_DATAGEN_WORKER_IMAGE:-}" ]]; then
+    DEMO_CONF_DATA_GENERATOR_URL="${DEMO_CONF_DATA_GENERATOR_URL:-http://data-generator-orchestrator:8080}"
+    log_step "Deploying data-generator orchestrator and workers in ${ns}..."
+    conf_render manifests/datagen.yaml.tmpl | run_kubectl_fatal apply -f -
+    run_kubectl_fatal rollout status deployment/data-generator-orchestrator -n "${ns}" --timeout=180s
+    run_kubectl_fatal rollout status deployment/data-generator-worker -n "${ns}" --timeout=180s
+  fi
+
   log_step "Building conf-gateway image..."
   DEMO_CONF_GATEWAY_IMAGE="$(conf_build_gateway)"
   conf_ensure_secret
@@ -869,17 +910,25 @@ conf_deploy() {
   run_kubectl_fatal rollout status deployment/conf-gateway -n "${ns}" --timeout=180s
 
   log_step "Creating ${DEMO_CONF_ACTORS} attendee actors in ${ns}..."
-  local i actor err_out
-  for i in $(seq 1 "${DEMO_CONF_ACTORS}"); do
-    actor="$(printf "attendee-%02d" "${i}")"
-    if ! err_out="$(run_kubectl_ate create actor "${actor}" -a "${ns}" --template "${tmpl}" 2>&1)"; then
-      if [[ "${err_out}" != *"AlreadyExists"* && "${err_out}" != *"already exists"* ]] \
-          && ! run_kubectl_ate get actor "${actor}" -a "${ns}" >/dev/null 2>&1; then
-        echo "error: failed to create actor ${actor}: ${err_out}" >&2
-        exit 1
+  if ((10#${DEMO_CONF_ACTORS} > 100)); then
+    go run ./cmd/conf-gateway/cmd/conf-provision \
+      --atespace="${ns}" \
+      --template="${tmpl}" \
+      --count="${DEMO_CONF_ACTORS}" \
+      --context="${KUBECTL_CONTEXT:-}"
+  else
+    local i actor err_out
+    for i in $(seq 1 "${DEMO_CONF_ACTORS}"); do
+      actor="$(printf "attendee-%02d" "${i}")"
+      if ! err_out="$(run_kubectl_ate create actor "${actor}" -a "${ns}" --template "${tmpl}" 2>&1)"; then
+        if [[ "${err_out}" != *"AlreadyExists"* && "${err_out}" != *"already exists"* ]] \
+            && ! run_kubectl_ate get actor "${actor}" -a "${ns}" >/dev/null 2>&1; then
+          echo "error: failed to create actor ${actor}: ${err_out}" >&2
+          exit 1
+        fi
       fi
-    fi
-  done
+    done
+  fi
 
   if [[ -n "${PROJECT_ID:-}" ]]; then
     conf_apply_dashboard
@@ -897,6 +946,7 @@ conf_delete() {
   tmpl="$(conf_template_name)"
   log_step "Deleting the conference demo in ${ns}"
   log_target_context
+  run_kubectl delete -f <(conf_render manifests/datagen.yaml.tmpl) --ignore-not-found
   run_kubectl delete -f <(conf_render manifests/gateway.yaml.tmpl) --ignore-not-found
   if [[ -n "${DEMO_DOMAIN:-}" ]]; then
     run_kubectl delete -f <(conf_render manifests/gateway-ingress.yaml.tmpl) --ignore-not-found

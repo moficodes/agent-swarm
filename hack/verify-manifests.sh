@@ -28,6 +28,7 @@ ACTOR_TEMPLATE="manifests/actortemplate.yaml.tmpl"
 WORKERPOOL_MANIFEST="manifests/workerpool.yaml.tmpl"
 AUTOSCALING_MANIFEST="manifests/autoscaling.yaml.tmpl"
 APISERVICE_MANIFEST="manifests/autoscaling-apiservice.yaml.tmpl"
+DATAGEN_MANIFEST="manifests/datagen.yaml.tmpl"
 
 # render substitutes every install-script placeholder in $1, using $2 for
 # ${DEMO_DOMAIN}. Callers exercise the ingress template with both an empty
@@ -47,6 +48,10 @@ render() {
       -e "s|\${VERTEX_LOCATION}|global|g" \
       -e "s|\${DEMO_MOCK_LLM}|false|g" \
       -e "s|\${SANDBOX_WORKSPACE}|/tmp/workspace|g" \
+      -e "s|\${MOCK_THINK_MIN_MS}|1200|g" \
+      -e "s|\${MOCK_THINK_MAX_MS}|2200|g" \
+      -e "s|\${MOCK_EXEC_MIN_MS}|800|g" \
+      -e "s|\${MOCK_EXEC_MAX_MS}|1600|g" \
       -e "s|\${ACTOR_COUNT}|50|g" \
       -e "s|\${DEMO_DOMAIN}|$2|g" \
       -e "s|\${TEMPLATE_REVISION}|1|g" \
@@ -54,11 +59,20 @@ render() {
       -e "s|\${MIN_WORKERS}|2|g" \
       -e "s|\${MAX_WORKERS}|5|g" \
       -e "s|\${ACTORS_PER_WORKER}|4|g" \
+      -e "s|\${ACTOR_CPU_MILLICORES}|1000|g" \
+      -e "s|\${ACTOR_MEMORY_BYTES}|536870912|g" \
       -e "s|\${ALLOWED_GOOGLE_DOMAINS}||g" \
       -e "s|\${GOOGLE_CLIENT_ID}||g" \
       -e "s|\${FIREBASE_API_KEY}||g" \
       -e "s|\${CHAT_RATE_LIMIT_RPM}|10|g" \
       -e "s|\${SESSION_RATE_LIMIT_RPM}|10|g" \
+      -e "s|\${SUSPEND_AFTER}|2s|g" \
+      -e "s|\${DATA_GENERATOR_URL}|http://data-generator-orchestrator:8080|g" \
+      -e "s|\${SIMULATION_TURN_URL}|http://conf-gateway/api/simulation/turn|g" \
+      -e "s|\${DATAGEN_ORCHESTRATOR_IMAGE}|gcr.io/p/orchestrator@sha256:0000000000000000000000000000000000000000000000000000000000000000|g" \
+      -e "s|\${DATAGEN_WORKER_IMAGE}|gcr.io/p/generator@sha256:0000000000000000000000000000000000000000000000000000000000000000|g" \
+      -e "s|\${DATAGEN_WORKER_REPLICAS}|8|g" \
+      -e "s|\${WORKER_CPU_REQUEST}|500m|g" \
       -e "s|\${WORKER_CPU_LIMIT}|4500m|g" \
       -e "s|\${WORKER_MEMORY_REQUEST}|2304Mi|g" \
       "$1"
@@ -74,7 +88,8 @@ check_objects() {
 
 status=0
 for f in "${GATEWAY_MANIFEST}" "${INGRESS_MANIFEST}" "${ACTOR_TEMPLATE}" \
-         "${WORKERPOOL_MANIFEST}" "${AUTOSCALING_MANIFEST}" "${APISERVICE_MANIFEST}"; do
+         "${WORKERPOOL_MANIFEST}" "${AUTOSCALING_MANIFEST}" "${APISERVICE_MANIFEST}" \
+         "${DATAGEN_MANIFEST}"; do
   out="$(render "${f}" "demo.example.com")"
   # shellcheck disable=SC2016 # matches a literal, unrendered ${
   if grep -n '\${' <<<"${out}"; then
@@ -136,7 +151,7 @@ if ! check_objects "${out_empty_domain}"; then
   status=1
 fi
 
-for f in "${WORKERPOOL_MANIFEST}" "${AUTOSCALING_MANIFEST}" "${APISERVICE_MANIFEST}"; do
+for f in "${WORKERPOOL_MANIFEST}" "${AUTOSCALING_MANIFEST}" "${APISERVICE_MANIFEST}" "${DATAGEN_MANIFEST}"; do
   if ! check_objects "$(render "${f}" "")"; then
     echo "error: ${f} failed offline object validation" >&2
     status=1

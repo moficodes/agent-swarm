@@ -80,6 +80,12 @@ func pod(podName, poolName string, terminating bool) *corev1.Pod {
 	return p
 }
 
+func podOnNode(podName, poolName, nodeName string) *corev1.Pod {
+	p := pod(podName, poolName, false)
+	p.Spec.NodeName = nodeName
+	return p
+}
+
 func TestFetch(t *testing.T) {
 	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "autoscaling", Resource: "horizontalpodautoscalers"}, name, errors.New("denied"))
 	tests := []struct {
@@ -110,6 +116,19 @@ func TestFetch(t *testing.T) {
 			pool: pool(2),
 			pods: []*corev1.Pod{pod("pool-2", name, false), pod("pool-1", name, false)},
 			want: types.WorkerPods{Current: 2, Desired: 2, Max: 2, Available: true, PodNames: []string{"pool-1", "pool-2"}},
+		},
+		{
+			name: "pods report node assignments",
+			pool: pool(2),
+			pods: []*corev1.Pod{podOnNode("pool-2", name, "gke-node-02"), podOnNode("pool-1", name, "gke-node-01")},
+			want: types.WorkerPods{
+				Current:   2,
+				Desired:   2,
+				Max:       2,
+				Available: true,
+				PodNames:  []string{"pool-1", "pool-2"},
+				PodNodes:  map[string]string{"pool-1": "gke-node-01", "pool-2": "gke-node-02"},
+			},
 		},
 		{name: "no hpa, pool at zero", pool: pool(0), want: types.WorkerPods{Available: true}},
 		{name: "no hpa, pool without replicas", pool: pool(-1), want: types.WorkerPods{}},

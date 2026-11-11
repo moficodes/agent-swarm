@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -44,6 +45,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var useMock bool
+	var sampled bool
 	if r.URL.Path == "/api/chat" && r.Body != nil {
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err == nil {
@@ -59,17 +61,20 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 						Timestamp: time.Now().Unix(),
 					}
 					actionID := fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
+					sampled = g.shouldRecordAction(attendeeID, actionID, true)
 					g.mu.Lock()
-					g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], userMsg)
+					g.appendChatHistoryLocked(attendeeID, userMsg)
 					g.currentActionID[attendeeID] = actionID
 					g.mu.Unlock()
-					g.RecordActionEntry(types.ActionLogEntry{
-						ID:         actionID,
-						AttendeeID: attendeeID,
-						Timestamp:  time.Now().Unix(),
-						Prompt:     chatReq.Message,
-						Activity:   types.ActivityThinking,
-					})
+					if sampled {
+						g.RecordActionEntry(types.ActionLogEntry{
+							ID:         actionID,
+							AttendeeID: attendeeID,
+							Timestamp:  time.Now().Unix(),
+							Prompt:     chatReq.Message,
+							Activity:   types.ActivityThinking,
+						})
+					}
 				}
 			}
 		}
@@ -85,6 +90,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		if actionID == "" {
 			actionID = fmt.Sprintf("act-appr-%s-%d", attendeeID, time.Now().UnixNano())
 		}
+		sampled = g.shouldRecordAction(attendeeID, actionID, false)
 		entry := types.ActionLogEntry{
 			ID:         actionID,
 			AttendeeID: attendeeID,
@@ -99,20 +105,71 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 			entry.Activity = types.ActivityExecuting
 			g.setActivity(attendeeID, types.ActivityExecuting)
 		}
-		g.RecordActionEntry(entry)
+		if sampled {
+			g.RecordActionEntry(entry)
+		}
+	} else {
+		sampled = true
 	}
 	if r.URL.Path != "/api/approve" {
 		g.setActivity(attendeeID, types.ActivityThinking)
+	}
+	if !useMock && g.IsLeased(attendeeID) {
+		g.LeaseAttendee(attendeeID)
 	}
 	g.beginTurn(attendeeID)
 	defer g.endTurn(attendeeID)
 	g.settleHistoryClear(r.Context(), attendeeID)
 
-	g.mu.Lock()
-	g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
-	g.mu.Unlock()
+	if sampled {
+		g.mu.Lock()
+		g.addEventLocked(fmt.Sprintf("Actor %s executing %s", attendeeID, r.URL.Path))
+		g.mu.Unlock()
+	}
 
 	g.proxy.ServeHTTP(w, actorproxy.WithMock(actorproxy.WithAttendee(r, attendeeID), useMock))
+}
+
+func (g *Gateway) appendChatHistoryLocked(attendeeID string, msg types.ChatMessage) {
+	history := append(g.chatHistories[attendeeID], msg)
+	if g.maxActors > 256 && len(history) > 6 {
+		history = append([]types.ChatMessage(nil), history[len(history)-6:]...)
+	}
+	g.chatHistories[attendeeID] = history
+}
+
+func (g *Gateway) shouldRecordAction(attendeeID, actionID string, isStart bool) bool {
+	if g.maxActors <= 256 || attendeeID == "attendee-01" || g.IsLeased(attendeeID) {
+		return true
+	}
+	g.mu.RLock()
+	sc := g.simController
+	g.mu.RUnlock()
+	if sc == nil {
+		return true
+	}
+	if running, count := sc.Status(); !running || count <= 256 {
+		return true
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.sampledActions[actionID] {
+		return true
+	}
+	if !isStart {
+		return false
+	}
+	now := time.Now()
+	if now.Sub(g.lastActionSample) < 80*time.Millisecond {
+		return false
+	}
+	g.lastActionSample = now
+	if len(g.sampledActions) > 512 {
+		clear(g.sampledActions)
+	}
+	g.sampledActions[actionID] = true
+	return true
 }
 
 // onProxyError records a router that could not be reached.
@@ -121,6 +178,16 @@ func (g *Gateway) onProxyError(attendeeID string, err error) {
 	g.mu.Lock()
 	g.addEventLocked(fmt.Sprintf("Router proxy error for %s: %v", attendeeID, err))
 	g.mu.Unlock()
+}
+
+func (g *Gateway) mockTurnDelay(minD, maxD time.Duration) time.Duration {
+	if maxD <= 0 {
+		return 0
+	}
+	if minD <= 0 || maxD <= minD {
+		return maxD
+	}
+	return minD + time.Duration(rand.Int64N(int64(maxD-minD)))
 }
 
 // onActorReply records an actor's answer to a turn: its activity, chat
@@ -133,6 +200,21 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 		chatMsg = *msg
 		if chatMsg.Approval != nil {
 			isWaitingForApproval = true
+		}
+	}
+
+	if hasChatMsg && chatMsg.Source == types.SourceMock {
+		var hold time.Duration
+		if isWaitingForApproval {
+			hold = g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
+		} else {
+			hold = g.mockTurnDelay(g.mockExecMin, g.mockExecMax)
+		}
+		if hold > 0 && g.ctx != nil {
+			select {
+			case <-time.After(hold):
+			case <-g.ctx.Done():
+			}
 		}
 	}
 
@@ -167,22 +249,28 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 	if actionID == "" {
 		actionID = fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
 	}
+	sampled := g.shouldRecordAction(attendeeID, actionID, false)
 
 	if isWaitingForApproval {
 		if hasNewExec && newExec.Corrected {
 			// The failed run closes the approved action; the fix opens its own,
 			// so it does not overwrite the approved card.
-			g.RecordActionEntry(types.ActionLogEntry{
-				ID:         actionID,
-				AttendeeID: attendeeID,
-				Timestamp:  time.Now().Unix(),
-				Execution:  &newExec,
-				WorkerPod:  workerPod,
-				Activity:   types.ActivityIdle,
-			})
+			if sampled {
+				g.RecordActionEntry(types.ActionLogEntry{
+					ID:         actionID,
+					AttendeeID: attendeeID,
+					Timestamp:  time.Now().Unix(),
+					Execution:  &newExec,
+					WorkerPod:  workerPod,
+					Activity:   types.ActivityIdle,
+				})
+			}
 			actionID = fmt.Sprintf("act-fix-%s-%d", attendeeID, time.Now().UnixNano())
 			g.mu.Lock()
 			g.currentActionID[attendeeID] = actionID
+			if sampled {
+				g.sampledActions[actionID] = true
+			}
 			g.mu.Unlock()
 		}
 
@@ -191,59 +279,68 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
 			history := g.chatHistories[attendeeID]
 			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
-				g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], chatMsg)
+				g.appendChatHistoryLocked(attendeeID, chatMsg)
 			}
 		}
-		g.addEventLocked(fmt.Sprintf("Actor %s awaiting human approval", attendeeID))
+		if sampled {
+			g.addEventLocked(fmt.Sprintf("Actor %s awaiting human approval", attendeeID))
+		}
 		g.mu.Unlock()
 
-		g.RecordActionEntry(types.ActionLogEntry{
-			ID:            actionID,
-			AttendeeID:    attendeeID,
-			Timestamp:     time.Now().Unix(),
-			ModelResponse: chatMsg.Content,
-			Code:          chatMsg.Approval.Code,
-			Language:      chatMsg.Approval.Language,
-			RiskLevel:     chatMsg.Approval.RiskLevel,
-			ApprovalID:    chatMsg.Approval.ApprovalID,
-			WorkerPod:     workerPod,
-			Activity:      types.ActivityAwaitingApproval,
-			Source:        chatMsg.Source,
-		})
+		if sampled {
+			g.RecordActionEntry(types.ActionLogEntry{
+				ID:            actionID,
+				AttendeeID:    attendeeID,
+				Timestamp:     time.Now().Unix(),
+				ModelResponse: chatMsg.Content,
+				Code:          chatMsg.Approval.Code,
+				Language:      chatMsg.Approval.Language,
+				RiskLevel:     chatMsg.Approval.RiskLevel,
+				ApprovalID:    chatMsg.Approval.ApprovalID,
+				WorkerPod:     workerPod,
+				Activity:      types.ActivityAwaitingApproval,
+				Source:        chatMsg.Source,
+			})
+		}
 	} else if status == http.StatusOK {
 		g.mu.Lock()
 		g.proxy.ClearPending(attendeeID)
 		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
 			history := g.chatHistories[attendeeID]
 			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
-				g.chatHistories[attendeeID] = append(g.chatHistories[attendeeID], chatMsg)
+				g.appendChatHistoryLocked(attendeeID, chatMsg)
 			}
 		}
-		g.addEventLocked(fmt.Sprintf("Actor %s completed turn", attendeeID))
+		if sampled {
+			g.addEventLocked(fmt.Sprintf("Actor %s completed turn", attendeeID))
+			delete(g.sampledActions, actionID)
+		}
 		g.mu.Unlock()
 
-		if hasNewExec {
-			entry := types.ActionLogEntry{
-				ID:         actionID,
-				AttendeeID: attendeeID,
-				Timestamp:  time.Now().Unix(),
-				Execution:  &newExec,
-				WorkerPod:  workerPod,
-				Source:     chatMsg.Source,
+		if sampled {
+			if hasNewExec {
+				entry := types.ActionLogEntry{
+					ID:         actionID,
+					AttendeeID: attendeeID,
+					Timestamp:  time.Now().Unix(),
+					Execution:  &newExec,
+					WorkerPod:  workerPod,
+					Source:     chatMsg.Source,
+				}
+				if hasChatMsg && chatMsg.Content != "" {
+					entry.ModelResponse = chatMsg.Content
+				}
+				g.RecordActionEntry(entry)
+			} else if hasChatMsg {
+				g.RecordActionEntry(types.ActionLogEntry{
+					ID:            actionID,
+					AttendeeID:    attendeeID,
+					Timestamp:     time.Now().Unix(),
+					ModelResponse: chatMsg.Content,
+					WorkerPod:     workerPod,
+					Source:        chatMsg.Source,
+				})
 			}
-			if hasChatMsg && chatMsg.Content != "" {
-				entry.ModelResponse = chatMsg.Content
-			}
-			g.RecordActionEntry(entry)
-		} else if hasChatMsg {
-			g.RecordActionEntry(types.ActionLogEntry{
-				ID:            actionID,
-				AttendeeID:    attendeeID,
-				Timestamp:     time.Now().Unix(),
-				ModelResponse: chatMsg.Content,
-				WorkerPod:     workerPod,
-				Source:        chatMsg.Source,
-			})
 		}
 	}
 }

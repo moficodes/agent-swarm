@@ -141,6 +141,7 @@ type ActorView struct {
 	VolumeShare  string         `json:"volume_share,omitempty"`
 	VolumeURI    string         `json:"volume_uri,omitempty"`
 	Source       ReplySource    `json:"source,omitempty"`
+	Leased       bool           `json:"leased,omitempty"`
 }
 
 // ApprovalRequest contains the details and security context of an execution requiring approval.
@@ -219,6 +220,14 @@ type StageTelemetry struct {
 	ActorCount int `json:"actor_count"`
 	// SeatsPerWorker is how many actors one worker pod hosts at once.
 	SeatsPerWorker int `json:"seats_per_worker"`
+	// FleetCompact is a compact 1-byte-per-actor ASCII state string ('@' + code)
+	// emitted when ActorCount > 256 so the 65,536-dot stage canvas updates at 60fps
+	// without serializing 65,536 full ActorView JSON objects every 500ms.
+	FleetCompact string `json:"fleet_compact,omitempty"`
+	// RunningActors is the total count of actors currently in RUNNING state.
+	RunningActors int `json:"running_actors,omitempty"`
+	// SuspendedActors is the total count of actors currently in SUSPENDED state.
+	SuspendedActors int `json:"suspended_actors,omitempty"`
 }
 
 // WorkerPods is the worker pool's size and pod names as its autoscaler and Kubernetes API see them.
@@ -234,6 +243,8 @@ type WorkerPods struct {
 	Available bool `json:"available"`
 	// PodNames lists the names of non-terminating pods belonging to the worker pool.
 	PodNames []string `json:"pod_names,omitempty"`
+	// PodNodes maps each worker pod name to the Kubernetes node name it is scheduled on.
+	PodNodes map[string]string `json:"pod_nodes,omitempty"`
 }
 
 // WorkerStatus is one worker pod and the actors ateapi reports on it.
@@ -257,6 +268,9 @@ type ActorDetails struct {
 	Usage           ModelUsage       `json:"usage"`
 }
 
+// MaxSimulationAttendees is the upper bound on simulated virtual attendees (16^4 = 65,536).
+const MaxSimulationAttendees = 65536
+
 // SimulationRequest specifies actions to control the virtual attendee swarm.
 type SimulationRequest struct {
 	Action string `json:"action"` // "start" or "stop"
@@ -271,8 +285,8 @@ func (s *SimulationRequest) Validate() error {
 	if s.Action != "start" && s.Action != "stop" {
 		return fmt.Errorf("invalid action: %s (expected 'start' or 'stop')", s.Action)
 	}
-	if s.Action == "start" && (s.Count < 1 || s.Count > 100) {
-		return fmt.Errorf("invalid count: %d (must be between 1 and 100)", s.Count)
+	if s.Action == "start" && (s.Count < 1 || s.Count > MaxSimulationAttendees) {
+		return fmt.Errorf("invalid count: %d (must be between 1 and %d)", s.Count, MaxSimulationAttendees)
 	}
 	return nil
 }

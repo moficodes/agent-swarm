@@ -53,6 +53,9 @@ func NewHTTPClient(caFile, credBundle string) (*http.Client, error) {
 		base = &http.Transport{}
 	}
 	tr := base.Clone()
+	tr.MaxIdleConns = 4096
+	tr.MaxIdleConnsPerHost = 4096
+	tr.MaxConnsPerHost = 0
 	tr.TLSClientConfig = &tls.Config{
 		MinVersion: getMinTLSVersion(),
 		// Chain and hostname verification run in VerifyConnection against the

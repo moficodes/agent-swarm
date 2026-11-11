@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/pkg/types"
@@ -108,6 +109,20 @@ func (g *Gateway) suspendIfIdle(attendee string, seq uint64) {
 }
 
 func (g *Gateway) suspendActor(attendee string) {
+	if g.suspendSem != nil {
+		select {
+		case g.suspendSem <- struct{}{}:
+			defer func() { <-g.suspendSem }()
+		default:
+			select {
+			case g.suspendSem <- struct{}{}:
+				defer func() { <-g.suspendSem }()
+			case <-g.suspendCtx.Done():
+				return
+			}
+		}
+	}
+
 	g.mu.Lock()
 	g.suspendsInFlight[attendee]++
 	g.mu.Unlock()
@@ -126,11 +141,46 @@ func (g *Gateway) suspendActor(attendee string) {
 		if g.suspendCtx.Err() != nil {
 			return // the gateway's suspend drain window ended
 		}
+		if strings.Contains(err.Error(), "another operation is in progress") || strings.Contains(err.Error(), "Aborted") {
+			g.scheduleSuspendRetry(attendee)
+			return
+		}
 		log.Printf("[gateway] auto-suspend %s: %v", attendee, err)
 		g.mu.Lock()
 		g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendee, err))
 		g.mu.Unlock()
 	}
+}
+
+func (g *Gateway) scheduleSuspendRetry(attendee string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.control == nil || g.closed || g.turnsInFlight[attendee] > 0 {
+		return
+	}
+	if _, hasTimer := g.suspendTimers[attendee]; hasTimer {
+		return
+	}
+	seq := g.turnSeq[attendee]
+	retryDelay := max(g.suspendAfter, 2*time.Second)
+	g.wg.Add(1)
+	var t *time.Timer
+	t = time.AfterFunc(retryDelay, func() {
+		defer g.wg.Done()
+		g.mu.Lock()
+		if g.closed {
+			g.mu.Unlock()
+			return
+		}
+		if g.suspendTimers[attendee] == t {
+			delete(g.suspendTimers, attendee)
+		}
+		g.suspendWG.Add(1)
+		g.mu.Unlock()
+		defer g.suspendWG.Done()
+		g.suspendIfIdle(attendee, seq)
+	})
+	g.suspendTimers[attendee] = t
 }
 
 // reconcileStuckSuspending re-drives Substrate's idempotent SuspendActor

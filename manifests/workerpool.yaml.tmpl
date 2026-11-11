@@ -45,7 +45,7 @@ spec:
     # a busy sandbox cannot OOM-kill a worker.
     resources:
       requests:
-        cpu: 500m
+        cpu: ${WORKER_CPU_REQUEST}
         memory: ${WORKER_MEMORY_REQUEST}
       limits:
         cpu: ${WORKER_CPU_LIMIT}

@@ -224,3 +224,63 @@ func TestBoard_PublishOrderMatchesCommitOrder(t *testing.T) {
 		t.Errorf("last published view %+v != current board view %+v", got[len(got)-1], v)
 	}
 }
+
+func TestBoard_TelemetrySnapshotCompactAndStandard(t *testing.T) {
+	b := actorstate.NewBoard(func(types.ActorView) {})
+	b.SetStatuses([]actorstate.Status{
+		{Name: "attendee-01", State: types.StateSuspended, SnapshotURI: "gs://b/1"},
+		{Name: "attendee-02", State: types.StateRunning, WorkerPod: "worker-0"},
+		{Name: "attendee-03", State: types.StateSuspended, SnapshotURI: "gs://b/3"},
+		{Name: "attendee-16", State: types.StateSuspended},
+	})
+	b.SetActivity("attendee-02", types.ActivityThinking)
+	b.SetActivity("attendee-03", types.ActivityAwaitingApproval)
+
+	isLeased := func(id string) bool { return id == "attendee-16" }
+
+	// Standard fleet (<= 256): full actors map, empty compact string.
+	actors, compact, running, suspended := b.TelemetrySnapshot(50, isLeased)
+	if compact != "" {
+		t.Errorf("standard TelemetrySnapshot returned compact=%q, want empty", compact)
+	}
+	if running != 1 || suspended != 3 {
+		t.Errorf("counts running=%d suspended=%d, want 1 and 3", running, suspended)
+	}
+	if !actors["attendee-16"].Leased {
+		t.Errorf("attendee-16 Leased = false, want true")
+	}
+
+	// Large fleet (> 256): compact string populated, idle unleased actors pruned from map.
+	actorsLarge, compactLarge, runningLarge, suspendedLarge := b.TelemetrySnapshot(300, isLeased)
+	if len(compactLarge) != 300 {
+		t.Fatalf("compactLarge len = %d, want 300", len(compactLarge))
+	}
+	if runningLarge != 1 || suspendedLarge != 3 {
+		t.Errorf("large counts running=%d suspended=%d, want 1 and 3", runningLarge, suspendedLarge)
+	}
+	// attendee-01 (index 0): suspended with snapshot -> code 1 -> 'A'
+	if got := compactLarge[0] - '@'; got != 1 {
+		t.Errorf("attendee-01 badge code = %d, want 1", got)
+	}
+	// attendee-02 (index 1): running + thinking -> code 5
+	if got := compactLarge[1] - '@'; got != 5 {
+		t.Errorf("attendee-02 badge code = %d, want 5", got)
+	}
+	// attendee-03 (index 2): suspended in GCS while awaiting approval -> code 6
+	if got := compactLarge[2] - '@'; got != 6 {
+		t.Errorf("attendee-03 badge code = %d, want 6", got)
+	}
+	// attendee-16 (index 15): never started (0) + leased (16) -> code 16
+	if got := compactLarge[15] - '@'; got != 16 {
+		t.Errorf("attendee-16 badge code = %d, want 16", got)
+	}
+	if _, ok := actorsLarge["attendee-02"]; !ok {
+		t.Errorf("active attendee-02 should remain in pruned actors map")
+	}
+	if _, ok := actorsLarge["attendee-03"]; ok {
+		t.Errorf("suspended awaiting-approval attendee-03 should be pruned from large actors map")
+	}
+	if _, ok := actorsLarge["attendee-16"]; !ok {
+		t.Errorf("leased attendee-16 should remain in pruned actors map")
+	}
+}

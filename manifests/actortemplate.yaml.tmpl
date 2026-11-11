@@ -42,9 +42,17 @@ containers:
     value: "${DEMO_MOCK_LLM}"
   - name: SANDBOX_WORKSPACE
     value: "${SANDBOX_WORKSPACE}"
+  - name: MOCK_THINK_MIN_MS
+    value: "${MOCK_THINK_MIN_MS}"
+  - name: MOCK_THINK_MAX_MS
+    value: "${MOCK_THINK_MAX_MS}"
+  - name: MOCK_EXEC_MIN_MS
+    value: "${MOCK_EXEC_MIN_MS}"
+  - name: MOCK_EXEC_MAX_MS
+    value: "${MOCK_EXEC_MAX_MS}"
 resources:
   limits:
-    cpuMillicores: 1000
-    memoryBytes: 536870912
+    cpuMillicores: ${ACTOR_CPU_MILLICORES}
+    memoryBytes: ${ACTOR_MEMORY_BYTES}
 snapshotConfig:
   preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

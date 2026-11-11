@@ -15,8 +15,10 @@
 package actorstate
 
 import (
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/agent-substrate/agent-swarm/pkg/types"
@@ -78,28 +80,52 @@ func (b *Board) names() []string {
 // become UNKNOWN.
 func (b *Board) SetStatuses(statuses []Status) {
 	byName := make(map[string]Status, len(statuses))
-	names := b.names()
 	for _, s := range statuses {
-		if _, seen := byName[s.Name]; !seen {
-			names = append(names, s.Name)
-		}
 		byName[s.Name] = s
 	}
-	b.update(slices.Compact(slices.Sorted(slices.Values(names))), func(v *types.ActorView) {
-		s, ok := byName[v.ActorID]
+
+	var changed []types.ActorView
+	b.mu.Lock()
+	apply := func(name string, s Status, ok bool) {
+		old, existed := b.views[name]
+		if !existed {
+			old = types.ActorView{ActorID: name, State: types.StateUnknown}
+		}
+		v := old
 		if !ok {
 			v.State, v.StateDetail, v.WorkerPod, v.SnapshotURI, v.NeverStarted = types.StateUnknown, "not found in ateapi", "", "", false
 			v.VolumeType, v.VolumeShare, v.VolumeURI = "", "", ""
-			return
+		} else {
+			v.State, v.StateDetail, v.WorkerPod = s.State, "", s.WorkerPod
+			v.SnapshotURI = s.SnapshotURI
+			if s.InProgressSnapshotURI != "" {
+				v.SnapshotURI = s.InProgressSnapshotURI
+			}
+			v.VolumeType, v.VolumeShare, v.VolumeURI = s.VolumeType, s.VolumeShare, s.VolumeURI
+			v.NeverStarted = s.State == types.StateSuspended && s.SnapshotURI == "" && s.InProgressSnapshotURI == ""
 		}
-		v.State, v.StateDetail, v.WorkerPod = s.State, "", s.WorkerPod
-		v.SnapshotURI = s.SnapshotURI
-		if s.InProgressSnapshotURI != "" {
-			v.SnapshotURI = s.InProgressSnapshotURI
+		if !existed || v != old {
+			b.views[name] = v
+			changed = append(changed, v)
 		}
-		v.VolumeType, v.VolumeShare, v.VolumeURI = s.VolumeType, s.VolumeShare, s.VolumeURI
-		v.NeverStarted = s.State == types.StateSuspended && s.SnapshotURI == "" && s.InProgressSnapshotURI == ""
+	}
+	for name, s := range byName {
+		apply(name, s, true)
+	}
+	for name := range b.views {
+		if _, ok := byName[name]; !ok {
+			apply(name, Status{}, false)
+		}
+	}
+	slices.SortFunc(changed, func(a, b types.ActorView) int {
+		return strings.Compare(a.ActorID, b.ActorID)
 	})
+	b.pubMu.Lock()
+	b.mu.Unlock()
+	for _, v := range changed {
+		b.publish(v)
+	}
+	b.pubMu.Unlock()
 }
 
 // SetUnavailable marks every known actor's state as unreadable.
@@ -124,6 +150,28 @@ func (b *Board) Reset() {
 	b.update(b.names(), func(v *types.ActorView) { v.Activity, v.Source = types.ActivityIdle, "" })
 }
 
+// ClearUnleasedActivity resets gateway-side activity to ActivityIdle on every
+// actor that is not currently leased by a live human attendee.
+func (b *Board) ClearUnleasedActivity(isLeased func(string) bool) {
+	var targetNames []string
+	b.mu.Lock()
+	for name, v := range b.views {
+		if v.Activity == types.ActivityIdle || v.Activity == "" {
+			continue
+		}
+		if isLeased != nil && isLeased(name) {
+			continue
+		}
+		targetNames = append(targetNames, name)
+	}
+	b.mu.Unlock()
+	if len(targetNames) > 0 {
+		b.update(targetNames, func(v *types.ActorView) {
+			v.Activity = types.ActivityIdle
+		})
+	}
+}
+
 // View returns one actor's view.
 func (b *Board) View(actor string) (types.ActorView, bool) {
 	b.mu.Lock()
@@ -137,4 +185,99 @@ func (b *Board) Views() map[string]types.ActorView {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return maps.Clone(b.views)
+}
+
+// CompactFleetThreshold is the actor count above which TelemetrySnapshot emits
+// a 1-byte-per-actor FleetCompact string and prunes idle suspended actors from
+// the JSON Actors map.
+const CompactFleetThreshold = 256
+
+// EncodeBadgeCode maps an ActorView and lease status to a 5-bit compact code:
+// bits 0..3 = badge state (0..9), bit 4 (16) = leased by a live attendee.
+func EncodeBadgeCode(v types.ActorView, leased bool) byte {
+	var code byte
+	switch v.State {
+	case types.StateCrashed, types.StateUnavailable:
+		code = 8
+	default:
+		switch v.Activity {
+		case types.ActivityExecuting:
+			code = 7
+		case types.ActivityAwaitingApproval:
+			code = 6
+		case types.ActivityThinking:
+			code = 5
+		default:
+			switch v.State {
+			case types.StateSuspended:
+				if v.NeverStarted {
+					code = 0
+				} else {
+					code = 1
+				}
+			case types.StateResuming:
+				code = 2
+			case types.StateSuspending:
+				code = 3
+			case types.StateRunning:
+				code = 4
+			default:
+				code = 9
+			}
+		}
+	}
+	if leased {
+		code |= 16
+	}
+	return code
+}
+
+// TelemetrySnapshot returns the actor map and compact fleet encoding for /api/telemetry.
+func (b *Board) TelemetrySnapshot(maxActors int, isLeased func(string) bool) (actors map[string]types.ActorView, compact string, runningCount, suspendedCount int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for _, v := range b.views {
+		switch v.State {
+		case types.StateRunning:
+			runningCount++
+		case types.StateSuspended:
+			suspendedCount++
+		}
+	}
+
+	if maxActors <= CompactFleetThreshold {
+		actors = make(map[string]types.ActorView, len(b.views))
+		for k, v := range b.views {
+			if isLeased != nil && isLeased(k) {
+				v.Leased = true
+			}
+			actors[k] = v
+		}
+		return actors, "", runningCount, suspendedCount
+	}
+
+	buf := make([]byte, maxActors)
+	actors = make(map[string]types.ActorView, 256)
+	for i := 1; i <= maxActors; i++ {
+		id := fmt.Sprintf("attendee-%02d", i)
+		v, ok := b.views[id]
+		if !ok {
+			v = types.ActorView{ActorID: id, State: types.StateUnknown}
+		}
+		leased := isLeased != nil && isLeased(id)
+		v.Leased = leased
+		buf[i-1] = '@' + EncodeBadgeCode(v, leased)
+
+		isActive := v.WorkerPod != "" ||
+			v.State == types.StateRunning ||
+			v.State == types.StateResuming ||
+			v.State == types.StateSuspending ||
+			v.State == types.StateCrashed ||
+			leased
+		if ok && (isActive || i == 1) {
+			actors[id] = v
+		}
+	}
+	return actors, string(buf), runningCount, suspendedCount
 }

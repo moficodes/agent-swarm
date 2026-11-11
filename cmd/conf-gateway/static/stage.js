@@ -39,7 +39,16 @@
     workerPoolReplicas: document.getElementById('worker-pool-replicas'),
     workerPodsSeats: document.getElementById('worker-pods-seats'),
     fleetGrid: document.getElementById('fleet-grid'),
+    fleetCanvasWrap: document.getElementById('fleet-canvas-wrap'),
+    fleetCanvas: document.getElementById('fleet-canvas'),
     fleetSub: document.getElementById('fleet-sub'),
+    hoverTooltip: document.getElementById('stage-hover-tooltip'),
+    hoverTipDot: document.getElementById('hover-tip-dot'),
+    hoverTipTitle: document.getElementById('hover-tip-title'),
+    hoverTipTag: document.getElementById('hover-tip-tag'),
+    hoverTipState: document.getElementById('hover-tip-state'),
+    hoverTipMeta: document.getElementById('hover-tip-meta'),
+    hoverTipList: document.getElementById('hover-tip-list'),
     eventTicker: document.getElementById('event-ticker'),
     btnSim25: document.getElementById('btn-sim-25'),
     btnSim50: document.getElementById('btn-sim-50'),
@@ -74,6 +83,18 @@
   let lastEventSignature = '';
   let simulationActive = false;
   let simulationCount = 0;
+  let simTargetLow = 25;
+  let simTargetHigh = 50;
+  let latestActorsMap = {};
+  let latestFleetCompact = '';
+  let latestActorCount = 50;
+  let latestSeatsPerWorker = 4;
+  let latestSeatsTotal = 0;
+  let latestRunningActors = 0;
+  let latestSuspendedActors = 0;
+  let podHoverDirectory = {};
+  let canvasCols = 512;
+  let canvasRows = 128;
   let currentSpotlightActorId = null;
   let currentStreamFilter = 'all';
   let streamSearchQuery = '';
@@ -421,11 +442,22 @@
       currentAtespace = data.atespace;
     }
 
+    const seats = data.seats_per_worker > 0 ? data.seats_per_worker : 4;
+    const p = data.worker_pods || {};
+    latestActorsMap = data.actors || {};
+    latestFleetCompact = data.fleet_compact || '';
+    latestActorCount = data.actor_count || 0;
+    latestSeatsPerWorker = seats;
+    latestSeatsTotal = (p.available && p.current > 0) ? (p.current * seats) : 0;
+    latestRunningActors = data.running_actors || 0;
+    latestSuspendedActors = data.suspended_actors || 0;
+
+    updateSimulationTargets(latestActorCount, latestSeatsTotal);
+
     // 1. Update Envoy L7 Parking Meter
     updateParkingMeter(data.parked_requests || 0, data.parking_available);
 
     // 2. Update Worker Pod Cards
-    const seats = data.seats_per_worker > 0 ? data.seats_per_worker : 4;
     updateWorkerCards(data.workers || [], seats, data.worker_pods);
 
     // 3. Update Attendee Fleet Badges
@@ -500,11 +532,18 @@
 
     el.parkingCount.textContent = parkedCount;
 
-    // Compute progress gauge bar (0 to 50 scale)
-    const maxScale = 50;
+    // Compute progress gauge bar
+    const maxScale = latestSeatsTotal > 50 ? Math.min(4096, latestSeatsTotal) : 50;
     const pct = Math.min(100, Math.max(0, Math.round((parkedCount / maxScale) * 100)));
     if (el.parkingProgressBar) {
       el.parkingProgressBar.style.width = pct + '%';
+    }
+    const markers = el.parkingMeter ? el.parkingMeter.querySelectorAll('.gauge-markers span') : null;
+    if (markers && markers.length === 4) {
+      markers[0].textContent = '0';
+      markers[1].textContent = String(Math.round(maxScale * 0.2));
+      markers[2].textContent = String(Math.round(maxScale * 0.5));
+      markers[3].textContent = maxScale.toLocaleString() + ' MAX';
     }
 
     if (parkedCount > 0) {
@@ -543,6 +582,116 @@
       el.workspaceBound.textContent = showSub ? summary.sub : '';
       el.workspaceBound.className = 'spec-note' + (summary.configured ? ' spec-note-cyan' : '');
     }
+  }
+
+  const BADGE_PRIORITY = {
+    problem: 8,
+    executing: 7,
+    awaiting: 6,
+    thinking: 5,
+    running: 4,
+    resuming: 3,
+    suspending: 2,
+    suspended: 1,
+    'never-started': 0,
+    unknown: 0
+  };
+
+  function actorBadgeForWorkerActor(wa) {
+    if (!wa) return null;
+    const full = latestActorsMap[wa.actor_id];
+    if (full) {
+      return window.ActorView.badge(full);
+    }
+    return window.ActorView.badge({ state: wa.state });
+  }
+
+  function dominantPodClass(actors) {
+    if (!actors || actors.length === 0) return 'empty';
+    let bestCls = 'running';
+    let bestRank = -1;
+    for (let i = 0; i < actors.length; i++) {
+      const b = actorBadgeForWorkerActor(actors[i]);
+      const cls = b ? b.cls : 'running';
+      const rank = BADGE_PRIORITY[cls] !== undefined ? BADGE_PRIORITY[cls] : 1;
+      if (rank > bestRank) {
+        bestRank = rank;
+        bestCls = cls;
+      }
+    }
+    return bestCls;
+  }
+
+  function render4x4SeatWorkerCardHTML(w, seats) {
+    const actors = w.actors || [];
+    const podName = w.pod_name || 'worker';
+    const shortPod = podName.split('-').slice(-2).join('-');
+    const isBusy = actors.length > 0;
+    const cells = [];
+    for (let i = 0; i < seats; i++) {
+      const wa = actors[i];
+      if (!wa) {
+        cells.push(
+          `<div class="seat-cell empty" data-hover-kind="seat" data-pod="${escapeHTML(podName)}" data-seat="${i + 1}">·</div>`
+        );
+      } else {
+        const b = actorBadgeForWorkerActor(wa);
+        const cls = b ? b.cls : 'running';
+        const numMatch = (wa.actor_id || '').match(/(\d+)$/);
+        const shortNum = numMatch ? numMatch[1] : '•';
+        cells.push(
+          `<div class="seat-cell ${cls}" data-hover-kind="seat" data-pod="${escapeHTML(podName)}" data-seat="${i + 1}" data-actor="${escapeHTML(wa.actor_id || '')}">${escapeHTML(shortNum.slice(-3))}</div>`
+        );
+      }
+    }
+    return `
+      <div class="card worker-card${isBusy ? ' active' : ''}">
+        <div class="worker-card-header">
+          <div class="worker-id">
+            <span class="worker-dot${isBusy ? ' active' : ''}"></span>
+            <span class="worker-title" title="${escapeHTML(podName)}">${escapeHTML(shortPod)}</span>
+          </div>
+          <span class="worker-seat-count${actors.length >= seats ? ' full' : ''}">${actors.length}/${seats}</span>
+        </div>
+        <div class="seat-grid-4x4">${cells.join('')}</div>
+      </div>
+    `;
+  }
+
+  function renderNodeMatrixCardHTML(nodeGroup, nodeIdx, seatsPerPod) {
+    const pods = nodeGroup.pods || [];
+    const nodeName = nodeGroup.nodeName || ('node-' + String(nodeIdx + 1).padStart(2, '0'));
+    const nodeLabel = 'node-' + String(nodeIdx + 1).padStart(2, '0');
+    const totalNodeSeats = pods.length * seatsPerPod;
+    let busyNodeSeats = 0;
+    const cells = [];
+    for (let i = 0; i < 16; i++) {
+      const w = pods[i];
+      if (!w) {
+        cells.push('<div class="seat-cell empty">·</div>');
+        continue;
+      }
+      const actors = w.actors || [];
+      busyNodeSeats += actors.length;
+      const cls = dominantPodClass(actors);
+      const firstActor = actors.length > 0 ? (actors[0].actor_id || '') : '';
+      cells.push(
+        `<div class="seat-cell ${cls}" data-hover-kind="pod" data-pod="${escapeHTML(w.pod_name)}" data-node="${escapeHTML(nodeName)}" data-actor="${escapeHTML(firstActor)}">${actors.length}</div>`
+      );
+    }
+    const isBusy = busyNodeSeats > 0;
+    return `
+      <div class="card worker-card${isBusy ? ' active' : ''}">
+        <div class="worker-card-header">
+          <div class="worker-id">
+            <span class="worker-dot${isBusy ? ' active' : ''}"></span>
+            <span class="worker-title" title="GKE Node: ${escapeHTML(nodeName)} (16 pods × ${seatsPerPod} seats)">${escapeHTML(nodeLabel)}</span>
+          </div>
+          <span class="worker-seat-count${busyNodeSeats >= totalNodeSeats ? ' full' : ''}">${busyNodeSeats}/${totalNodeSeats}</span>
+        </div>
+        <div class="seat-grid-4x4">${cells.join('')}</div>
+      </div>
+    `;
   }
 
   // renderSeatHTML renders one of a worker's seats: the actor holding it and
@@ -592,6 +741,7 @@
     const podCount = (workerPods && workerPods.available && workerPods.current > 0) ? workerPods.current : 2;
     const targetCount = Math.max(2, list.length, podCount);
     const podNames = (workerPods && Array.isArray(workerPods.pod_names)) ? workerPods.pod_names : [];
+    const podNodes = (workerPods && workerPods.pod_nodes) ? workerPods.pod_nodes : {};
     const seen = new Set(list.map((w) => w.pod_name));
     for (let i = 0; i < podNames.length && list.length < targetCount; i++) {
       if (podNames[i] && !seen.has(podNames[i])) {
@@ -607,9 +757,62 @@
         list.push({ pod_name: fallbackName, actors: [] });
       }
     }
-    // One row however many workers the pool has, so the fleet grid below
-    // keeps its space; past two, cards switch to a compact layout.
+    list.sort((a, b) => (a.pod_name || '').localeCompare(b.pod_name || ''));
+
+    podHoverDirectory = {};
+    for (let i = 0; i < list.length; i++) {
+      const w = list[i];
+      podHoverDirectory[w.pod_name] = {
+        podName: w.pod_name,
+        nodeName: podNodes[w.pod_name] || '',
+        actors: w.actors || [],
+        seats: seats
+      };
+    }
+
+    // 16-Node x 16-Pod x 16-Seat high-scale cluster mode (> 16 worker pods):
+    // Group the 256 pods into 16 Node cards (2 rows x 8 columns), each with a 4x4 pod grid.
+    if (list.length > 16) {
+      const byNode = new Map();
+      const unassigned = [];
+      for (let i = 0; i < list.length; i++) {
+        const w = list[i];
+        const nName = podNodes[w.pod_name];
+        if (nName) {
+          if (!byNode.has(nName)) byNode.set(nName, []);
+          byNode.get(nName).push(w);
+        } else {
+          unassigned.push(w);
+        }
+      }
+      const nodeNames = Array.from(byNode.keys()).sort();
+      const nodeGroups = nodeNames.map((nName) => ({ nodeName: nName, pods: byNode.get(nName) }));
+      while (unassigned.length > 0) {
+        const chunk = unassigned.splice(0, 16);
+        nodeGroups.push({
+          nodeName: 'node-' + String(nodeGroups.length + 1).padStart(2, '0'),
+          pods: chunk
+        });
+      }
+      const cols = Math.min(8, Math.max(4, Math.ceil(nodeGroups.length / 2)));
+      el.workerList.classList.add('compact', 'node-matrix-grid');
+      el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+      el.workerList.innerHTML = nodeGroups.slice(0, 16).map((g, i) => renderNodeMatrixCardHTML(g, i, seats)).join('');
+      return;
+    }
+
+    // Up to 16 worker pods, each with 16 actor seats (4x4 seat matrix per pod card):
+    if (seats === 16) {
+      const cols = list.length > 8 ? 8 : list.length;
+      el.workerList.classList.add('compact', 'node-matrix-grid');
+      el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+      el.workerList.innerHTML = list.map((w) => render4x4SeatWorkerCardHTML(w, seats)).join('');
+      return;
+    }
+
+    // Standard mode (2..16 worker pods with list-based seat rows):
     const compact = list.length > 2;
+    el.workerList.classList.remove('node-matrix-grid');
     el.workerList.classList.toggle('compact', compact);
     el.workerList.style.gridTemplateColumns = 'repeat(' + list.length + ', minmax(0, 1fr))';
     el.workerList.innerHTML = list.map((w) => renderWorkerCardHTML(w, seats, compact)).join('');
@@ -624,10 +827,140 @@
     return id;
   }
 
+  const CANVAS_COLORS_DARK = [
+    '#1e293b', // 0: never-started
+    '#0284c7', // 1: suspended (snapshot saved)
+    '#00ffcc', // 2: resuming
+    '#00ffcc', // 3: suspending
+    '#10b981', // 4: running
+    '#ec4899', // 5: thinking
+    '#a855f7', // 6: awaiting approval
+    '#f59e0b', // 7: executing
+    '#ef4444', // 8: problem
+    '#334155'  // 9: unknown
+  ];
+
+  const CANVAS_COLORS_LIGHT = [
+    '#e2e8f0', // 0: never-started
+    '#38bdf8', // 1: suspended (snapshot saved)
+    '#0284c7', // 2: resuming
+    '#0284c7', // 3: suspending
+    '#059669', // 4: running
+    '#db2777', // 5: thinking
+    '#7c3aed', // 6: awaiting approval
+    '#d97706', // 7: executing
+    '#dc2626', // 8: problem
+    '#cbd5e1'  // 9: unknown
+  ];
+
+  let hoveredCanvasIndex = -1;
+
+  function computeCanvasDims(total) {
+    if (total === 65536) {
+      return { cols: 512, rows: 128 };
+    }
+    const cols = Math.max(32, Math.ceil(Math.sqrt(total * 3.5)));
+    const rows = Math.max(8, Math.ceil(total / cols));
+    return { cols: cols, rows: rows };
+  }
+
+  function renderFleetCanvas(compactStr, totalActors) {
+    if (!el.fleetCanvas || !compactStr) return;
+    const total = totalActors > 0 ? totalActors : compactStr.length;
+    const dims = computeCanvasDims(total);
+    canvasCols = dims.cols;
+    canvasRows = dims.rows;
+
+    const rect = el.fleetCanvas.getBoundingClientRect();
+    const cssW = Math.max(320, Math.floor(rect.width || 1024));
+    const cssH = Math.max(140, Math.floor(rect.height || 280));
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const targetW = Math.floor(cssW * dpr);
+    const targetH = Math.floor(cssH * dpr);
+    if (el.fleetCanvas.width !== targetW || el.fleetCanvas.height !== targetH) {
+      el.fleetCanvas.width = targetW;
+      el.fleetCanvas.height = targetH;
+    }
+
+    const ctx = el.fleetCanvas.getContext('2d');
+    if (!ctx) return;
+    const isLight = window.ActorView.getTheme && window.ActorView.getTheme() === 'light';
+    const palette = isLight ? CANVAS_COLORS_LIGHT : CANVAS_COLORS_DARK;
+
+    ctx.clearRect(0, 0, targetW, targetH);
+
+    const cellW = targetW / canvasCols;
+    const cellH = targetH / canvasRows;
+    const gapX = cellW >= 3 ? 0.65 * dpr : 0;
+    const gapY = cellH >= 3 ? 0.65 * dpr : 0;
+    const dotW = Math.max(1, cellW - gapX);
+    const dotH = Math.max(1, cellH - gapY);
+
+    let snapshottedCount = 0;
+    let activeCount = 0;
+    let leasedCount = 0;
+
+    for (let i = 0; i < total && i < compactStr.length; i++) {
+      const raw = compactStr.charCodeAt(i) - 64;
+      const code = raw & 15;
+      const leased = (raw & 16) !== 0;
+      if (code === 1) snapshottedCount++;
+      else if (code >= 2 && code <= 8) activeCount++;
+      if (leased) leasedCount++;
+
+      const r = Math.floor(i / canvasCols);
+      const c = i % canvasCols;
+      const x = c * cellW;
+      const y = r * cellH;
+
+      ctx.fillStyle = palette[code] || palette[9];
+      ctx.fillRect(x, y, dotW, dotH);
+
+      if (leased) {
+        ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
+        ctx.lineWidth = Math.max(1, 1.2 * dpr);
+        ctx.strokeRect(x - 0.5, y - 0.5, dotW + 1, dotH + 1);
+      }
+    }
+
+    if (hoveredCanvasIndex >= 1 && hoveredCanvasIndex <= total) {
+      const idx0 = hoveredCanvasIndex - 1;
+      const hr = Math.floor(idx0 / canvasCols);
+      const hc = idx0 % canvasCols;
+      const hx = hc * cellW;
+      const hy = hr * cellH;
+      ctx.strokeStyle = isLight ? '#0f172a' : '#00ffcc';
+      ctx.lineWidth = Math.max(1.5, 1.8 * dpr);
+      ctx.strokeRect(hx - 1, hy - 1, dotW + 2, dotH + 2);
+    }
+
+    if (el.fleetSub) {
+      const leaseNote = leasedCount > 0 ? (' · ' + leasedCount + ' live QR lease' + (leasedCount === 1 ? '' : 's')) : ' · every 16th slot QR-reservable';
+      el.fleetSub.textContent =
+        total.toLocaleString() + ' actors (' + canvasCols + '×' + canvasRows + ' matrix) · ' +
+        activeCount.toLocaleString() + ' active · ' +
+        snapshottedCount.toLocaleString() + ' suspended' + leaseNote;
+    }
+  }
+
   // renderFleetGrid draws one badge per actor the gateway reports, in ID
-  // order, and drops badges for actors it no longer reports.
+  // order, and drops badges for actors it no longer reports. When the gateway
+  // sends fleet_compact (>256 actors), it renders the high-density canvas matrix.
   function renderFleetGrid(actorsMap) {
     if (!el.fleetGrid) return;
+    if (latestFleetCompact && latestFleetCompact.length > 256) {
+      el.fleetGrid.hidden = true;
+      if (el.fleetCanvasWrap) {
+        el.fleetCanvasWrap.hidden = false;
+      }
+      renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+      return;
+    }
+
+    el.fleetGrid.hidden = false;
+    if (el.fleetCanvasWrap) {
+      el.fleetCanvasWrap.hidden = true;
+    }
     const actors = actorsMap || {};
     const ids = window.ActorView.fleetIDs(actors);
     if (el.fleetSub && ids.length > 0) {
@@ -934,18 +1267,42 @@
     }
   }
 
+  function setSimButtonLabel(btn, count) {
+    if (!btn) return;
+    const label = 'Simulate ' + count.toLocaleString();
+    const textNodes = Array.from(btn.childNodes).filter((n) => n.nodeType === Node.TEXT_NODE);
+    if (textNodes.length > 0) {
+      textNodes[textNodes.length - 1].nodeValue = ' ' + label;
+    } else {
+      btn.textContent = label;
+    }
+  }
+
+  function updateSimulationTargets(actorCount, seatsTotal) {
+    if (actorCount > 100) {
+      simTargetLow = seatsTotal > 0 ? Math.min(actorCount, seatsTotal) : Math.max(256, Math.round(actorCount / 16));
+      simTargetHigh = actorCount;
+    } else {
+      simTargetLow = 25;
+      simTargetHigh = 50;
+    }
+    setSimButtonLabel(el.btnSim25, simTargetLow);
+    setSimButtonLabel(el.btnSim50, simTargetHigh);
+    updateSimulationUI();
+  }
+
   function updateSimulationUI() {
     if (simulationActive) {
       if (el.btnSimStop) el.btnSimStop.style.display = 'inline-flex';
       if (el.btnSim25) {
-        if (simulationCount === 25) {
+        if (simulationCount === simTargetLow) {
           el.btnSim25.classList.add('active');
         } else {
           el.btnSim25.classList.remove('active');
         }
       }
       if (el.btnSim50) {
-        if (simulationCount === 50) {
+        if (simulationCount === simTargetHigh) {
           el.btnSim50.classList.add('active');
         } else {
           el.btnSim50.classList.remove('active');
@@ -960,8 +1317,8 @@
 
   async function startSimulation(count) {
     try {
-      if (count === 25 && el.btnSim25) el.btnSim25.classList.add('active');
-      if (count === 50 && el.btnSim50) el.btnSim50.classList.add('active');
+      if (count === simTargetLow && el.btnSim25) el.btnSim25.classList.add('active');
+      if (count === simTargetHigh && el.btnSim50) el.btnSim50.classList.add('active');
       const resp = await fetch('/api/simulation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1382,15 +1739,94 @@
     }
   }
 
+  function positionHoverTooltip(clientX, clientY) {
+    if (!el.hoverTooltip || el.hoverTooltip.hidden) return;
+    const pad = 14;
+    const vw = window.innerWidth || 1280;
+    const vh = window.innerHeight || 720;
+    const rect = el.hoverTooltip.getBoundingClientRect();
+    let x = clientX + pad;
+    let y = clientY + pad;
+    if (x + rect.width + 12 > vw) {
+      x = Math.max(8, clientX - rect.width - pad);
+    }
+    if (y + rect.height + 12 > vh) {
+      y = Math.max(8, clientY - rect.height - pad);
+    }
+    el.hoverTooltip.style.left = x + 'px';
+    el.hoverTooltip.style.top = y + 'px';
+  }
+
+  function showHoverTooltip(opts, clientX, clientY) {
+    if (!el.hoverTooltip) return;
+    el.hoverTipDot.className = 'hover-tip-dot ' + (opts.cls || '');
+    el.hoverTipTitle.textContent = opts.title || '';
+    if (opts.tag) {
+      el.hoverTipTag.hidden = false;
+      el.hoverTipTag.textContent = opts.tag;
+    } else {
+      el.hoverTipTag.hidden = true;
+      el.hoverTipTag.textContent = '';
+    }
+    el.hoverTipState.textContent = opts.state || '';
+    el.hoverTipMeta.textContent = opts.meta || '';
+    if (Array.isArray(opts.items) && opts.items.length > 0) {
+      el.hoverTipList.hidden = false;
+      el.hoverTipList.replaceChildren();
+      const maxItems = Math.min(opts.items.length, 6);
+      for (let i = 0; i < maxItems; i++) {
+        const row = document.createElement('div');
+        row.textContent = opts.items[i];
+        el.hoverTipList.appendChild(row);
+      }
+      if (opts.items.length > maxItems) {
+        const more = document.createElement('div');
+        more.textContent = '+' + (opts.items.length - maxItems) + ' more active seats';
+        el.hoverTipList.appendChild(more);
+      }
+    } else {
+      el.hoverTipList.hidden = true;
+      el.hoverTipList.replaceChildren();
+    }
+    el.hoverTooltip.hidden = false;
+    positionHoverTooltip(clientX, clientY);
+  }
+
+  function hideHoverTooltip() {
+    if (el.hoverTooltip) {
+      el.hoverTooltip.hidden = true;
+    }
+    if (hoveredCanvasIndex !== -1) {
+      hoveredCanvasIndex = -1;
+      if (latestFleetCompact && latestFleetCompact.length > 256) {
+        renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+      }
+    }
+  }
+
+  function actorIndexFromCanvasEvent(e) {
+    if (!el.fleetCanvas || !latestFleetCompact) return -1;
+    const rect = el.fleetCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return -1;
+    const relX = Math.max(0, Math.min(rect.width - 0.01, e.clientX - rect.left));
+    const relY = Math.max(0, Math.min(rect.height - 0.01, e.clientY - rect.top));
+    const col = Math.floor((relX / rect.width) * canvasCols);
+    const row = Math.floor((relY / rect.height) * canvasRows);
+    const idx = row * canvasCols + col + 1;
+    const total = latestActorCount || latestFleetCompact.length;
+    if (idx < 1 || idx > total) return -1;
+    return idx;
+  }
+
   function initControls() {
     if (el.btnSim25) {
       el.btnSim25.addEventListener('click', function() {
-        startSimulation(25);
+        startSimulation(simTargetLow);
       });
     }
     if (el.btnSim50) {
       el.btnSim50.addEventListener('click', function() {
-        startSimulation(50);
+        startSimulation(simTargetHigh);
       });
     }
     if (el.btnSimStop) {
@@ -1508,6 +1944,106 @@
           if (actorId) {
             openSpotlightDrawer(actorId);
           }
+        }
+      });
+    }
+
+    if (el.workerList) {
+      el.workerList.addEventListener('mousemove', function(e) {
+        const cell = e.target.closest('.seat-cell');
+        if (!cell) {
+          hideHoverTooltip();
+          return;
+        }
+        const kind = cell.dataset.hoverKind;
+        const podName = cell.dataset.pod || '';
+        if (kind === 'pod' && podName) {
+          const info = podHoverDirectory[podName] || { podName: podName, nodeName: cell.dataset.node || '', actors: [], seats: latestSeatsPerWorker };
+          const actors = info.actors || [];
+          const cls = dominantPodClass(actors);
+          const items = actors.map((wa) => {
+            const b = actorBadgeForWorkerActor(wa);
+            return formatActorName(wa.actor_id) + ' — ' + (b ? b.label : wa.state);
+          });
+          showHoverTooltip({
+            cls: cls,
+            title: podName,
+            tag: actors.length + '/' + info.seats + ' SEATS',
+            state: actors.length > 0 ? (actors.length + ' active actor' + (actors.length === 1 ? '' : 's') + ' on pod') : 'All 16 actor seats idle',
+            meta: info.nodeName ? ('GKE Node: ' + info.nodeName) : 'Worker Pod (4×4 actor seats)',
+            items: items
+          }, e.clientX, e.clientY);
+        } else if (kind === 'seat') {
+          const seatNum = cell.dataset.seat || '1';
+          const actorId = cell.dataset.actor || '';
+          if (actorId) {
+            const view = latestActorsMap[actorId] || { actor_id: actorId, state: 'RUNNING', worker_pod: podName };
+            const b = window.ActorView.badge(view);
+            showHoverTooltip({
+              cls: b.cls,
+              title: formatActorName(actorId) + ' (' + actorId + ')',
+              tag: 'SEAT ' + seatNum + '/16',
+              state: b.sub ? (b.label + ' · ' + b.sub) : b.label,
+              meta: 'Worker Pod: ' + podName
+            }, e.clientX, e.clientY);
+          } else {
+            showHoverTooltip({
+              cls: 'never-started',
+              title: 'Seat ' + seatNum + ' of 16',
+              tag: 'IDLE',
+              state: 'Available execution seat',
+              meta: 'Worker Pod: ' + podName
+            }, e.clientX, e.clientY);
+          }
+        }
+      });
+      el.workerList.addEventListener('mouseleave', hideHoverTooltip);
+      el.workerList.addEventListener('click', function(e) {
+        const cell = e.target.closest('.seat-cell');
+        if (cell && cell.dataset.actor) {
+          openSpotlightDrawer(cell.dataset.actor);
+        }
+      });
+    }
+
+    if (el.fleetCanvas) {
+      el.fleetCanvas.addEventListener('mousemove', function(e) {
+        const idx = actorIndexFromCanvasEvent(e);
+        if (idx < 1) {
+          hideHoverTooltip();
+          return;
+        }
+        if (hoveredCanvasIndex !== idx) {
+          hoveredCanvasIndex = idx;
+          renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+        }
+        const actorId = 'attendee-' + String(idx).padStart(2, '0');
+        const decoded = window.ActorView.decodeCompactBadge(latestFleetCompact.charCodeAt(idx - 1));
+        const liveView = latestActorsMap[actorId];
+        const b = liveView ? window.ActorView.badge(liveView) : decoded;
+        const leased = (liveView && liveView.leased) || decoded.leased;
+        const isReservable = (idx % 16 === 0);
+        const tag = leased ? 'LIVE QR LEASE' : (isReservable ? 'QR SLOT (16x)' : ('#' + idx));
+        const pod = (liveView && liveView.worker_pod) ? ('Worker Pod: ' + liveView.worker_pod) : (isReservable ? 'Reserved for live QR scan · click to inspect' : 'Click dot to open Actor Spotlight');
+        showHoverTooltip({
+          cls: b.cls,
+          title: formatActorName(actorId) + ' (' + actorId + ')',
+          tag: tag,
+          state: b.sub ? (b.label + ' · ' + b.sub) : b.label,
+          meta: pod
+        }, e.clientX, e.clientY);
+      });
+      el.fleetCanvas.addEventListener('mouseleave', hideHoverTooltip);
+      el.fleetCanvas.addEventListener('click', function(e) {
+        const idx = actorIndexFromCanvasEvent(e);
+        if (idx >= 1) {
+          const actorId = 'attendee-' + String(idx).padStart(2, '0');
+          openSpotlightDrawer(actorId);
+        }
+      });
+      window.addEventListener('resize', function() {
+        if (latestFleetCompact && latestFleetCompact.length > 256) {
+          renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
         }
       });
     }

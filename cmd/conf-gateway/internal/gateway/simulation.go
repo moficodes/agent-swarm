@@ -38,6 +38,12 @@ func WithSimulationDelays(readingDelay, loopDelay time.Duration) SimulationOptio
 	return simulation.WithSimulationDelays(readingDelay, loopDelay)
 }
 
+// WithDataGeneratorExecutor configures SimulationRunner to drive turns through
+// an external data-generator orchestrator and worker fleet.
+func WithDataGeneratorExecutor(orchestratorURL, callbackTurnURL, presenterKey string) SimulationOption {
+	return simulation.WithDataGenerator(orchestratorURL, callbackTurnURL, presenterKey)
+}
+
 // NewSimulationRunner constructs a SimulationRunner bound to the provided Gateway.
 func NewSimulationRunner(gw *Gateway, opts ...SimulationOption) *SimulationRunner {
 	var t simulation.Target
@@ -45,6 +51,19 @@ func NewSimulationRunner(gw *Gateway, opts ...SimulationOption) *SimulationRunne
 		t = gw
 	}
 	return simulation.NewRunner(t, opts...)
+}
+
+func (g *Gateway) handleSimulationTurn(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/simulation/turn" {
+		http.NotFound(w, r)
+		return
+	}
+	sr := g.SimulationRunner()
+	if sr == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	sr.HandleTurn(w, r)
 }
 
 // SetSimulationController attaches an active simulation controller to the gateway.

@@ -32,7 +32,7 @@ func Poll(ctx context.Context, c ActorControl, interval time.Duration, b *Board,
 	var lastErr string
 	for {
 		start := time.Now()
-		pollCtx, cancel := context.WithTimeout(ctx, max(interval*5, 5*time.Second))
+		pollCtx, cancel := context.WithTimeout(ctx, max(interval*20, 45*time.Second))
 		statuses, err := c.List(pollCtx)
 		cancel()
 		if ctx.Err() != nil {

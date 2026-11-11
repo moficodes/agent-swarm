@@ -117,14 +117,46 @@ func TestActorView_BadgeLeadsWithActivity(t *testing.T) {
 }
 
 func TestActorView_FleetIDsAreTheReportedActorsInOrder(t *testing.T) {
-	actors := map[string]any{"attendee-10": map[string]any{}, "attendee-02": map[string]any{}, "attendee-01": map[string]any{}}
+	actors := map[string]any{
+		"attendee-100": map[string]any{},
+		"attendee-20":  map[string]any{},
+		"attendee-10":  map[string]any{},
+		"attendee-02":  map[string]any{},
+		"attendee-01":  map[string]any{},
+	}
 	var got [][]string
 	runActorView(t, "fleetIDs", []any{actors, nil}, &got)
-	if want := []string{"attendee-01", "attendee-02", "attendee-10"}; !reflect.DeepEqual(got[0], want) {
+	if want := []string{"attendee-01", "attendee-02", "attendee-10", "attendee-20", "attendee-100"}; !reflect.DeepEqual(got[0], want) {
 		t.Errorf("fleetIDs = %v, want %v", got[0], want)
 	}
 	if len(got[1]) != 0 {
 		t.Errorf("fleetIDs(null) = %v, want none", got[1])
+	}
+}
+
+type compactBadge struct {
+	Code   int    `json:"code"`
+	Leased bool   `json:"leased"`
+	Label  string `json:"label"`
+	Sub    string `json:"sub"`
+	Cls    string `json:"cls"`
+}
+
+func TestActorView_DecodeCompactBadge(t *testing.T) {
+	var got []compactBadge
+	// '@' + 0 (Never started), '@' + 5 (Thinking), '@' + (4 | 16) (Running + leased)
+	runActorView(t, "decodeCompactBadge", []any{64, 64 + 5, 64 + 4 + 16}, &got)
+	if len(got) != 3 {
+		t.Fatalf("len(got) = %d, want 3", len(got))
+	}
+	if got[0].Cls != "never-started" || got[0].Leased {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+	if got[1].Cls != "thinking" || got[1].Leased {
+		t.Errorf("got[1] = %+v", got[1])
+	}
+	if got[2].Cls != "running" || !got[2].Leased {
+		t.Errorf("got[2] = %+v", got[2])
 	}
 }
 
