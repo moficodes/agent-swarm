@@ -124,9 +124,9 @@ func targetMPSForCount(count int) int {
 	case count <= 256:
 		return 25
 	case count <= 4096:
-		return 96
-	default:
 		return 160
+	default:
+		return 240
 	}
 }
 

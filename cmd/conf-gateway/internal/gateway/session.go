@@ -47,6 +47,31 @@ func (g *Gateway) IsLeased(attendeeID string) bool {
 	return ok && time.Now().Before(until)
 }
 
+// leasedChecker returns a lock-free predicate reporting which attendee slots
+// currently hold an active human lease, safe to pass into Board and Proxy leaf
+// methods without acquiring g.mu under their locks.
+func (g *Gateway) leasedChecker() func(string) bool {
+	g.mu.RLock()
+	if len(g.leasedUntil) == 0 {
+		g.mu.RUnlock()
+		return nil
+	}
+	now := time.Now()
+	snap := make(map[string]bool, len(g.leasedUntil))
+	for id, until := range g.leasedUntil {
+		if now.Before(until) {
+			snap[id] = true
+		}
+	}
+	g.mu.RUnlock()
+	if len(snap) == 0 {
+		return nil
+	}
+	return func(id string) bool {
+		return snap[id]
+	}
+}
+
 // IsReservedForHuman reports whether the background simulation should skip this slot.
 func (g *Gateway) IsReservedForHuman(attendeeID string, slotIndex int) bool {
 	if g.maxActors > actorstate.CompactFleetThreshold && slotIndex%16 == 0 {

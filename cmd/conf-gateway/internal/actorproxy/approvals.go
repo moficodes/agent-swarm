@@ -74,6 +74,19 @@ func (a *approvals) ResetPending() {
 	a.pending = make(map[string]*types.ApprovalRequest)
 }
 
+// ClearUnleasedPending forgets pending approvals for every attendee that is
+// not currently leased by a live human attendee.
+func (a *approvals) ClearUnleasedPending(isLeased func(string) bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for name := range a.pending {
+		if isLeased != nil && isLeased(name) {
+			continue
+		}
+		delete(a.pending, name)
+	}
+}
+
 // ClaimApproval binds an approval decision to the approval this attendee was
 // last shown. On success it rewrites r.Body to carry the proposed code, never
 // code supplied by the client, and marks the approval in flight until release

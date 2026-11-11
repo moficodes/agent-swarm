@@ -435,8 +435,24 @@ conf_build_gateway() {
 
 conf_render() {
   local seats="${DEMO_CONF_ACTORS_PER_WORKER}"
-  local actor_cpu="${DEMO_CONF_ACTOR_CPU_MILLICORES:-1000}"
-  local actor_mem="${DEMO_CONF_ACTOR_MEMORY_BYTES:-536870912}"
+  local default_actor_cpu=1000
+  local default_actor_mem=536870912
+  local default_think_min=1200
+  local default_think_max=2200
+  local default_exec_min=800
+  local default_exec_max=1600
+  local default_suspend_after="2s"
+  if ((10#${DEMO_CONF_ACTORS:-50} > 256)); then
+    default_actor_cpu=100
+    default_actor_mem=134217728
+    default_think_min=9000
+    default_think_max=13000
+    default_exec_min=8000
+    default_exec_max=12000
+    default_suspend_after="3s"
+  fi
+  local actor_cpu="${DEMO_CONF_ACTOR_CPU_MILLICORES:-${default_actor_cpu}}"
+  local actor_mem="${DEMO_CONF_ACTOR_MEMORY_BYTES:-${default_actor_mem}}"
   local cpu_headroom=$((10#${actor_cpu} / 2))
   local worker_cpu_req="${DEMO_CONF_WORKER_CPU_REQUEST:-500m}"
   local worker_mem_req="${DEMO_CONF_WORKER_MEMORY_REQUEST:-$((10#${seats} * 512 + 256))Mi}"
@@ -462,10 +478,10 @@ conf_render() {
       -e "s|\${VERTEX_LOCATION}|${DEMO_CONF_VERTEX_LOCATION:-global}|g" \
       -e "s|\${DEMO_MOCK_LLM}|${DEMO_CONF_MOCK_LLM:-true}|g" \
       -e "s|\${SANDBOX_WORKSPACE}|${sandbox_workspace}|g" \
-      -e "s|\${MOCK_THINK_MIN_MS}|${DEMO_CONF_MOCK_THINK_MIN_MS:-1200}|g" \
-      -e "s|\${MOCK_THINK_MAX_MS}|${DEMO_CONF_MOCK_THINK_MAX_MS:-2200}|g" \
-      -e "s|\${MOCK_EXEC_MIN_MS}|${DEMO_CONF_MOCK_EXEC_MIN_MS:-800}|g" \
-      -e "s|\${MOCK_EXEC_MAX_MS}|${DEMO_CONF_MOCK_EXEC_MAX_MS:-1600}|g" \
+      -e "s|\${MOCK_THINK_MIN_MS}|${DEMO_CONF_MOCK_THINK_MIN_MS:-${default_think_min}}|g" \
+      -e "s|\${MOCK_THINK_MAX_MS}|${DEMO_CONF_MOCK_THINK_MAX_MS:-${default_think_max}}|g" \
+      -e "s|\${MOCK_EXEC_MIN_MS}|${DEMO_CONF_MOCK_EXEC_MIN_MS:-${default_exec_min}}|g" \
+      -e "s|\${MOCK_EXEC_MAX_MS}|${DEMO_CONF_MOCK_EXEC_MAX_MS:-${default_exec_max}}|g" \
       -e "s|\${ACTOR_COUNT}|${DEMO_CONF_ACTORS}|g" \
       -e "s|\${DEMO_DOMAIN}|${DEMO_DOMAIN:-}|g" \
       -e "s|\${TEMPLATE_REVISION}|${DEMO_CONF_TEMPLATE_REVISION}|g" \
@@ -481,7 +497,7 @@ conf_render() {
       -e "s|\${FIREBASE_API_KEY}|${FIREBASE_API_KEY:-}|g" \
       -e "s|\${CHAT_RATE_LIMIT_RPM}|${CHAT_RATE_LIMIT_RPM:-10}|g" \
       -e "s|\${SESSION_RATE_LIMIT_RPM}|${SESSION_RATE_LIMIT_RPM:-10}|g" \
-      -e "s|\${SUSPEND_AFTER}|${DEMO_CONF_SUSPEND_AFTER:-2s}|g" \
+      -e "s|\${SUSPEND_AFTER}|${DEMO_CONF_SUSPEND_AFTER:-${default_suspend_after}}|g" \
       -e "s|\${DATA_GENERATOR_URL}|${DEMO_CONF_DATA_GENERATOR_URL:-}|g" \
       -e "s|\${SIMULATION_TURN_URL}|${DEMO_CONF_SIMULATION_TURN_URL:-http://conf-gateway/api/simulation/turn}|g" \
       -e "s|\${DATAGEN_ORCHESTRATOR_IMAGE}|${DEMO_CONF_DATAGEN_ORCHESTRATOR_IMAGE:-placeholder}|g" \

@@ -169,7 +169,7 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 		t.Fatalf("Start(4096): %v", err)
 	}
 	orchMu.Lock()
-	if len(configs) != 1 || configs[0].IsPaused || configs[0].GlobalTargetMPS != 96 {
+	if len(configs) != 1 || configs[0].IsPaused || configs[0].GlobalTargetMPS != 160 {
 		t.Fatalf("orchestrator configs after Start = %+v", configs)
 	}
 	orchMu.Unlock()
@@ -319,4 +319,84 @@ func TestRunner_DataGeneratorResetOrchestrationAndHandleTurn(t *testing.T) {
 		t.Fatalf("orchestrator configs after reset completion = %+v", configs)
 	}
 	orchMu.Unlock()
+}
+
+type oversubFakeTarget struct {
+	approvalFakeTarget
+	canAcquireSeat bool
+	seeded         map[string]string
+}
+
+func (f *oversubFakeTarget) CanAcquireSimulatedSeat() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.canAcquireSeat
+}
+
+func (f *oversubFakeTarget) SeedSimulatedApproval(attendeeID, prompt string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.seeded == nil {
+		f.seeded = make(map[string]string)
+	}
+	appID := "seed-appr-" + attendeeID
+	f.seeded[attendeeID] = prompt
+	return appID
+}
+
+func TestRunner_OversubscribedCohortSeedingAndSeatBackpressure(t *testing.T) {
+	orchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer orchSrv.Close()
+
+	target := &oversubFakeTarget{
+		approvalFakeTarget: approvalFakeTarget{ctx: context.Background()},
+		canAcquireSeat:     false,
+	}
+	r := NewRunner(target,
+		WithSimulationDelays(10*time.Millisecond, 10*time.Millisecond),
+		WithDataGenerator(orchSrv.URL, "http://conf-gateway/api/simulation/turn", "test-key"),
+	)
+
+	if err := r.Start(4096); err != nil {
+		t.Fatalf("Start(4096): %v", err)
+	}
+	defer r.Stop()
+
+	// Even when physical seats are full (canAcquireSeat == false), HandleTurn
+	// must onboard a batch of oversubscribed actors into AwaitingApproval.
+	req := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{}`)))
+	rec := httptest.NewRecorder()
+	r.HandleTurn(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleTurn during onboarding status = %d, want 200", rec.Code)
+	}
+
+	target.mu.Lock()
+	seededCount := len(target.seeded)
+	chatCount := len(target.chats)
+	target.canAcquireSeat = true
+	target.mu.Unlock()
+
+	if seededCount != 64 {
+		t.Fatalf("seededCount = %d, want 64", seededCount)
+	}
+	if chatCount != 0 {
+		t.Fatalf("chatCount while seat-blocked = %d, want 0", chatCount)
+	}
+
+	// Once seat headroom opens up, HandleTurn both seeds and dispatches a live container turn.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{}`)))
+	rec2 := httptest.NewRecorder()
+	r.HandleTurn(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second HandleTurn status = %d, want 200", rec2.Code)
+	}
+
+	target.mu.Lock()
+	if len(target.chats) != 1 {
+		t.Fatalf("chatCount after seat opened = %d, want 1", len(target.chats))
+	}
+	target.mu.Unlock()
 }

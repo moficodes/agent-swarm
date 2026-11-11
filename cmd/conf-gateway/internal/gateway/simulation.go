@@ -21,8 +21,77 @@ import (
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/simulation"
+	"github.com/agent-substrate/agent-swarm/internal/workload/engine"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
+
+var simMockEngine = engine.NewMockEngine()
+
+// CanAcquireSimulatedSeat reports whether the worker pool has available seat
+// headroom for a simulated container turn. It reserves a small cushion for
+// live human attendees and in-flight checkpoint drains so simulated bursts can
+// pack pods to 13-16 seats/pod without triggering no-capacity errors.
+func (g *Gateway) CanAcquireSimulatedSeat() bool {
+	if g.maxActors <= 256 {
+		return true
+	}
+	totalSeats := 4096
+	if p := g.workerPods.Load(); p != nil && p.Available && p.Current > 0 && g.seatsPerWorker > 0 {
+		totalSeats = p.Current * g.seatsPerWorker
+	}
+	reserve := max(400, totalSeats/9)
+	maxSimSeats := max(1, totalSeats-reserve)
+
+	g.mu.RLock()
+	localCommitted := len(g.turnsInFlight) + len(g.suspendTimers) + len(g.suspendsInFlight)
+	g.mu.RUnlock()
+	if localCommitted >= maxSimSeats {
+		return false
+	}
+	if g.board != nil && g.board.ActiveSeatCount() >= maxSimSeats {
+		return false
+	}
+	return true
+}
+
+// SeedSimulatedApproval populates a checkpointed actor's human-in-the-loop
+// review state (chat history, pending approval, and AwaitingApproval activity)
+// while its memory snapshot rests in GCS during the 80-90% idle review window.
+func (g *Gateway) SeedSimulatedApproval(attendeeID, prompt string) string {
+	if g.IsLeased(attendeeID) {
+		return ""
+	}
+	msg := simMockEngine.GenerateTurn(prompt)
+	if msg == nil || msg.Approval == nil {
+		return ""
+	}
+	msg.Source = types.SourceMock
+	now := time.Now().Unix()
+	userMsg := types.ChatMessage{
+		ID:        fmt.Sprintf("user-seed-%s-%d", attendeeID, now),
+		Sender:    types.SenderUser,
+		Content:   prompt,
+		Timestamp: now,
+	}
+
+	g.mu.Lock()
+	if len(g.chatHistories[attendeeID]) == 0 {
+		g.appendChatHistoryLocked(attendeeID, userMsg)
+		g.appendChatHistoryLocked(attendeeID, *msg)
+	}
+	if g.proxy != nil {
+		g.proxy.SetPending(attendeeID, msg.Approval)
+	}
+	g.mu.Unlock()
+
+	if g.board != nil {
+		g.board.SeedSimulatedActivity(attendeeID, types.ActivityAwaitingApproval, types.SourceMock)
+		if g.control == nil {
+			g.board.SetUnavailable(localModeReason)
+		}
+	}
+	return msg.Approval.ApprovalID
+}
 
 // SimulationController defines the interface for managing background audience simulations.
 type SimulationController = simulation.SimulationController

@@ -145,6 +145,14 @@ func (b *Board) SetSource(actor string, s types.ReplySource) {
 	b.update([]string{actor}, func(v *types.ActorView) { v.Source = s })
 }
 
+// SeedSimulatedActivity records both activity and reply source in a single board update.
+func (b *Board) SeedSimulatedActivity(actor string, a types.Activity, s types.ReplySource) {
+	b.update([]string{actor}, func(v *types.ActorView) {
+		v.Activity = a
+		v.Source = s
+	})
+}
+
 // Reset clears gateway-side activity and reply source on every actor.
 func (b *Board) Reset() {
 	b.update(b.names(), func(v *types.ActorView) { v.Activity, v.Source = types.ActivityIdle, "" })
@@ -185,6 +193,20 @@ func (b *Board) Views() map[string]types.ActorView {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return maps.Clone(b.views)
+}
+
+// ActiveSeatCount returns the number of actors currently occupying or
+// transitioning on a worker pod seat according to the board's latest view.
+func (b *Board) ActiveSeatCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	count := 0
+	for _, v := range b.views {
+		if v.WorkerPod != "" || v.State == types.StateRunning || v.State == types.StateResuming || v.State == types.StateSuspending {
+			count++
+		}
+	}
+	return count
 }
 
 // CompactFleetThreshold is the actor count above which TelemetrySnapshot emits

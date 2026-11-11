@@ -72,7 +72,7 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		pods = *p
 	}
 
-	views, fleetCompact, runningActors, suspendedActors := g.board.TelemetrySnapshot(g.maxActors, g.IsLeased)
+	views, fleetCompact, runningActors, suspendedActors := g.board.TelemetrySnapshot(g.maxActors, g.leasedChecker())
 	names := slices.Sorted(maps.Keys(views))
 	var workers []types.WorkerStatus
 	podIndex := make(map[string]int)
@@ -97,6 +97,28 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			workers = append(workers, types.WorkerStatus{PodName: v.WorkerPod})
 		}
 		workers[i].Actors = append(workers[i].Actors, types.WorkerActor{ActorID: v.ActorID, State: v.State})
+	}
+	if g.maxActors > 256 && g.seatsPerWorker > 0 {
+		seatPriority := func(s types.SubstrateState) int {
+			switch s {
+			case types.StateRunning:
+				return 0
+			case types.StateResuming:
+				return 1
+			case types.StateSuspending:
+				return 2
+			default:
+				return 3
+			}
+		}
+		for i := range workers {
+			if len(workers[i].Actors) > g.seatsPerWorker {
+				slices.SortStableFunc(workers[i].Actors, func(a, b types.WorkerActor) int {
+					return seatPriority(a.State) - seatPriority(b.State)
+				})
+				workers[i].Actors = workers[i].Actors[:g.seatsPerWorker]
+			}
+		}
 	}
 	slices.SortFunc(workers, func(a, b types.WorkerStatus) int { return strings.Compare(a.PodName, b.PodName) })
 
