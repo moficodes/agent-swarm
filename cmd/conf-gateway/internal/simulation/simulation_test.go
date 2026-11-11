@@ -218,3 +218,105 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 	orchMu.Unlock()
 }
+
+type resetFakeTarget struct {
+	approvalFakeTarget
+	reverted        []string
+	suspended       []string
+	completed       bool
+	doneSuspended   int
+	doneReverted    int
+	doneErrors      int
+}
+
+func (f *resetFakeTarget) SuspendActorForReset(_ context.Context, attendeeID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.suspended = append(f.suspended, attendeeID)
+	return nil
+}
+
+func (f *resetFakeTarget) RevertActorForReset(_ context.Context, attendeeID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reverted = append(f.reverted, attendeeID)
+	return nil
+}
+
+func (f *resetFakeTarget) ActiveActorsForReset() ([]string, []string) {
+	return nil, nil
+}
+
+func (f *resetFakeTarget) OnResetComplete(suspended, reverted, errs int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.completed = true
+	f.doneSuspended = suspended
+	f.doneReverted = reverted
+	f.doneErrors = errs
+}
+
+func TestRunner_DataGeneratorResetOrchestrationAndHandleTurn(t *testing.T) {
+	var orchMu sync.Mutex
+	var configs []dataGeneratorOrchestratorPayload
+	orchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/config" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var p dataGeneratorOrchestratorPayload
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		orchMu.Lock()
+		configs = append(configs, p)
+		orchMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer orchSrv.Close()
+
+	target := &resetFakeTarget{approvalFakeTarget: approvalFakeTarget{ctx: context.Background()}}
+	r := NewRunner(target,
+		WithResetSettleWindow(0),
+		WithDataGenerator(orchSrv.URL, "http://conf-gateway/api/simulation/turn", "test-key"),
+	)
+
+	started, err := r.StartReset([]string{"attendee-03"}, []string{"attendee-01", "attendee-02"})
+	if err != nil || !started {
+		t.Fatalf("StartReset = (%v, %v), want (true, nil)", started, err)
+	}
+
+	orchMu.Lock()
+	if len(configs) != 1 || configs[0].IsPaused || configs[0].GlobalTargetMPS != resetTargetMPS {
+		t.Fatalf("orchestrator configs after StartReset = %+v", configs)
+	}
+	orchMu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{"mode":"reset"}`)))
+		rec := httptest.NewRecorder()
+		r.HandleTurn(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("reset HandleTurn %d status = %d, want 200", i+1, rec.Code)
+		}
+	}
+
+	target.mu.Lock()
+	if len(target.reverted) != 1 || target.reverted[0] != "attendee-03" {
+		t.Fatalf("reverted = %v, want [attendee-03]", target.reverted)
+	}
+	if len(target.suspended) != 2 || target.suspended[0] != "attendee-01" || target.suspended[1] != "attendee-02" {
+		t.Fatalf("suspended = %v, want [attendee-01 attendee-02]", target.suspended)
+	}
+	if !target.completed || target.doneSuspended != 2 || target.doneReverted != 1 || target.doneErrors != 0 {
+		t.Fatalf("reset completion = (completed=%v, susp=%d, rev=%d, err=%d)", target.completed, target.doneSuspended, target.doneReverted, target.doneErrors)
+	}
+	target.mu.Unlock()
+
+	orchMu.Lock()
+	if len(configs) != 2 || !configs[1].IsPaused || configs[1].GlobalTargetMPS != 0 {
+		t.Fatalf("orchestrator configs after reset completion = %+v", configs)
+	}
+	orchMu.Unlock()
+}

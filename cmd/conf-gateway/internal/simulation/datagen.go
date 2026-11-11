@@ -50,6 +50,19 @@ fields:
     max: 20000
 `
 
+const dataGeneratorResetSchemaYAML = `name: "agent_swarm_reset"
+fields:
+  - name: "reset_id"
+    type: "uuid"
+    primary: true
+  - name: "mode"
+    type: "enum"
+    options:
+      - "reset"
+`
+
+const resetTargetMPS = 256
+
 // WithDataGenerator configures SimulationRunner to delegate load generation to
 // an external data-generator orchestrator and worker fleet running in-cluster.
 func WithDataGenerator(orchestratorURL, callbackTurnURL, presenterKey string) SimulationOption {
@@ -58,6 +71,11 @@ func WithDataGenerator(orchestratorURL, callbackTurnURL, presenterKey string) Si
 		s.callbackTurnURL = strings.TrimSpace(callbackTurnURL)
 		s.presenterKey = presenterKey
 	}
+}
+
+// HasDataGenerator reports whether an external data-generator orchestrator is configured.
+func (s *SimulationRunner) HasDataGenerator() bool {
+	return s.orchestratorURL != ""
 }
 
 // WithDataGeneratorHTTPClient sets the HTTP client used to control the external
@@ -113,6 +131,14 @@ func targetMPSForCount(count int) int {
 }
 
 func (s *SimulationRunner) configureDataGenerator(ctx context.Context, count int, paused bool) error {
+	targetMPS := 0
+	if !paused {
+		targetMPS = targetMPSForCount(count)
+	}
+	return s.configureDataGeneratorWithSchema(ctx, targetMPS, dataGeneratorSchemaYAML, count, paused)
+}
+
+func (s *SimulationRunner) configureDataGeneratorWithSchema(ctx context.Context, targetMPS int, schemaYAML string, count int, paused bool) error {
 	if s.orchestratorURL == "" {
 		return nil
 	}
@@ -131,8 +157,8 @@ func (s *SimulationRunner) configureDataGenerator(ctx context.Context, count int
 		if s.presenterKey != "" {
 			headers["X-Presenter-Key"] = s.presenterKey
 		}
-		payload.GlobalTargetMPS = targetMPSForCount(count)
-		payload.SchemaYAML = dataGeneratorSchemaYAML
+		payload.GlobalTargetMPS = targetMPS
+		payload.SchemaYAML = schemaYAML
 		payload.Sink = &dataGeneratorSinkConfig{
 			Type: "http",
 			HTTP: &dataGeneratorHTTPSinkConfig{
@@ -175,8 +201,257 @@ func (s *SimulationRunner) configureDataGenerator(ctx context.Context, count int
 	return nil
 }
 
-// HandleTurn processes one simulated agent turn triggered by an external
-// data-generator worker pod via POST /api/simulation/turn.
+func (s *SimulationRunner) isResetting() bool {
+	s.resetMu.Lock()
+	defer s.resetMu.Unlock()
+	return s.resetting
+}
+
+func (s *SimulationRunner) initResetLocked(crashed, active []string) {
+	s.resetMu.Lock()
+	defer s.resetMu.Unlock()
+	now := time.Now()
+	s.resetting = true
+	s.resetStartedAt = now
+	s.resetSettleAfter = now.Add(s.resetSettleWindow)
+	s.resetQueue = make([]resetWorkItem, 0, len(crashed)+len(active))
+	s.resetQueued = make(map[string]bool, len(crashed)+len(active))
+	s.resetInFlight = make(map[string]bool)
+	s.resetDoneAt = make(map[string]time.Time)
+	s.resetSuspended = 0
+	s.resetReverted = 0
+	s.resetErrors = 0
+
+	for _, id := range crashed {
+		if id == "" || s.resetQueued[id] {
+			continue
+		}
+		s.resetQueued[id] = true
+		s.resetQueue = append(s.resetQueue, resetWorkItem{actorID: id, op: "revert"})
+	}
+	for _, id := range active {
+		if id == "" || s.resetQueued[id] {
+			continue
+		}
+		s.resetQueued[id] = true
+		s.resetQueue = append(s.resetQueue, resetWorkItem{actorID: id, op: "suspend"})
+	}
+}
+
+func (s *SimulationRunner) clearResetLocked() {
+	s.resetMu.Lock()
+	defer s.resetMu.Unlock()
+	s.resetting = false
+	s.resetQueue = nil
+	s.resetQueued = nil
+	s.resetInFlight = nil
+	s.resetDoneAt = nil
+}
+
+// ResetStatus reports whether an external data-generator reset sweep is active
+// and how many queued or in-flight actor reset operations remain.
+func (s *SimulationRunner) ResetStatus() (bool, int) {
+	s.resetMu.Lock()
+	defer s.resetMu.Unlock()
+	if !s.resetting {
+		return false, 0
+	}
+	return true, len(s.resetQueue) + len(s.resetInFlight)
+}
+
+// StartReset switches the external data-generator fleet into reset mode so its
+// worker pods drive cluster-wide Revert and Suspend RPCs back through
+// HandleTurn, auto-pausing data-generator once all actors settle in SUSPENDED.
+func (s *SimulationRunner) StartReset(crashed, active []string) (bool, error) {
+	if s.orchestratorURL == "" {
+		return false, nil
+	}
+	if _, ok := s.target.(ResetHandler); !ok {
+		return false, nil
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	var baseCtx context.Context
+	if s.target != nil {
+		baseCtx = s.target.Context()
+	}
+	if baseCtx != nil && baseCtx.Err() != nil {
+		return false, fmt.Errorf("cannot start reset: gateway is closed: %w", baseCtx.Err())
+	}
+
+	s.stopActiveRun(false)
+
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(baseCtx)
+
+	s.mu.Lock()
+	s.simCtx = ctx
+	s.cancel = cancel
+	s.initResetLocked(crashed, active)
+	s.mu.Unlock()
+
+	if err := s.configureDataGeneratorWithSchema(ctx, resetTargetMPS, dataGeneratorResetSchemaYAML, len(crashed)+len(active), false); err != nil {
+		s.mu.Lock()
+		s.clearResetLocked()
+		s.simCtx = nil
+		s.cancel = nil
+		s.mu.Unlock()
+		cancel()
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SimulationRunner) enqueueResetStragglersLocked(now time.Time, rh ResetHandler) int {
+	if rh == nil {
+		return 0
+	}
+	crashed, active := rh.ActiveActorsForReset()
+	unhandled := 0
+	enqueue := func(id, op string) {
+		if id == "" {
+			return
+		}
+		if s.resetQueued[id] || s.resetInFlight[id] {
+			unhandled++
+			return
+		}
+		if doneAt, ok := s.resetDoneAt[id]; ok && now.Sub(doneAt) < 4*time.Second {
+			return
+		}
+		s.resetQueued[id] = true
+		s.resetQueue = append(s.resetQueue, resetWorkItem{actorID: id, op: op})
+		unhandled++
+	}
+	for _, id := range crashed {
+		enqueue(id, "revert")
+	}
+	for _, id := range active {
+		enqueue(id, "suspend")
+	}
+	return unhandled
+}
+
+func (s *SimulationRunner) checkResetCompletionLocked(now time.Time, rh ResetHandler) (bool, int, int, int) {
+	if !s.resetting {
+		return false, 0, 0, 0
+	}
+	if time.Since(s.resetStartedAt) > 45*time.Second {
+		s.resetting = false
+		return true, s.resetSuspended, s.resetReverted, s.resetErrors
+	}
+	if len(s.resetQueue) > 0 || len(s.resetInFlight) > 0 {
+		return false, 0, 0, 0
+	}
+	if s.enqueueResetStragglersLocked(now, rh) > 0 {
+		return false, 0, 0, 0
+	}
+	if now.Before(s.resetSettleAfter) {
+		return false, 0, 0, 0
+	}
+	s.resetting = false
+	return true, s.resetSuspended, s.resetReverted, s.resetErrors
+}
+
+func (s *SimulationRunner) executeNextResetTurn(ctx context.Context) (bool, string, string, error) {
+	rh, ok := s.target.(ResetHandler)
+	if !ok {
+		return false, "", "", nil
+	}
+
+	now := time.Now()
+	var item resetWorkItem
+	var claimed bool
+	var finished bool
+	var suspended, reverted, errs int
+
+	s.resetMu.Lock()
+	if !s.resetting {
+		s.resetMu.Unlock()
+		return false, "", "", nil
+	}
+	if len(s.resetQueue) == 0 {
+		s.enqueueResetStragglersLocked(now, rh)
+	}
+	for i := 0; i < len(s.resetQueue); i++ {
+		if !now.Before(s.resetQueue[i].readyAt) {
+			item = s.resetQueue[i]
+			s.resetQueue = append(s.resetQueue[:i], s.resetQueue[i+1:]...)
+			delete(s.resetQueued, item.actorID)
+			s.resetInFlight[item.actorID] = true
+			claimed = true
+			break
+		}
+	}
+	if !claimed {
+		finished, suspended, reverted, errs = s.checkResetCompletionLocked(now, rh)
+	}
+	s.resetMu.Unlock()
+
+	if finished {
+		s.finishDataGeneratorReset(rh, suspended, reverted, errs)
+		return false, "", "reset_complete", nil
+	}
+	if !claimed {
+		return false, "", "", nil
+	}
+
+	var err error
+	if item.op == "revert" {
+		err = rh.RevertActorForReset(ctx, item.actorID)
+	} else {
+		err = rh.SuspendActorForReset(ctx, item.actorID)
+	}
+
+	afterNow := time.Now()
+	s.resetMu.Lock()
+	delete(s.resetInFlight, item.actorID)
+	if s.resetting {
+		if err == nil {
+			s.resetDoneAt[item.actorID] = afterNow
+			if item.op == "revert" {
+				s.resetReverted++
+			} else {
+				s.resetSuspended++
+			}
+		} else if (strings.Contains(err.Error(), "another operation is in progress") || strings.Contains(err.Error(), "Aborted")) && item.attempts < 10 {
+			item.attempts++
+			item.readyAt = afterNow.Add(500 * time.Millisecond)
+			if !s.resetQueued[item.actorID] {
+				s.resetQueued[item.actorID] = true
+				s.resetQueue = append(s.resetQueue, item)
+			}
+			err = nil
+		} else {
+			s.resetDoneAt[item.actorID] = afterNow
+			s.resetErrors++
+		}
+		finished, suspended, reverted, errs = s.checkResetCompletionLocked(afterNow, rh)
+	}
+	s.resetMu.Unlock()
+
+	if finished {
+		s.finishDataGeneratorReset(rh, suspended, reverted, errs)
+	}
+	return true, item.actorID, "reset_" + item.op, err
+}
+
+func (s *SimulationRunner) finishDataGeneratorReset(rh ResetHandler, suspended, reverted, errs int) {
+	if err := s.configureDataGenerator(context.Background(), 0, true); err != nil {
+		log.Printf("[simulation] warning: failed to pause data-generator after reset: %v", err)
+	}
+	if rh != nil {
+		rh.OnResetComplete(suspended, reverted, errs)
+	}
+}
+
+// HandleTurn processes one simulated agent turn (or one reset operation when in
+// reset mode) triggered by an external data-generator worker pod via
+// POST /api/simulation/turn.
 func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -185,17 +460,17 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.RLock()
 	running := s.running
+	resetting := s.isResetting()
 	simCtx := s.simCtx
 	rDelay := s.readingDelay
 	lDelay := s.loopDelay
-	if running && simCtx != nil && simCtx.Err() == nil {
+	active := (running || resetting) && simCtx != nil && simCtx.Err() == nil
+	if active {
 		s.wg.Add(1)
-	} else {
-		running = false
 	}
 	s.mu.RUnlock()
 
-	if !running {
+	if !active {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -216,15 +491,6 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&payload)
 	}
 
-	reviewDelay := time.Duration(payload.ReviewDelayMs) * time.Millisecond
-	if reviewDelay <= 0 {
-		reviewDelay = s.calculateReviewDelay(0, rDelay)
-	}
-	idleDelay := time.Duration(payload.IdleDelayMs) * time.Millisecond
-	if idleDelay <= 0 {
-		idleDelay = s.calculateInterTurnDelay(lDelay)
-	}
-
 	ctx := r.Context()
 	if simCtx != nil {
 		var cancel context.CancelFunc
@@ -236,7 +502,25 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	executed, attendeeID, action, err := s.executeNextTurn(ctx, payload.Prompt, reviewDelay, idleDelay)
+	var (
+		executed   bool
+		attendeeID string
+		action     string
+		err        error
+	)
+	if resetting {
+		executed, attendeeID, action, err = s.executeNextResetTurn(ctx)
+	} else {
+		reviewDelay := time.Duration(payload.ReviewDelayMs) * time.Millisecond
+		if reviewDelay <= 0 {
+			reviewDelay = s.calculateReviewDelay(0, rDelay)
+		}
+		idleDelay := time.Duration(payload.IdleDelayMs) * time.Millisecond
+		if idleDelay <= 0 {
+			idleDelay = s.calculateInterTurnDelay(lDelay)
+		}
+		executed, attendeeID, action, err = s.executeNextTurn(ctx, payload.Prompt, reviewDelay, idleDelay)
+	}
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

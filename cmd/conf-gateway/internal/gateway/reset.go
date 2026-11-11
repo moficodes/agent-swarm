@@ -46,33 +46,34 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 		sc.Stop()
 	}
 
-	var active, crashed []string
-	for name, v := range g.board.Views() {
-		switch v.State {
-		case types.StateRunning, types.StateResuming, types.StateSuspending:
-			active = append(active, name)
-		case types.StateCrashed:
-			crashed = append(crashed, name)
-		}
-	}
-	slices.Sort(active)
-	slices.Sort(crashed)
+	crashed, active := g.ActiveActorsForReset()
+	sr := g.SimulationRunner()
+	useDataGenReset := sr != nil && sr.HasDataGenerator() && g.control != nil
 
-	// A crashed actor refuses every request, including the history clear
-	// below, so roll it back to its last good snapshot first. What it loses
-	// is its chat, which the reset clears anyway.
-	revertErrors := g.forEachActor(r.Context(), crashed, "revert", func(ctx context.Context, name string) error {
-		return g.control.Revert(ctx, name)
-	})
+	var revertErrors int64
+	if !useDataGenReset {
+		// A crashed actor refuses every request, including the history clear
+		// below, so roll it back to its last good snapshot first. What it loses
+		// is its chat, which the reset clears anyway.
+		revertErrors = g.forEachActor(r.Context(), crashed, "revert", func(ctx context.Context, name string) error {
+			return g.control.Revert(ctx, name)
+		})
+	}
 
 	g.mu.Lock()
+	for name, t := range g.suspendTimers {
+		if t.Stop() {
+			g.wg.Done()
+		}
+		delete(g.suspendTimers, name)
+	}
 	// Actors that held a conversation get their history cleared; the clear
 	// suspends them again once it is done, so the reset leaves them alone.
-	// In large-swarm mode (>64 chat histories), defer the in-actor /clear
-	// until the actor's next turn so reset does not wake thousands of
-	// already-suspended actors at once.
+	// In large-swarm mode (>64 chat histories or external data-generator reset),
+	// defer the in-actor /clear until the actor's next turn so reset does not
+	// wake thousands of already-suspended actors at once.
 	cleared := make(map[string]bool, len(g.chatHistories))
-	deferHistoryClear := len(g.chatHistories) > 64
+	deferHistoryClear := useDataGenReset || len(g.chatHistories) > 64
 	for name := range g.chatHistories {
 		if deferHistoryClear {
 			c := g.historyClears[name]
@@ -90,6 +91,7 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	g.chatHistories = make(map[string][]types.ChatMessage)
 	g.lastResults = make(map[string]*types.ExecutionResult)
 	g.currentActionID = make(map[string]string)
+	g.sampledActions = make(map[string]bool)
 	g.leasedUntil = make(map[string]time.Time)
 	g.actions.Reset()
 	g.addEventLocked("Stage reset: chats cleared, running actors suspended")
@@ -109,6 +111,27 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 			toSuspend = append(toSuspend, name)
 		}
 	}
+
+	if useDataGenReset {
+		if started, err := sr.StartReset(crashed, toSuspend); err != nil {
+			log.Printf("[gateway] external data-generator reset unavailable (%v); falling back to in-process reset", err)
+			revertErrors = g.forEachActor(r.Context(), crashed, "revert", func(ctx context.Context, name string) error {
+				return g.control.Revert(ctx, name)
+			})
+		} else if started {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":          "ok",
+				"mode":            "data-generator",
+				"actors_reset":    len(toSuspend) + len(cleared),
+				"suspend_errors":  0,
+				"actors_reverted": len(crashed),
+				"revert_errors":   0,
+			})
+			return
+		}
+	}
+
 	suspendErrors := g.forEachActor(r.Context(), toSuspend, "suspend", func(ctx context.Context, name string) error {
 		return g.control.Suspend(ctx, name)
 	})
@@ -121,6 +144,69 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 		"actors_reverted": len(crashed) - int(revertErrors),
 		"revert_errors":   revertErrors,
 	})
+}
+
+// ActiveActorsForReset returns sorted lists of crashed and active
+// (RUNNING/RESUMING/SUSPENDING) actors currently known on the board.
+func (g *Gateway) ActiveActorsForReset() (crashed []string, active []string) {
+	for name, v := range g.board.Views() {
+		switch v.State {
+		case types.StateRunning, types.StateResuming, types.StateSuspending:
+			active = append(active, name)
+		case types.StateCrashed:
+			crashed = append(crashed, name)
+		}
+	}
+	slices.Sort(crashed)
+	slices.Sort(active)
+	return crashed, active
+}
+
+// SuspendActorForReset suspends one actor during a data-generator reset pass.
+func (g *Gateway) SuspendActorForReset(ctx context.Context, attendeeID string) error {
+	if g.control == nil {
+		return nil
+	}
+	if g.suspendSem != nil {
+		select {
+		case g.suspendSem <- struct{}{}:
+			defer func() { <-g.suspendSem }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	g.mu.Lock()
+	g.suspendsInFlight[attendeeID]++
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.suspendsInFlight[attendeeID]--
+		if g.suspendsInFlight[attendeeID] <= 0 {
+			delete(g.suspendsInFlight, attendeeID)
+		}
+		g.mu.Unlock()
+	}()
+
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return g.control.Suspend(callCtx, attendeeID)
+}
+
+// RevertActorForReset reverts one crashed actor during a data-generator reset pass.
+func (g *Gateway) RevertActorForReset(ctx context.Context, attendeeID string) error {
+	if g.control == nil {
+		return nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return g.control.Revert(callCtx, attendeeID)
+}
+
+// OnResetComplete records a stage event when a data-generator reset pass finishes.
+func (g *Gateway) OnResetComplete(suspended int, reverted int, errors int) {
+	g.mu.Lock()
+	g.addEventLocked(fmt.Sprintf("Stage reset complete via data-generator: %d suspended, %d reverted (%d errors)", suspended, reverted, errors))
+	g.mu.Unlock()
 }
 
 // forEachActor runs op for every named actor, eight at a time, within 30s,

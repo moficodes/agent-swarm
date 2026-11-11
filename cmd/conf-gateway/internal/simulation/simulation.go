@@ -60,6 +60,23 @@ type StopCleanup interface {
 	ClearSimulatedActivity()
 }
 
+// ResetHandler is optionally implemented by Target so external data-generator
+// workers can drive cluster-wide actor revert and suspend operations during a
+// stage reset.
+type ResetHandler interface {
+	SuspendActorForReset(ctx context.Context, attendeeID string) error
+	RevertActorForReset(ctx context.Context, attendeeID string) error
+	ActiveActorsForReset() (crashed []string, active []string)
+	OnResetComplete(suspended int, reverted int, errors int)
+}
+
+type resetWorkItem struct {
+	actorID  string
+	op       string
+	readyAt  time.Time
+	attempts int
+}
+
 var simulationPrompts = []string{
 	"Run anomaly analysis on recent telemetry spikes",
 	"Execute security audit on container runtime",
@@ -84,6 +101,16 @@ func WithSimulationDelays(readingDelay, loopDelay time.Duration) SimulationOptio
 	}
 }
 
+// WithResetSettleWindow sets how long data-generator continues sweeping for
+// straggler active actors after the reset queue empties before auto-pausing.
+func WithResetSettleWindow(d time.Duration) SimulationOption {
+	return func(s *SimulationRunner) {
+		if d >= 0 {
+			s.resetSettleWindow = d
+		}
+	}
+}
+
 type slotPhase uint8
 
 const (
@@ -101,35 +128,50 @@ type slotState struct {
 
 // SimulationRunner manages background virtual attendees interacting with the conference gateway.
 type SimulationRunner struct {
-	target          Target
-	mu              sync.RWMutex
-	simCtx          context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	running         bool
-	count           int
-	readingDelay    time.Duration
-	loopDelay       time.Duration
-	orchestratorURL string
-	callbackTurnURL string
-	presenterKey    string
-	dgClient        *http.Client
-	turnSem         chan struct{}
+	target            Target
+	opMu              sync.Mutex
+	mu                sync.RWMutex
+	simCtx            context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	running           bool
+	count             int
+	readingDelay      time.Duration
+	loopDelay         time.Duration
+	orchestratorURL   string
+	callbackTurnURL   string
+	presenterKey      string
+	dgClient          *http.Client
+	turnSem           chan struct{}
+	resetSettleWindow time.Duration
 
 	slotMu      sync.Mutex
 	slots       []slotState
 	readyQueue  []int
 	turnCursor  uint64
 	dispatchSeq uint64
+
+	resetMu          sync.Mutex
+	resetting        bool
+	resetQueue       []resetWorkItem
+	resetQueued      map[string]bool
+	resetInFlight    map[string]bool
+	resetDoneAt      map[string]time.Time
+	resetStartedAt   time.Time
+	resetSettleAfter time.Time
+	resetSuspended   int
+	resetReverted    int
+	resetErrors      int
 }
 
 // NewRunner constructs a SimulationRunner bound to the provided Target.
 func NewRunner(t Target, opts ...SimulationOption) *SimulationRunner {
 	s := &SimulationRunner{
-		target:       t,
-		readingDelay: 2 * time.Second,
-		loopDelay:    3 * time.Second,
-		turnSem:      make(chan struct{}, 256),
+		target:            t,
+		readingDelay:      2 * time.Second,
+		loopDelay:         3 * time.Second,
+		turnSem:           make(chan struct{}, 256),
+		resetSettleWindow: 2500 * time.Millisecond,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -155,6 +197,37 @@ func (s *SimulationRunner) clearSlotsLocked() {
 	s.dispatchSeq = 0
 }
 
+func (s *SimulationRunner) stopActiveRun(pauseOrchestrator bool) bool {
+	s.mu.Lock()
+	wasActive := s.running || s.isResetting()
+	if !wasActive {
+		s.mu.Unlock()
+		return false
+	}
+	s.running = false
+	s.count = 0
+	cancel := s.cancel
+	s.cancel = nil
+	s.simCtx = nil
+	s.clearResetLocked()
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if pauseOrchestrator && s.orchestratorURL != "" {
+		if err := s.configureDataGenerator(context.Background(), 0, true); err != nil {
+			log.Printf("[simulation] warning: failed to pause external data-generator orchestrator: %v", err)
+		}
+	}
+	s.wg.Wait()
+	s.clearSlotsLocked()
+	if sc, ok := s.target.(StopCleanup); ok {
+		sc.ClearSimulatedActivity()
+	}
+	return true
+}
+
 // Start begins the audience simulation with the specified number of virtual attendees.
 // If a simulation is already running, it halts the previous simulation first.
 func (s *SimulationRunner) Start(count int) error {
@@ -162,8 +235,8 @@ func (s *SimulationRunner) Start(count int) error {
 		return fmt.Errorf("invalid attendee count: %d (must be between 1 and %d)", count, types.MaxSimulationAttendees)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 
 	var baseCtx context.Context
 	if s.target != nil {
@@ -173,26 +246,22 @@ func (s *SimulationRunner) Start(count int) error {
 		return fmt.Errorf("cannot start simulation: gateway is closed: %w", baseCtx.Err())
 	}
 
-	if s.running {
-		if s.cancel != nil {
-			s.cancel()
-		}
-		s.wg.Wait()
-		s.running = false
-		s.count = 0
-		s.simCtx = nil
-		s.cancel = nil
-	}
+	s.stopActiveRun(false)
 
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
 	ctx, cancel := context.WithCancel(baseCtx)
+	s.initSlotsLocked(count)
+
+	s.mu.Lock()
 	s.simCtx = ctx
 	s.cancel = cancel
 	s.running = true
 	s.count = count
-	s.initSlotsLocked(count)
+	rDelay := s.readingDelay
+	lDelay := s.loopDelay
+	s.mu.Unlock()
 
 	if s.orchestratorURL != "" {
 		if err := s.configureDataGenerator(ctx, count, false); err == nil {
@@ -202,8 +271,6 @@ func (s *SimulationRunner) Start(count int) error {
 		}
 	}
 
-	rDelay := s.readingDelay
-	lDelay := s.loopDelay
 	if count <= 256 {
 		for i := 0; i < count; i++ {
 			attendeeID := fmt.Sprintf("attendee-%02d", i+1)
@@ -223,29 +290,9 @@ func (s *SimulationRunner) Start(count int) error {
 
 // Stop halts all active virtual attendees and waits for their goroutines to exit.
 func (s *SimulationRunner) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.running {
-		return
-	}
-	s.running = false
-	s.count = 0
-	if s.cancel != nil {
-		s.cancel()
-		s.cancel = nil
-	}
-	s.simCtx = nil
-	if s.orchestratorURL != "" {
-		if err := s.configureDataGenerator(context.Background(), 0, true); err != nil {
-			log.Printf("[simulation] warning: failed to pause external data-generator orchestrator: %v", err)
-		}
-	}
-	s.wg.Wait()
-	s.clearSlotsLocked()
-	if sc, ok := s.target.(StopCleanup); ok {
-		sc.ClearSimulatedActivity()
-	}
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	s.stopActiveRun(true)
 }
 
 // Status returns whether the simulation is currently active and the number of virtual attendees.
