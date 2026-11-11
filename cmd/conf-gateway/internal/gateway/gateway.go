@@ -123,6 +123,13 @@ func WithStuckSuspendingAfter(d time.Duration) Option {
 	return func(g *Gateway) { g.stuckSuspendingAfter = d }
 }
 
+// WithStuckRunningAfter sets how long an actor may remain in RUNNING with no
+// local turn, timer, history clear, or suspend in flight before the gateway
+// suspends it. Non-positive disables recovery.
+func WithStuckRunningAfter(d time.Duration) Option {
+	return func(g *Gateway) { g.stuckRunningAfter = d }
+}
+
 // UsageSource reports model usage per actor.
 type UsageSource interface {
 	Usage(actor string) types.ModelUsage
@@ -269,6 +276,7 @@ type Gateway struct {
 	suspendAfter         time.Duration
 	suspendDrainTimeout  time.Duration
 	stuckSuspendingAfter time.Duration
+	stuckRunningAfter    time.Duration
 	usage                UsageSource
 	model                actorproxy.ModelCaller
 	mockLLM              bool
@@ -295,6 +303,9 @@ type Gateway struct {
 	suspendsInFlight map[string]int
 	// suspendingSince records when ateapi first reported an actor in SUSPENDING.
 	suspendingSince map[string]time.Time
+	// runningIdleSince records when ateapi first reported an actor in RUNNING
+	// while this gateway had no turn, timer, history clear, or suspend for it.
+	runningIdleSince map[string]time.Time
 	// turnsInFlight counts each attendee's proxied turns that have not
 	// finished. An actor is only scheduled for suspend when it reaches zero.
 	turnsInFlight map[string]int
@@ -329,6 +340,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		workerScaleInterval:  2 * time.Second,
 		pollInterval:         time.Second,
 		stuckSuspendingAfter: 20 * time.Second,
+		stuckRunningAfter:    20 * time.Second,
 		httpClient:           &http.Client{Timeout: 5 * time.Second},
 		broker:               feed.NewBroker(),
 		actions:              feed.NewLog(100),
@@ -340,6 +352,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		suspendTimers:        make(map[string]*time.Timer),
 		suspendsInFlight:     make(map[string]int),
 		suspendingSince:      make(map[string]time.Time),
+		runningIdleSince:     make(map[string]time.Time),
 		turnsInFlight:        make(map[string]int),
 		turnSeq:              make(map[string]uint64),
 		historyClears:        make(map[string]*historyClear),
@@ -408,7 +421,9 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 			actorstate.Poll(ctx, gw.control, gw.pollInterval, gw.board, func(d time.Duration, err error) {
 				gw.statePollMs.Store(d.Milliseconds())
 				if err == nil {
-					gw.reconcileStuckSuspending(time.Now())
+					now := time.Now()
+					gw.reconcileStuckSuspending(now)
+					gw.reconcileStuckRunning(now)
 				}
 			})
 		}()

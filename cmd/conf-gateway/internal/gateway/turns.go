@@ -30,6 +30,7 @@ func (g *Gateway) beginTurn(attendee string) {
 	defer g.mu.Unlock()
 	g.turnsInFlight[attendee]++
 	g.turnSeq[attendee]++
+	delete(g.runningIdleSince, attendee)
 	if t, ok := g.suspendTimers[attendee]; ok {
 		if t.Stop() {
 			g.wg.Done()
@@ -179,6 +180,70 @@ func (g *Gateway) reconcileStuckSuspending(now time.Time) {
 			defer g.suspendWG.Done()
 			log.Printf("[gateway] recovering actor %s stuck in SUSPENDING", name)
 			g.suspendActor(name)
+		}()
+	}
+}
+
+func (g *Gateway) isBusyLocked(attendee string) bool {
+	if g.turnsInFlight[attendee] > 0 || g.suspendsInFlight[attendee] > 0 || g.suspendTimers[attendee] != nil {
+		return true
+	}
+	if c := g.historyClears[attendee]; c != nil && c.done < c.want {
+		return true
+	}
+	return false
+}
+
+// reconcileStuckRunning suspends any actor reported in StateRunning for at
+// least max(stuckRunningAfter, suspendAfter) while this gateway has no turn,
+// auto-suspend timer, history clear, or suspend in flight for it (for example
+// after a client or previous gateway pod disconnected mid-ResumeActor and
+// ate-api-server finished waking the actor after the caller was gone).
+func (g *Gateway) reconcileStuckRunning(now time.Time) {
+	if g.control == nil || g.stuckRunningAfter <= 0 {
+		return
+	}
+	views := g.board.Views()
+	type idleTarget struct {
+		name string
+		seq  uint64
+	}
+	var toSuspend []idleTarget
+
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return
+	}
+	for name := range g.runningIdleSince {
+		if v, ok := views[name]; !ok || v.State != types.StateRunning || g.isBusyLocked(name) {
+			delete(g.runningIdleSince, name)
+		}
+	}
+	threshold := max(g.stuckRunningAfter, g.suspendAfter)
+	for name, v := range views {
+		if v.State != types.StateRunning || g.isBusyLocked(name) {
+			continue
+		}
+		since, seen := g.runningIdleSince[name]
+		if !seen {
+			g.runningIdleSince[name] = now
+			continue
+		}
+		if now.Sub(since) < threshold {
+			continue
+		}
+		g.runningIdleSince[name] = now
+		g.suspendWG.Add(1)
+		toSuspend = append(toSuspend, idleTarget{name: name, seq: g.turnSeq[name]})
+	}
+	g.mu.Unlock()
+
+	for _, t := range toSuspend {
+		go func() {
+			defer g.suspendWG.Done()
+			log.Printf("[gateway] suspending orphaned RUNNING actor %s", t.name)
+			g.suspendIfIdle(t.name, t.seq)
 		}()
 	}
 }

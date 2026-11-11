@@ -97,3 +97,23 @@ calls before canceling them on shutdown, including `SUSPENDING` actors in
 The fix belongs in `ate-api-server`, which should detach its post-commit
 suspend workflow from the caller's context or reconcile orphaned `SUSPENDING`
 actors in `ate-controller`.
+
+## Canceled `ResumeActor` calls orphan `RUNNING` actors that `WorkerPool` scale-down crashes
+
+When a client disconnects from `atenet-router` while an actor is still waking
+(~3s `ResumeActor` restore), `atenet-router` aborts the HTTP request (`request
+for actor ... canceled by client`), and `conf-gateway`'s immediate post-turn
+`SuspendActor` call fails because `ate-api-server` still holds the actor's
+operation lease in `ACTOR_STATE_RESUMING`. Moments later, `ate-api-server`
+finishes `ResumeActor` anyway and leaves the actor stranded in
+`ACTOR_STATE_RUNNING` with no turn running. When the `WorkerPool` HPA later
+scales down, Kubernetes deletes a `ReplicaSet` worker pod without draining or
+suspending hosted actors first, and `ate-api-server`'s `DeleteWorker` workflow
+marks any still-bound `RUNNING` actor `ACTOR_STATE_CRASHED` (`"worker pod went
+away while hosting the actor"`). `conf-gateway` works around this by
+automatically suspending any actor that remains in `RUNNING` for more than 20s
+with no local turn, auto-suspend timer, history clear, or suspend in flight.
+The real fixes belong in `ate-api-server` / `atenet-router` (propagating client
+cancellation or idle-timeout auto-suspend for woken actors) and in the
+`WorkerPool` controller (preferring empty workers on scale-down or suspending
+hosted actors in a `preStop` / finalizer drain before deleting a worker).

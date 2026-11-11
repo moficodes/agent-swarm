@@ -563,3 +563,58 @@ func TestState_ResetAndPollerRecoverOrphanedSuspendingActors(t *testing.T) {
 		t.Fatalf("auto-recovered %q, want attendee-13", got)
 	}
 }
+
+func TestState_PollerSuspendsOrphanedRunningActorsUnlessBusy(t *testing.T) {
+	actorReached := make(chan struct{})
+	releaseActor := make(chan struct{})
+	actor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(actorReached)
+		<-releaseActor
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{Sender: types.SenderAssistant, Content: "ok"})
+	}))
+	t.Cleanup(actor.Close)
+
+	ctrl := newFakeControl(
+		actorstate.Status{Name: "attendee-08", State: types.StateRunning, WorkerPod: "pool-a"},
+		actorstate.Status{Name: "attendee-15", State: types.StateRunning, WorkerPod: "pool-a"},
+	)
+	gw := newTestGateway(t, actor.URL,
+		gateway.WithActorControl(ctrl),
+		gateway.WithPollInterval(5*time.Millisecond),
+		gateway.WithStuckRunningAfter(25*time.Millisecond),
+		gateway.WithSuspendAfter(0),
+	)
+
+	// Start a turn for attendee-08 before StuckRunningAfter elapses so only
+	// the orphaned idle attendee-15 is auto-suspended by the poller.
+	turnDone := make(chan struct{})
+	go func() {
+		defer close(turnDone)
+		postJSON(gw, "attendee-08", "/api/chat", types.ChatRequest{Message: "hi"})
+	}()
+	<-actorReached
+
+	if got := waitSuspended(t, ctrl); got != "attendee-15" {
+		t.Fatalf("poller suspended %q, want orphaned attendee-15 while attendee-08 is mid-turn", got)
+	}
+	// Mark attendee-15 suspended in fakeControl so the poller stops re-suspending
+	// it while we verify attendee-08 is not suspended mid-turn.
+	ctrl.set(
+		actorstate.Status{Name: "attendee-08", State: types.StateRunning, WorkerPod: "pool-a"},
+		actorstate.Status{Name: "attendee-15", State: types.StateSuspended},
+	)
+	_ = drain(ctrl.suspended)
+
+	time.Sleep(40 * time.Millisecond)
+	select {
+	case unexpected := <-ctrl.suspended:
+		t.Fatalf("poller suspended %q while attendee-08 turn was still in flight", unexpected)
+	default:
+	}
+
+	close(releaseActor)
+	<-turnDone
+	if got := waitSuspended(t, ctrl); got != "attendee-08" {
+		t.Fatalf("post-turn suspended %q, want attendee-08", got)
+	}
+}
