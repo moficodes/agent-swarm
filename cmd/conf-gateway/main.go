@@ -65,6 +65,7 @@ var staticFS embed.FS
 // Config holds the configuration for the conference edge gateway.
 type Config struct {
 	Port                string
+	MetricsPort         string
 	RouterURL           string
 	StatusURL           string
 	HMACSecret          string
@@ -177,6 +178,7 @@ func LoadConfig() Config {
 
 	return Config{
 		Port:                  port,
+		MetricsPort:           strings.TrimSpace(os.Getenv("METRICS_PORT")),
 		RouterURL:             routerURL,
 		StatusURL:             statusURL,
 		HMACSecret:            hmacSecret,
@@ -449,6 +451,23 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	var metricsSrv *http.Server
+	if cfg.MetricsPort != "" {
+		metricsSrv = &http.Server{
+			Addr:              ":" + cfg.MetricsPort,
+			Handler:           gw.MetricsHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+		go func() {
+			log.Printf("Starting gateway Prometheus metrics server on :%s/metrics...", cfg.MetricsPort)
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("metrics server failed: %v", err)
+			}
+		}()
+	}
+
 	go func() {
 		log.Printf("Starting conference edge gateway on :%s (router: %s, statusz: %s, atespace: %s)...", cfg.Port, cfg.RouterURL, cfg.StatusURL, cfg.Atespace)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -462,6 +481,11 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("metrics server shutdown failed: %v", err)
+		}
+	}
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
 	}

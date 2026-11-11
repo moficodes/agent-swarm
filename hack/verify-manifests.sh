@@ -107,10 +107,10 @@ for want in "kind: ServiceAccount" "iam.gke.io/gcp-service-account" "kind: Deplo
   fi
 done
 # Actors have no egress; the gateway makes their model calls itself, so it
-# exposes nothing to them.
-for unwanted in "conf-gateway-internal" "8091"; do
+# exposes nothing to them, and the Service exposes only port 80 (never :9090).
+for unwanted in "conf-gateway-internal" "8091" "port: 9090"; do
   if grep -qF -- "${unwanted}" <<<"${out}"; then
-    echo "error: gateway manifest still has ${unwanted}" >&2
+    echo "error: gateway manifest has unwanted ${unwanted}" >&2
     status=1
   fi
 done

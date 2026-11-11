@@ -16,7 +16,7 @@
 # workers parked turns would fill.
 # Adapted from Substrate's demos/autoscaled-workerpool.
 #
-# Flow: atenet-router and ate-api-server :9090/metrics --5s scrape-->
+# Flow: atenet-router, ate-api-server, and conf-gateway :9090/metrics --5s scrape-->
 #       conf-prometheus --query--> conf-prometheus-adapter
 #       --external.metrics.k8s.io--> HPA --/scale--> WorkerPool conf-workers.
 # The APIService lives in manifests/autoscaling-apiservice.yaml.tmpl.
@@ -51,6 +51,29 @@ roleRef:
   name: ${RBAC_PREFIX}conf-prometheus
   apiGroup: rbac.authorization.k8s.io
 ---
+# Pod discovery for conf-gateway :9090/metrics across demo namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ${RBAC_PREFIX}conf-prometheus-pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${RBAC_PREFIX}conf-prometheus-pod-reader
+subjects:
+- kind: ServiceAccount
+  name: conf-prometheus
+  namespace: ${NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: ${RBAC_PREFIX}conf-prometheus-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -78,6 +101,26 @@ data:
         regex: (.+)
         target_label: __address__
         replacement: $1:9090
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: app
+    - job_name: conf-gateway
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        regex: conf-gateway
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_phase]
+        regex: Running
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: $1:9090
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
       - source_labels: [__meta_kubernetes_pod_name]
         target_label: pod
       - source_labels: [__meta_kubernetes_pod_label_app]
@@ -161,6 +204,7 @@ spec:
     port: 9090
     targetPort: http
 ---
+# --- conf-prometheus-adapter ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -171,12 +215,10 @@ metadata:
 # at_capacity) + ceil(parked requests / ACTORS_PER_WORKER), in workers.
 # Substrate exports no per-worker actor count, so a partly filled worker
 # counts as a whole one. max() because every ate-api-server replica reports
-# the same pool-wide count; sum() because each router replica counts only
-# its own parked requests. Each term falls back to 0 when its series is
-# missing. The series query keys on
-# ate_workerpool_workers, which exists whenever the pool does, so the metric
-# stays listed while the router reports nothing. The router is shared with
-# other pools; see the spec's shared-router note.
+# the same pool-wide count; conf_gateway_parked_requests scopes the shared
+# router's unlabeled parking gauge to this namespace's in-flight requests,
+# falling back to sum(atenet_router_parking_active) before the gateway is
+# scraped. Each term falls back to 0 when its series is missing.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -191,7 +233,7 @@ data:
       name:
         matches: "^ate_workerpool_workers$"
         as: "${EXTERNAL_METRIC}"
-      metricsQuery: '(max(ate_workerpool_workers{ate_workerpool_namespace="${NAMESPACE}",ate_workerpool_name="${WORKER_POOL}",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="${NAMESPACE}",ate_workerpool_name="${WORKER_POOL}",ate_worker_state="at_capacity"}) or vector(0)) + ceil((sum(atenet_router_parking_active) or vector(0)) / ${ACTORS_PER_WORKER})'
+      metricsQuery: '(max(ate_workerpool_workers{ate_workerpool_namespace="${NAMESPACE}",ate_workerpool_name="${WORKER_POOL}",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="${NAMESPACE}",ate_workerpool_name="${WORKER_POOL}",ate_worker_state="at_capacity"}) or vector(0)) + ceil((max(conf_gateway_parked_requests{namespace="${NAMESPACE}"}) or sum(atenet_router_parking_active) or vector(0)) / ${ACTORS_PER_WORKER})'
 ---
 apiVersion: apps/v1
 kind: Deployment

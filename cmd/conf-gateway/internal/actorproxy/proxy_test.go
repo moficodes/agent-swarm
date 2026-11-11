@@ -215,3 +215,97 @@ func TestClearHistory_PostsToTheAttendeesActor(t *testing.T) {
 		t.Error("ClearHistory = nil for a 403, want an error")
 	}
 }
+
+type funcModelCaller func(ctx context.Context, actor string, call types.ModelCall) types.ModelResult
+
+func (f funcModelCaller) Call(ctx context.Context, actor string, call types.ModelCall) types.ModelResult {
+	return f(ctx, actor, call)
+}
+
+func TestProxy_RouterInFlight(t *testing.T) {
+	chatEntered := make(chan struct{})
+	releaseChat := make(chan struct{})
+	resultEntered := make(chan struct{})
+	releaseResult := make(chan struct{})
+	clearEntered := make(chan struct{})
+	releaseClear := make(chan struct{})
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/chat":
+			close(chatEntered)
+			<-releaseChat
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(types.ModelCallStep{
+				ModelCall: &types.ModelCall{CallID: "c1"},
+			})
+		case types.ModelResultPath:
+			close(resultEntered)
+			<-releaseResult
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "m1", Content: "done"})
+		case types.ClearHistoryPath:
+			close(clearEntered)
+			<-releaseClear
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer router.Close()
+	u, _ := url.Parse(router.URL)
+
+	modelEntered := make(chan struct{})
+	releaseModel := make(chan struct{})
+	model := funcModelCaller(func(ctx context.Context, actor string, call types.ModelCall) types.ModelResult {
+		close(modelEntered)
+		<-releaseModel
+		return types.ModelResult{CallID: call.CallID, Status: http.StatusOK}
+	})
+
+	p := New(u, "space", []byte("secret"), nil, model, Hooks{})
+	if got := p.RouterInFlight(); got != 0 {
+		t.Fatalf("initial RouterInFlight() = %d, want 0", got)
+	}
+
+	turnDone := make(chan struct{})
+	go func() {
+		defer close(turnDone)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"hi"}`))
+		p.ServeHTTP(rec, WithAttendee(req, "attendee-01"))
+	}()
+
+	<-chatEntered
+	if got := p.RouterInFlight(); got != 1 {
+		t.Fatalf("RouterInFlight() while initial /api/chat waits in router = %d, want 1", got)
+	}
+	close(releaseChat)
+
+	<-modelEntered
+	if got := p.RouterInFlight(); got != 0 {
+		t.Fatalf("RouterInFlight() during gateway ModelCall = %d, want 0", got)
+	}
+	close(releaseModel)
+
+	<-resultEntered
+	if got := p.RouterInFlight(); got != 0 {
+		t.Fatalf("RouterInFlight() during postResult to awake actor = %d, want 0", got)
+	}
+	close(releaseResult)
+	<-turnDone
+
+	clearDone := make(chan error, 1)
+	go func() {
+		clearDone <- p.ClearHistory(context.Background(), "attendee-01")
+	}()
+	<-clearEntered
+	if got := p.RouterInFlight(); got != 1 {
+		t.Fatalf("RouterInFlight() while ClearHistory waits in router = %d, want 1", got)
+	}
+	close(releaseClear)
+	if err := <-clearDone; err != nil {
+		t.Fatalf("ClearHistory = %v", err)
+	}
+	if got := p.RouterInFlight(); got != 0 {
+		t.Fatalf("final RouterInFlight() = %d, want 0", got)
+	}
+}

@@ -149,6 +149,46 @@ func TestSessionMinting(t *testing.T) {
 	}
 }
 
+// parkedRouter returns an upstream router URL and a function that sends n
+// concurrent /api/chat turns through gw, blocking until all n are waiting in
+// the router. Cleanup releases the parked requests and waits for the turns.
+func parkedRouter(t *testing.T, n int) (string, func(*gateway.Gateway)) {
+	t.Helper()
+	var arrived atomic.Int64
+	allParked := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if arrived.Add(1) == int64(n) {
+			close(allParked)
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "p", Sender: types.SenderAssistant, Content: "ok"})
+	}))
+
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		wg.Wait()
+		srv.Close()
+	})
+
+	start := func(gw *gateway.Gateway) {
+		for i := 1; i <= n; i++ {
+			wg.Add(1)
+			attendee := fmt.Sprintf("attendee-%02d", i)
+			go func() {
+				defer wg.Done()
+				postJSON(gw, attendee, "/api/chat", types.ChatRequest{Message: "hold", Mock: true})
+			}()
+		}
+		<-allParked
+	}
+	return srv.URL, start
+}
+
 func TestStageTelemetry(t *testing.T) {
 	// Mock statusz server
 	var parkingActive atomic.Int64
@@ -166,11 +206,12 @@ func TestStageTelemetry(t *testing.T) {
 	statusSrv := httptest.NewServer(statuszMux)
 	defer statusSrv.Close()
 
-	gw := newTestGateway(t, "http://localhost:8000",
+	routerURL, holdTurns := parkedRouter(t, 25)
+	gw := newTestGateway(t, routerURL,
 		gateway.WithStatusInterval(20*time.Millisecond),
 		gateway.WithRouterStatus(routerstatus.NewAggregator(routerstatus.StaticTargets{statusSrv.URL}, http.DefaultClient)),
 	)
-	defer gw.Close()
+	holdTurns(gw)
 
 	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
@@ -254,10 +295,12 @@ func TestTelemetry_ParkingFromAggregator(t *testing.T) {
 	pod1 := metricsServer(1)
 	pod2 := metricsServer(2)
 
-	gw := newTestGateway(t, "http://localhost:8000",
+	routerURL, holdTurns := parkedRouter(t, 5)
+	gw := newTestGateway(t, routerURL,
 		gateway.WithStatusInterval(5*time.Millisecond),
 		gateway.WithRouterStatus(routerstatus.NewAggregator(routerstatus.StaticTargets{pod1.URL, pod2.URL}, http.DefaultClient)),
 	)
+	holdTurns(gw)
 
 	ts := httptest.NewServer(asPresenter(gw))
 	defer ts.Close()
@@ -273,7 +316,7 @@ func TestTelemetry_ParkingFromAggregator(t *testing.T) {
 			t.Fatalf("failed to decode telemetry: %v", err)
 		}
 		_ = resp.Body.Close()
-		if telem.ParkingAvailable {
+		if telem.ParkingAvailable && telem.ParkedRequests == 3 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -284,6 +327,160 @@ func TestTelemetry_ParkingFromAggregator(t *testing.T) {
 	}
 	if telem.ParkedRequests != 3 {
 		t.Errorf("expected parked_requests=3 (1+2 across pods), got %d", telem.ParkedRequests)
+	}
+}
+
+type modelCallerFunc func(ctx context.Context, actor string, call types.ModelCall) types.ModelResult
+
+func (f modelCallerFunc) Call(ctx context.Context, actor string, call types.ModelCall) types.ModelResult {
+	return f(ctx, actor, call)
+}
+
+// TestTelemetry_SharedRouterParkingIsolatedByGateway verifies that when two
+// gateways (booth and live) share one atenet-router whose parking gauge has no
+// atespace label, parked requests from booth never appear in live's telemetry
+// or Prometheus metrics.
+func TestTelemetry_SharedRouterParkingIsolatedByGateway(t *testing.T) {
+	const boothTurns = 5
+	var (
+		routerParked atomic.Int64
+		boothParked  atomic.Int64
+	)
+	allBoothParked := make(chan struct{})
+	releaseBooth := make(chan struct{})
+	var releaseBoothOnce sync.Once
+	defer releaseBoothOnce.Do(func() { close(releaseBooth) })
+
+	routerMux := http.NewServeMux()
+	routerMux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		fmt.Fprintf(w, "# HELP atenet_router_parking_active parked\n# TYPE atenet_router_parking_active gauge\natenet_router_parking_active{otel_scope_name=\"atenet-router\"} %d\n", routerParked.Load())
+	})
+	routerMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		target := r.Header.Get("ate-target-actor")
+		if strings.HasPrefix(target, "ate-demo-conf/") {
+			routerParked.Add(1)
+			defer routerParked.Add(-1)
+			if boothParked.Add(1) == boothTurns {
+				close(allBoothParked)
+			}
+			<-releaseBooth
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "b1", Sender: types.SenderAssistant, Content: "ok"})
+			return
+		}
+		// ate-demo-conf-live actor is already warm and immediately asks for a model call.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ModelCallStep{
+			ModelCall: &types.ModelCall{CallID: "live-c1"},
+		})
+	})
+	routerMux.HandleFunc(types.ModelResultPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "l1", Sender: types.SenderAssistant, Content: "live ok"})
+	})
+	sharedRouter := httptest.NewServer(routerMux)
+	defer sharedRouter.Close()
+
+	liveModelEntered := make(chan struct{})
+	releaseLiveModel := make(chan struct{})
+	var releaseLiveOnce sync.Once
+	defer releaseLiveOnce.Do(func() { close(releaseLiveModel) })
+	liveModel := modelCallerFunc(func(ctx context.Context, actor string, call types.ModelCall) types.ModelResult {
+		close(liveModelEntered)
+		<-releaseLiveModel
+		return types.ModelResult{CallID: call.CallID, Status: http.StatusOK}
+	})
+
+	boothGW := newTestGateway(t, sharedRouter.URL,
+		gateway.WithAtespace("ate-demo-conf"),
+		gateway.WithStatusInterval(10*time.Millisecond),
+		gateway.WithRouterStatus(routerstatus.NewAggregator(routerstatus.StaticTargets{sharedRouter.URL}, http.DefaultClient)),
+	)
+	liveGW := newTestGateway(t, sharedRouter.URL,
+		gateway.WithAtespace("ate-demo-conf-live"),
+		gateway.WithModel(liveModel),
+		gateway.WithStatusInterval(10*time.Millisecond),
+		gateway.WithRouterStatus(routerstatus.NewAggregator(routerstatus.StaticTargets{sharedRouter.URL}, http.DefaultClient)),
+	)
+
+	var boothWG sync.WaitGroup
+	for i := 1; i <= boothTurns; i++ {
+		boothWG.Add(1)
+		attendee := fmt.Sprintf("attendee-%02d", i)
+		go func() {
+			defer boothWG.Done()
+			postJSON(boothGW, attendee, "/api/chat", types.ChatRequest{Message: "burst", Mock: true})
+		}()
+	}
+	<-allBoothParked
+
+	// Wait until boothGW observes all 5 parked requests from the shared router.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if tel := getTelemetry(t, boothGW); tel.ParkingAvailable && tel.ParkedRequests == boothTurns {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if tel := getTelemetry(t, boothGW); !tel.ParkingAvailable || tel.ParkedRequests != boothTurns {
+		t.Fatalf("booth telemetry = %+v, want parking_available=true and parked_requests=%d", tel, boothTurns)
+	}
+
+	// Allow liveGW at least two status poll intervals while boothGW has 5 parked requests.
+	time.Sleep(30 * time.Millisecond)
+	liveTel := getTelemetry(t, liveGW)
+	if !liveTel.ParkingAvailable {
+		t.Fatalf("live telemetry parking_available = false, want true")
+	}
+	if liveTel.ParkedRequests != 0 {
+		t.Fatalf("live telemetry parked_requests = %d with 0 live requests, want 0", liveTel.ParkedRequests)
+	}
+
+	// Start a warm live turn that is waiting on Gemini (not parked in atenet-router).
+	liveDone := make(chan struct{})
+	go func() {
+		defer close(liveDone)
+		postJSON(liveGW, "attendee-01", "/api/chat", types.ChatRequest{Message: "hello stage"})
+	}()
+	<-liveModelEntered
+	time.Sleep(30 * time.Millisecond)
+	if liveTel = getTelemetry(t, liveGW); liveTel.ParkedRequests != 0 {
+		t.Fatalf("live telemetry parked_requests = %d during Gemini ModelCall, want 0", liveTel.ParkedRequests)
+	}
+
+	readMetrics := func(gw *gateway.Gateway) string {
+		rec := httptest.NewRecorder()
+		gw.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("/metrics status = %d: %s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+	boothMetrics := readMetrics(boothGW)
+	if !strings.Contains(boothMetrics, "\nconf_gateway_parked_requests 5\n") {
+		t.Errorf("booth /metrics missing conf_gateway_parked_requests 5:\n%s", boothMetrics)
+	}
+	liveMetrics := readMetrics(liveGW)
+	if !strings.Contains(liveMetrics, "\nconf_gateway_parked_requests 0\n") {
+		t.Errorf("live /metrics missing conf_gateway_parked_requests 0:\n%s", liveMetrics)
+	}
+
+	releaseLiveOnce.Do(func() { close(releaseLiveModel) })
+	<-liveDone
+	releaseBoothOnce.Do(func() { close(releaseBooth) })
+	boothWG.Wait()
+
+	// When router status is unavailable, /metrics omits conf_gateway_parked_requests
+	// so Prometheus can fall back rather than treating unavailability as zero.
+	unavailGW := gateway.NewGateway("http://127.0.0.1:1")
+	defer unavailGW.Close()
+	unavailMetrics := readMetrics(unavailGW)
+	if strings.Contains(unavailMetrics, "\nconf_gateway_parked_requests ") {
+		t.Errorf("unavailable gateway /metrics should omit conf_gateway_parked_requests sample:\n%s", unavailMetrics)
+	}
+	if !strings.Contains(unavailMetrics, "\nconf_gateway_router_in_flight 0\n") {
+		t.Errorf("unavailable gateway /metrics missing conf_gateway_router_in_flight 0:\n%s", unavailMetrics)
 	}
 }
 

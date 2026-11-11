@@ -375,12 +375,28 @@ for want in "atespace: ate-demo-conf-live" "name: conf-agent-live" "workload: co
 done
 live_gw="$(DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_render manifests/gateway.yaml.tmpl)"
 for want in "name: ate-demo-conf-live-conf-gateway-ate-client" "name: ate-demo-conf-live-conf-gateway-trust-bundles" \
-            'value: "ate-demo-conf-live"' 'value: "conf-workers-live"' "- conf-workers-live"; do
+            'value: "ate-demo-conf-live"' 'value: "conf-workers-live"' "- conf-workers-live" \
+            "name: METRICS_PORT" 'value: "9090"' "containerPort: 9090"; do
   if ! grep -qF -- "${want}" <<<"${live_gw}"; then
     echo "FAIL: live gateway manifest lacks ${want}" >&2
     fail=1
   fi
 done
+if [[ "$(DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_adapter_metrics_query)" != *'conf_gateway_parked_requests{namespace="ate-demo-conf-live"}'* ]]; then
+  echo "FAIL: conf_adapter_metrics_query does not scope parked requests to DEMO_CONF_NAMESPACE" >&2
+  fail=1
+fi
+shared_prom="$(DEMO_CONF_NAMESPACE=ate-demo-conf-live conf_render_shared_prometheus ate-demo-conf)"
+for want in "namespace: ate-demo-conf" "name: conf-prometheus-pod-reader" "job_name: conf-gateway"; do
+  if ! grep -qF -- "${want}" <<<"${shared_prom}"; then
+    echo "FAIL: conf_render_shared_prometheus lacks ${want}" >&2
+    fail=1
+  fi
+done
+if grep -qF -- "name: conf-prometheus-adapter" <<<"${shared_prom}"; then
+  echo "FAIL: conf_render_shared_prometheus leaked conf-prometheus-adapter objects" >&2
+  fail=1
+fi
 live_ing="$(DEMO_CONF_NAMESPACE=ate-demo-conf-live DEMO_DOMAIN=live.swarm.example.com DEMO_CONF_STATIC_IP_NAME=live-ip conf_render manifests/gateway-ingress.yaml.tmpl)"
 if ! grep -qF 'kubernetes.io/ingress.global-static-ip-name: "live-ip"' <<<"${live_ing}"; then
   echo "FAIL: live ingress manifest lacks global-static-ip-name annotation" >&2
@@ -412,7 +428,8 @@ fi
 auto="$(DEMO_CONF_MIN_WORKERS=3 DEMO_CONF_MAX_WORKERS=4 conf_render manifests/autoscaling.yaml.tmpl)"
 for want in "minReplicas: 3" "maxReplicas: 4" "name: conf-workers" "apiVersion: ate.dev/v1" "kind: WorkerPool" 'averageValue: "1"' \
             'ate_worker_state="partial"' 'ate_worker_state="at_capacity"' \
-            "ceil((sum(atenet_router_parking_active) or vector(0)) / 4)" "conf_worker_demand"; do
+            "job_name: conf-gateway" "name: conf-prometheus-pod-reader" \
+            'ceil((max(conf_gateway_parked_requests{namespace="ate-demo-conf"}) or sum(atenet_router_parking_active) or vector(0)) / 4)' "conf_worker_demand"; do
   if ! grep -qF -- "${want}" <<<"${auto}"; then
     echo "FAIL: rendered autoscaling manifest lacks ${want}" >&2
     fail=1

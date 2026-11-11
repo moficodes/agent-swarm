@@ -69,8 +69,14 @@ pod template.
 ## The router's parking gauge has no pool label
 
 `atenet.router.parking.active` counts parked requests per router replica
-with no WorkerPool or template label, so on a shared router one pool's
-autoscaler sees every pool's queue. The demo accepts this and caps the
-effect with `DEMO_CONF_MAX_WORKERS` (`manifests/autoscaling.yaml.tmpl`).
-The fix belongs in atenet-router's metrics, which should label parked
-requests with the target pool.
+with no WorkerPool, template, or atespace label, so on a shared router every
+consumer sees the whole cluster's queue. `conf-gateway` bounds its reported
+`parked_requests` (and the `conf_gateway_parked_requests` gauge it exports on
+`:9090/metrics` for the HPA) by the number of initial HTTP requests it
+currently has awaiting `atenet-router`, keeping an idle namespace's stage UI
+and autoscaler unaffected by bursts in sibling namespaces. Two namespaces
+bursting simultaneously can still over-count up to each gateway's own
+in-flight requests (capped by `DEMO_CONF_MAX_WORKERS` in
+`manifests/autoscaling.yaml.tmpl`). The real fix belongs in `atenet-router`'s
+metrics, which should label parked requests with the target atespace/template
+or pool.

@@ -29,7 +29,7 @@ import (
 )
 
 var configEnvVars = []string{
-	"PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE",
+	"PORT", "METRICS_PORT", "ROUTER_URL", "STATUS_URL", "HMAC_SECRET", "PRESENTER_TOKEN", "ATESPACE",
 	"WORKER_POOL_NAMESPACE", "WORKER_POOL_NAME",
 	"ROUTER_CA_FILE", "ROUTER_CRED_BUNDLE", "ATEAPI_ENDPOINT", "KUBECTL_ATE",
 	"STATE_POLL_INTERVAL", "SUSPEND_AFTER", "DEMO_MOCK_LLM", "LOCAL_MODE",
@@ -55,6 +55,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 
 	if cfg.Port != "8090" {
 		t.Errorf("expected default Port '8090', got %q", cfg.Port)
+	}
+	if cfg.MetricsPort != "" {
+		t.Errorf("expected empty default MetricsPort, got %q", cfg.MetricsPort)
 	}
 	if cfg.RouterURL != "http://localhost:8000" {
 		t.Errorf("expected default RouterURL 'http://localhost:8000', got %q", cfg.RouterURL)
@@ -137,6 +140,7 @@ func TestLoadConfig_GoogleAuthAndRateLimits(t *testing.T) {
 func TestLoadConfig_CustomEnv(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("PORT", "9099")
+	t.Setenv("METRICS_PORT", "9090")
 	t.Setenv("ROUTER_URL", "http://router.example.com")
 	t.Setenv("STATUS_URL", "http://status.example.com")
 	t.Setenv("HMAC_SECRET", "custom-secret")
@@ -152,6 +156,9 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 
 	if cfg.Port != "9099" {
 		t.Errorf("expected Port '9099', got %q", cfg.Port)
+	}
+	if cfg.MetricsPort != "9090" {
+		t.Errorf("expected MetricsPort '9090', got %q", cfg.MetricsPort)
 	}
 	if cfg.RouterURL != "http://router.example.com" {
 		t.Errorf("expected RouterURL 'http://router.example.com', got %q", cfg.RouterURL)

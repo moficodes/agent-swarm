@@ -368,3 +368,34 @@ func TestStatic_ChatMobileResponsiveLayout(t *testing.T) {
 		}
 	}
 }
+
+// TestStatic_StageGitHubRepoCardNextToActorState checks that /stage displays a
+// clickable GitHub repository spec-card with SVG icons immediately after the
+// ACTOR STATE card in .header-specs.
+func TestStatic_StageGitHubRepoCardNextToActorState(t *testing.T) {
+	html := readStatic(t, "stage.html")
+	actorStateIdx := strings.Index(html, `<span class="spec-label">ACTOR STATE</span>`)
+	repoIdx := strings.Index(html, `id="github-repo-link"`)
+	mockBannerIdx := strings.Index(html, `id="mock-banner"`)
+	if actorStateIdx < 0 || repoIdx < 0 || mockBannerIdx < 0 || !(actorStateIdx < repoIdx && repoIdx < mockBannerIdx) {
+		t.Fatalf("stage.html must place #github-repo-link immediately after ACTOR STATE inside .header-specs (actorState=%d repo=%d mockBanner=%d)", actorStateIdx, repoIdx, mockBannerIdx)
+	}
+	for _, want := range []string{
+		`href="https://github.com/moficodes/agent-swarm"`,
+		`target="_blank"`,
+		`rel="noopener noreferrer"`,
+		`github.com/moficodes/agent-swarm`,
+		`class="spec-card spec-card-link"`,
+		`class="spec-link-icon"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("stage.html lacks %q", want)
+		}
+	}
+	css := readStatic(t, "stage.css")
+	for _, want := range []string{".spec-card-link", ".spec-link-value", ".spec-link-icon"} {
+		if !strings.Contains(css, want) {
+			t.Errorf("stage.css lacks %q", want)
+		}
+	}
+}

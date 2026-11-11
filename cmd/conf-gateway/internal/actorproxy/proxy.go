@@ -28,6 +28,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
@@ -85,15 +86,20 @@ type ModelCaller interface {
 
 // Proxy forwards attendee requests to atenet-router.
 type Proxy struct {
-	rp       *httputil.ReverseProxy
-	hooks    Hooks
-	model    ModelCaller
-	target   *url.URL
-	atespace string
-	secret   []byte
-	client   *http.Client
+	rp             *httputil.ReverseProxy
+	hooks          Hooks
+	model          ModelCaller
+	target         *url.URL
+	atespace       string
+	secret         []byte
+	client         *http.Client
+	routerInFlight atomic.Int64
 	*approvals
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // New returns a Proxy to the router at target. A nil target leaves the
 // request URL unchanged. A nil transport uses http.DefaultTransport. A nil
@@ -137,10 +143,24 @@ func New(target *url.URL, atespace string, secret []byte, transport http.RoundTr
 			http.Error(w, fmt.Sprintf("Bad Gateway: %v", err), http.StatusBadGateway)
 		},
 	}
-	if transport != nil {
-		p.rp.Transport = transport
+	baseTransport := transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
 	}
+	p.rp.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		p.routerInFlight.Add(1)
+		defer p.routerInFlight.Add(-1)
+		return baseTransport.RoundTrip(req)
+	})
 	return p
+}
+
+// RouterInFlight returns the number of HTTP requests from this proxy currently
+// awaiting an initial response from atenet-router (the window in which the
+// router may park a request while resuming its actor). It excludes gateway
+// model calls and follow-up model-result posts to already-awake actors.
+func (p *Proxy) RouterInFlight() int {
+	return int(max(0, p.routerInFlight.Load()))
 }
 
 // ClearHistory asks the attendee's actor, through the router, to drop its
@@ -156,7 +176,9 @@ func (p *Proxy) ClearHistory(ctx context.Context, attendee string) error {
 	}
 	req.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", p.atespace, attendee))
 	req.Header.Set(types.ModelKeyHeader, ModelKey(p.secret, p.atespace, attendee))
+	p.routerInFlight.Add(1)
 	resp, err := p.client.Do(req)
+	p.routerInFlight.Add(-1)
 	if err != nil {
 		return err
 	}

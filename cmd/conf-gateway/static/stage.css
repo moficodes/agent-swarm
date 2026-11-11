@@ -249,6 +249,49 @@ html, body {
   padding: 0.45rem 0.85rem;
 }
 
+.spec-card-link {
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.spec-card-link:hover,
+.spec-card-link:focus-visible {
+  border-color: var(--neon-cyan);
+  background: var(--bg-card-hover);
+  outline: none;
+}
+
+.spec-link-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-primary);
+  transition: color 0.15s ease;
+}
+
+.spec-card-link:hover .spec-link-value,
+.spec-card-link:focus-visible .spec-link-value {
+  color: var(--neon-cyan);
+}
+
+.spec-link-icon {
+  flex-shrink: 0;
+}
+
+.spec-card-link .external-icon {
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.spec-card-link:hover .external-icon,
+.spec-card-link:focus-visible .external-icon {
+  opacity: 1;
+  transform: translate(1px, -1px);
+}
+
 .spec-label {
   font-size: 0.65rem;
   font-weight: 700;

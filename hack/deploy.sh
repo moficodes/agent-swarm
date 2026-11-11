@@ -500,6 +500,12 @@ conf_render_hpa() {
   conf_render manifests/autoscaling.yaml.tmpl | sed -n '/^apiVersion: autoscaling\/v2$/,$p'
 }
 
+conf_render_shared_prometheus() {
+  local owner_ns="$1"
+  DEMO_CONF_NAMESPACE="${owner_ns}" conf_render manifests/autoscaling.yaml.tmpl \
+    | awk '/^# --- conf-prometheus-adapter ---$/ { exit } { print }'
+}
+
 conf_adapter_series_query() {
   printf '{__name__="ate_workerpool_workers",ate_workerpool_namespace="%s",ate_workerpool_name="%s"}' \
     "$(conf_ns)" "$(conf_worker_pool)"
@@ -509,8 +515,8 @@ conf_adapter_metrics_query() {
   local ns pool
   ns="$(conf_ns)"
   pool="$(conf_worker_pool)"
-  printf '(max(ate_workerpool_workers{ate_workerpool_namespace="%s",ate_workerpool_name="%s",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="%s",ate_workerpool_name="%s",ate_worker_state="at_capacity"}) or vector(0)) + ceil((sum(atenet_router_parking_active) or vector(0)) / %s)' \
-    "${ns}" "${pool}" "${ns}" "${pool}" "${DEMO_CONF_ACTORS_PER_WORKER}"
+  printf '(max(ate_workerpool_workers{ate_workerpool_namespace="%s",ate_workerpool_name="%s",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="%s",ate_workerpool_name="%s",ate_worker_state="at_capacity"}) or vector(0)) + ceil((max(conf_gateway_parked_requests{namespace="%s"}) or sum(atenet_router_parking_active) or vector(0)) / %s)' \
+    "${ns}" "${pool}" "${ns}" "${pool}" "${ns}" "${DEMO_CONF_ACTORS_PER_WORKER}"
 }
 
 conf_update_adapter_configmap() {
@@ -835,6 +841,16 @@ conf_deploy() {
     conf_render manifests/autoscaling-apiservice.yaml.tmpl | run_kubectl_fatal apply -f -
   else
     log_step "Registering $(conf_external_metric) in shared ${apiservice_owner}/conf-prometheus-adapter and installing the ${pool} HPA..."
+    local old_prom_cfg new_prom_cfg
+    old_prom_cfg="$(run_kubectl get configmap conf-prometheus-config -n "${apiservice_owner}" \
+      -o jsonpath='{.data.prometheus\.yml}' --ignore-not-found)"
+    conf_render_shared_prometheus "${apiservice_owner}" | run_kubectl_fatal apply -f -
+    new_prom_cfg="$(run_kubectl get configmap conf-prometheus-config -n "${apiservice_owner}" \
+      -o jsonpath='{.data.prometheus\.yml}' --ignore-not-found)"
+    if [[ "${old_prom_cfg}" != "${new_prom_cfg}" ]]; then
+      run_kubectl_fatal rollout restart deployment/conf-prometheus -n "${apiservice_owner}"
+    fi
+    run_kubectl_fatal rollout status deployment/conf-prometheus -n "${apiservice_owner}" --timeout=180s
     conf_update_adapter_configmap "${apiservice_owner}" upsert
     run_kubectl_fatal rollout restart deployment/conf-prometheus-adapter -n "${apiservice_owner}"
     run_kubectl_fatal rollout status deployment/conf-prometheus-adapter -n "${apiservice_owner}" --timeout=180s

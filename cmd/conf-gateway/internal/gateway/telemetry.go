@@ -17,6 +17,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"slices"
@@ -25,6 +26,40 @@ import (
 
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
+
+// MetricsHandler returns an HTTP handler serving Prometheus metrics for this
+// gateway instance on /metrics (intended for an internal-only metrics port).
+func (g *Gateway) MetricsHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		parked, parkingOK := g.scopedParking()
+		inFlight := g.proxy.RouterInFlight()
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		if parkingOK {
+			fmt.Fprintf(w, "# HELP conf_gateway_parked_requests Requests from this gateway currently parked in atenet-router.\n")
+			fmt.Fprintf(w, "# TYPE conf_gateway_parked_requests gauge\n")
+			fmt.Fprintf(w, "conf_gateway_parked_requests %d\n", parked)
+		}
+		fmt.Fprintf(w, "# HELP conf_gateway_router_in_flight HTTP requests currently awaiting atenet-router from this gateway.\n")
+		fmt.Fprintf(w, "# TYPE conf_gateway_router_in_flight gauge\n")
+		fmt.Fprintf(w, "conf_gateway_router_in_flight %d\n", inFlight)
+	})
+}
+
+func (g *Gateway) scopedParking() (int, bool) {
+	snap := g.parking.Load()
+	if snap == nil {
+		return 0, false
+	}
+	return min(snap.Parked, g.proxy.RouterInFlight()), snap.Available
+}
 
 func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -69,11 +104,7 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	eventsCopy := slices.Clone(g.recentEvents)
 	g.mu.RUnlock()
 
-	var parked int
-	var parkingOK bool
-	if snap := g.parking.Load(); snap != nil {
-		parked, parkingOK = snap.Parked, snap.Available
-	}
+	parked, parkingOK := g.scopedParking()
 
 	telem := types.StageTelemetry{
 		Atespace:         g.atespace,
@@ -184,12 +215,15 @@ func (g *Gateway) pollStatus(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		inFlightBefore := g.proxy.RouterInFlight()
+		snap := g.routerStatus.Fetch(ctx)
+		inFlightAfter := g.proxy.RouterInFlight()
+		snap.Parked = min(snap.Parked, max(inFlightBefore, inFlightAfter))
+		g.parking.Store(&snap)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			snap := g.routerStatus.Fetch(ctx)
-			g.parking.Store(&snap)
 		}
 	}
 }
