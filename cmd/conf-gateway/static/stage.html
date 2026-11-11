@@ -187,8 +187,11 @@ limitations under the License.
       <section class="stage-content">
         <!-- Worker Hardware Pool Display (one card per worker pod) -->
         <div class="workers-section">
-          <div class="section-title-row">
-            <h3 class="section-label">WORKER POOL HARDWARE EXECUTION</h3>
+          <div class="section-title-row workers-title-row">
+            <div class="workers-heading-group">
+              <h3 class="section-label">WORKER POOL HARDWARE EXECUTION</h3>
+              <div id="worker-topo-nav" class="worker-topo-nav" aria-label="Hardware topology drill-down navigation"></div>
+            </div>
             <span id="worker-pool-replicas" class="section-sub">Execution Seats</span>
           </div>
           <div id="worker-list" class="workers-grid">
@@ -229,11 +232,40 @@ limitations under the License.
         <div class="fleet-section">
           <!-- Grid View Mode -->
           <div id="stage-grid-view" class="stage-view-container active">
-            <div class="section-title-row">
+            <div class="section-title-row fleet-title-row">
               <div class="fleet-heading">
                 <h3 class="section-label">ATTENDEE AGENT FLEET MATRIX</h3>
                 <span id="fleet-sub" class="section-sub">Actors multiplexed onto shared worker pods</span>
               </div>
+
+              <!-- Interactive Semantic Zoom & Quick-Jump Toolbar for 65k Canvas -->
+              <div id="fleet-zoom-toolbar" class="fleet-zoom-toolbar" role="toolbar" aria-label="Fleet matrix zoom and navigation controls" hidden>
+                <div class="fleet-zoom-presets" role="group" aria-label="Zoom presets">
+                  <button type="button" class="btn-fleet-zoom active" data-zoom="1" title="1× Macro Overview (All 65,536 actors)">1× All</button>
+                  <button type="button" class="btn-fleet-zoom" data-zoom="4" title="4× Cohort Tiles (~4,096 actors with Pod &amp; QR markers)">4×</button>
+                  <button type="button" class="btn-fleet-zoom" data-zoom="16" title="16× Inspector Mini-Cards (~256 actors with ID, State &amp; Pod)">16×</button>
+                  <button type="button" class="btn-fleet-zoom" data-zoom="32" title="32× Detailed Actor Cards (~64 actors)">32×</button>
+                </div>
+                <div class="fleet-zoom-stepper" role="group" aria-label="Fine zoom controls">
+                  <button type="button" id="btn-fleet-zoom-out" class="btn-fleet-step" title="Zoom out" aria-label="Zoom out">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  </button>
+                  <span id="fleet-zoom-readout" class="fleet-zoom-readout">1.0×</span>
+                  <button type="button" id="btn-fleet-zoom-in" class="btn-fleet-step" title="Zoom in" aria-label="Zoom in">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  </button>
+                  <button type="button" id="btn-fleet-zoom-reset" class="btn-fleet-reset" title="Reset zoom to 1× full 65,536 view" hidden>Reset</button>
+                </div>
+                <button type="button" id="btn-fleet-loupe" class="btn-fleet-loupe active" aria-pressed="true" title="Toggle 10× floating magnifier loupe on hover at low zoom">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+                  <span>Loupe</span>
+                </button>
+                <div class="fleet-jump-box">
+                  <input type="number" id="fleet-jump-input" class="fleet-jump-input" min="1" max="65536" placeholder="Actor #..." aria-label="Jump to Actor ID">
+                  <button type="button" id="btn-fleet-jump" class="btn-fleet-jump" title="Zoom to Actor #">Go</button>
+                </div>
+              </div>
+
               <!-- Legend for States -->
               <div class="fleet-legend">
                 <span class="legend-item"><span class="legend-dot never-started"></span> Never started</span>
@@ -250,6 +282,14 @@ limitations under the License.
           </div>
           <div id="fleet-canvas-wrap" class="fleet-canvas-wrap" hidden>
             <canvas id="fleet-canvas" class="fleet-canvas" aria-label="Attendee Agent Fleet Matrix"></canvas>
+            <div id="fleet-minimap-wrap" class="fleet-minimap-wrap" hidden>
+              <div class="minimap-header">
+                <span class="minimap-title">65K NAVIGATOR</span>
+                <span id="minimap-coords" class="minimap-coords">4.0×</span>
+                <button type="button" id="btn-minimap-reset" class="btn-minimap-reset" title="Reset to 1× full view">1× All</button>
+              </div>
+              <canvas id="fleet-minimap" class="fleet-minimap" width="256" height="64" aria-label="65,536 Fleet Minimap Navigator"></canvas>
+            </div>
           </div>
         </div>
 

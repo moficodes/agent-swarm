@@ -36,12 +36,26 @@
     parkingProgressBar: document.getElementById('parking-progress-bar'),
     parkingPulseDot: document.getElementById('parking-pulse-dot'),
     workerList: document.getElementById('worker-list'),
+    workerTopoNav: document.getElementById('worker-topo-nav'),
     workerPoolReplicas: document.getElementById('worker-pool-replicas'),
     workerPodsSeats: document.getElementById('worker-pods-seats'),
     fleetGrid: document.getElementById('fleet-grid'),
     fleetCanvasWrap: document.getElementById('fleet-canvas-wrap'),
     fleetCanvas: document.getElementById('fleet-canvas'),
     fleetSub: document.getElementById('fleet-sub'),
+    fleetZoomToolbar: document.getElementById('fleet-zoom-toolbar'),
+    fleetZoomPresets: document.querySelectorAll('.btn-fleet-zoom'),
+    btnFleetZoomOut: document.getElementById('btn-fleet-zoom-out'),
+    btnFleetZoomIn: document.getElementById('btn-fleet-zoom-in'),
+    fleetZoomReadout: document.getElementById('fleet-zoom-readout'),
+    btnFleetZoomReset: document.getElementById('btn-fleet-zoom-reset'),
+    btnFleetLoupe: document.getElementById('btn-fleet-loupe'),
+    fleetJumpInput: document.getElementById('fleet-jump-input'),
+    btnFleetJump: document.getElementById('btn-fleet-jump'),
+    fleetMinimapWrap: document.getElementById('fleet-minimap-wrap'),
+    fleetMinimap: document.getElementById('fleet-minimap'),
+    minimapCoords: document.getElementById('minimap-coords'),
+    btnMinimapReset: document.getElementById('btn-minimap-reset'),
     hoverTooltip: document.getElementById('stage-hover-tooltip'),
     hoverTipDot: document.getElementById('hover-tip-dot'),
     hoverTipTitle: document.getElementById('hover-tip-title'),
@@ -93,8 +107,31 @@
   let latestRunningActors = 0;
   let latestSuspendedActors = 0;
   let podHoverDirectory = {};
+  let seatedActorPodMap = {};
+  let latestNodeGroups = [];
+  let latestWorkerList = [];
+  let latestWorkerSeats = 4;
+  let latestWorkerPodsMeta = null;
+  let topoSelectedNode = null;
+  let topoSelectedPod = null;
+  let topoHighlightPod = null;
   let canvasCols = 512;
   let canvasRows = 128;
+  let fleetZoom = 1;
+  let fleetPanX = 0;
+  let fleetPanY = 0;
+  let fleetLoupeEnabled = true;
+  let fleetIsDragging = false;
+  let fleetDragMoved = false;
+  let fleetDragStartX = 0;
+  let fleetDragStartY = 0;
+  let fleetDragStartPanX = 0;
+  let fleetDragStartPanY = 0;
+  let lastCanvasMouseX = -1;
+  let lastCanvasMouseY = -1;
+  let highlightedActorIndex = -1;
+  let highlightedActorUntil = 0;
+  let minimapIsDragging = false;
   let currentSpotlightActorId = null;
   let currentStreamFilter = 'all';
   let streamSearchQuery = '';
@@ -622,17 +659,74 @@
     return bestCls;
   }
 
-  function render4x4SeatWorkerCardHTML(w, seats) {
+  const ZOOM_CORNER_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+  const BACK_ARROW_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>';
+
+  function shortPodName(podName) {
+    if (!podName) return 'worker';
+    const parts = podName.split('-');
+    if (parts.length >= 2) {
+      return parts.slice(-2).join('-');
+    }
+    return podName;
+  }
+
+  function parseActorNumber(actorId) {
+    if (!actorId) return 0;
+    const m = String(actorId).match(/(\d+)$/);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  function isActorLeased(actorId, actorNum) {
+    const live = actorId ? latestActorsMap[actorId] : null;
+    if (live && live.leased) return true;
+    const idx = actorNum || parseActorNumber(actorId);
+    if (idx >= 1 && latestFleetCompact && idx <= latestFleetCompact.length) {
+      const raw = latestFleetCompact.charCodeAt(idx - 1) - 64;
+      return (raw & 16) !== 0;
+    }
+    return false;
+  }
+
+  function shortStatePillLabel(cls, fallback) {
+    switch (cls) {
+      case 'thinking': return 'THINKING';
+      case 'executing': return 'EXECUTING';
+      case 'awaiting': return 'AWAITING';
+      case 'running': return 'RUNNING';
+      case 'resuming': return 'RESUMING';
+      case 'suspending': return 'SUSPENDING';
+      case 'problem': return 'PROBLEM';
+      default: return (fallback || 'ACTIVE').toUpperCase();
+    }
+  }
+
+  function describeSeatActivity(wa, badgeObj) {
+    const cls = badgeObj ? badgeObj.cls : 'running';
+    switch (cls) {
+      case 'thinking': return 'Gemini 3.8 Flash';
+      case 'executing': return 'gVisor Sandbox';
+      case 'awaiting': return 'Human Review Gate';
+      case 'resuming': return 'Restoring GCS Snap';
+      case 'suspending': return 'Writing GCS Snap';
+      case 'running': return 'Active Pod Seat';
+      default: return (badgeObj && badgeObj.sub) ? badgeObj.sub : 'Seated on Worker';
+    }
+  }
+
+  function render4x4SeatWorkerCardHTML(w, seats, nodeName) {
     const actors = w.actors || [];
     const podName = w.pod_name || 'worker';
-    const shortPod = podName.split('-').slice(-2).join('-');
+    const shortPod = shortPodName(podName);
     const isBusy = actors.length > 0;
+    const isHighlighted = topoHighlightPod && topoHighlightPod === podName;
+    const nAttr = nodeName ? ` data-node="${escapeHTML(nodeName)}"` : '';
     const cells = [];
     for (let i = 0; i < seats; i++) {
       const wa = actors[i];
       if (!wa) {
         cells.push(
-          `<div class="seat-cell empty" data-hover-kind="seat" data-pod="${escapeHTML(podName)}" data-seat="${i + 1}">·</div>`
+          `<div class="seat-cell empty" data-hover-kind="seat" data-pod="${escapeHTML(podName)}"${nAttr} data-seat="${i + 1}">·</div>`
         );
       } else {
         const b = actorBadgeForWorkerActor(wa);
@@ -640,18 +734,21 @@
         const numMatch = (wa.actor_id || '').match(/(\d+)$/);
         const shortNum = numMatch ? numMatch[1] : '•';
         cells.push(
-          `<div class="seat-cell ${cls}" data-hover-kind="seat" data-pod="${escapeHTML(podName)}" data-seat="${i + 1}" data-actor="${escapeHTML(wa.actor_id || '')}">${escapeHTML(shortNum.slice(-3))}</div>`
+          `<div class="seat-cell ${cls}" data-hover-kind="seat" data-pod="${escapeHTML(podName)}"${nAttr} data-seat="${i + 1}" data-actor="${escapeHTML(wa.actor_id || '')}">${escapeHTML(shortNum.slice(-3))}</div>`
         );
       }
     }
     return `
-      <div class="card worker-card${isBusy ? ' active' : ''}">
-        <div class="worker-card-header">
+      <div class="card worker-card zoomable-card${isBusy ? ' active' : ''}${isHighlighted ? ' pod-highlight-flash' : ''}" data-pod-card="${escapeHTML(podName)}"${nAttr}>
+        <div class="worker-card-header" data-zoom-pod="${escapeHTML(podName)}"${nAttr} title="Click to zoom into pod ${escapeHTML(podName)} and inspect all ${seats} actor seats">
           <div class="worker-id">
             <span class="worker-dot${isBusy ? ' active' : ''}"></span>
-            <span class="worker-title" title="${escapeHTML(podName)}">${escapeHTML(shortPod)}</span>
+            <span class="worker-title">${escapeHTML(shortPod)}</span>
           </div>
-          <span class="worker-seat-count${actors.length >= seats ? ' full' : ''}">${actors.length}/${seats}</span>
+          <div class="worker-header-right">
+            <span class="worker-seat-count${actors.length >= seats ? ' full' : ''}">${actors.length}/${seats}</span>
+            <button type="button" class="node-corner-zoom-btn" data-zoom-pod="${escapeHTML(podName)}"${nAttr} title="Zoom into pod ${escapeHTML(podName)} (see all ${seats} actors)" aria-label="Zoom into pod ${escapeHTML(shortPod)}">${ZOOM_CORNER_ICON_SVG}</button>
+          </div>
         </div>
         <div class="seat-grid-4x4">${cells.join('')}</div>
       </div>
@@ -661,7 +758,7 @@
   function renderNodeMatrixCardHTML(nodeGroup, nodeIdx, seatsPerPod) {
     const pods = nodeGroup.pods || [];
     const nodeName = nodeGroup.nodeName || ('node-' + String(nodeIdx + 1).padStart(2, '0'));
-    const nodeLabel = 'node-' + String(nodeIdx + 1).padStart(2, '0');
+    const nodeLabel = nodeGroup.nodeLabel || ('node-' + String(nodeIdx + 1).padStart(2, '0'));
     const totalNodeSeats = pods.length * seatsPerPod;
     let busyNodeSeats = 0;
     const cells = [];
@@ -681,17 +778,182 @@
     }
     const isBusy = busyNodeSeats > 0;
     return `
-      <div class="card worker-card${isBusy ? ' active' : ''}">
-        <div class="worker-card-header">
+      <div class="card worker-card zoomable-card${isBusy ? ' active' : ''}" data-node-card="${escapeHTML(nodeName)}">
+        <div class="worker-card-header" data-zoom-node="${escapeHTML(nodeName)}" title="Click to zoom into GKE Node ${escapeHTML(nodeLabel)} (${escapeHTML(nodeName)}) and see all 16 pods with their slots">
           <div class="worker-id">
             <span class="worker-dot${isBusy ? ' active' : ''}"></span>
-            <span class="worker-title" title="GKE Node: ${escapeHTML(nodeName)} (16 pods × ${seatsPerPod} seats)">${escapeHTML(nodeLabel)}</span>
+            <span class="worker-title">${escapeHTML(nodeLabel)}</span>
           </div>
-          <span class="worker-seat-count${busyNodeSeats >= totalNodeSeats ? ' full' : ''}">${busyNodeSeats}/${totalNodeSeats}</span>
+          <div class="worker-header-right">
+            <span class="worker-seat-count${busyNodeSeats >= totalNodeSeats ? ' full' : ''}">${busyNodeSeats}/${totalNodeSeats}</span>
+            <button type="button" class="node-corner-zoom-btn" data-zoom-node="${escapeHTML(nodeName)}" title="Zoom into ${escapeHTML(nodeLabel)} (see all 16 pods &amp; their 16 slots)" aria-label="Zoom into ${escapeHTML(nodeLabel)}">${ZOOM_CORNER_ICON_SVG}</button>
+          </div>
         </div>
         <div class="seat-grid-4x4">${cells.join('')}</div>
       </div>
     `;
+  }
+
+  function renderPodActorSeatDetailCardHTML(w, seatIdx, seatsPerPod, nodeGroup) {
+    const actors = (w && w.actors) ? w.actors : [];
+    const podName = (w && w.pod_name) ? w.pod_name : 'worker';
+    const nodeName = (nodeGroup && nodeGroup.nodeName) ? nodeGroup.nodeName : '';
+    const wa = actors[seatIdx];
+    const seatLabel = 'SEAT ' + String(seatIdx + 1).padStart(2, '0');
+    if (!wa || !wa.actor_id) {
+      return `
+        <div class="pod-actor-seat-card empty" data-hover-kind="seat" data-pod="${escapeHTML(podName)}" data-node="${escapeHTML(nodeName)}" data-seat="${seatIdx + 1}">
+          <div class="seat-card-top">
+            <span class="seat-card-idx">${seatLabel}</span>
+            <span class="seat-card-badge empty">IDLE</span>
+          </div>
+          <div class="seat-card-main">
+            <span class="seat-card-actor">Open Seat</span>
+          </div>
+          <div class="seat-card-bottom">
+            <span class="seat-card-sub">Ready for actor wake</span>
+          </div>
+        </div>
+      `;
+    }
+    const actorId = wa.actor_id;
+    const b = actorBadgeForWorkerActor(wa) || { cls: 'running', label: 'Running', sub: '' };
+    const cls = b.cls || 'running';
+    const pillText = shortStatePillLabel(cls, b.label);
+    const activityDetail = describeSeatActivity(wa, b);
+    const actorNum = parseActorNumber(actorId);
+    const isQR = actorNum > 0 && (actorNum % 16 === 0);
+    const leased = isActorLeased(actorId, actorNum);
+    const qrBadge = leased
+      ? '<span class="seat-card-qr leased" title="Active live QR attendee lease">LIVE</span>'
+      : (isQR ? '<span class="seat-card-qr" title="Multiple-of-16 QR-reservable attendee slot">QR 16x</span>' : '');
+    return `
+      <div class="pod-actor-seat-card ${cls}" data-hover-kind="seat" data-pod="${escapeHTML(podName)}" data-node="${escapeHTML(nodeName)}" data-seat="${seatIdx + 1}" data-actor="${escapeHTML(actorId)}">
+        <div class="seat-card-top">
+          <span class="seat-card-idx">${seatLabel}</span>
+          <span class="seat-card-badge ${cls}">${escapeHTML(pillText)}</span>
+        </div>
+        <div class="seat-card-main">
+          <span class="seat-card-actor" title="${escapeHTML(actorId)}">${escapeHTML(formatActorName(actorId))}</span>
+          ${qrBadge}
+        </div>
+        <div class="seat-card-bottom">
+          <span class="seat-card-sub">${escapeHTML(activityDetail)}</span>
+          <button type="button" class="btn-locate-actor" data-locate-actor="${escapeHTML(actorId)}" title="Zoom to ${escapeHTML(formatActorName(actorId))} in the 65,536 fleet matrix">65k ⌖</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderWorkerTopoNav(seatsPerPod, multiNodeMode) {
+    if (!el.workerTopoNav) return;
+    if (!multiNodeMode && !topoSelectedPod) {
+      el.workerTopoNav.innerHTML = '';
+      return;
+    }
+
+    if (!topoSelectedNode && !topoSelectedPod) {
+      el.workerTopoNav.innerHTML = `
+        <span class="topo-hint-pill">16 Nodes × 16 Pods × 16 Seats · Click any node corner to zoom into its 16 pods</span>
+      `;
+      return;
+    }
+
+    const activeNode = latestNodeGroups.find((g) => g.nodeName === topoSelectedNode) || latestNodeGroups[0] || null;
+    if (topoSelectedNode && !topoSelectedPod && activeNode) {
+      const pods = activeNode.pods || [];
+      const totalNodeSeats = pods.length * seatsPerPod;
+      const busyNodeSeats = pods.reduce((sum, p) => sum + ((p.actors || []).length), 0);
+      el.workerTopoNav.innerHTML = `
+        <button type="button" class="topo-crumb-btn" data-topo-action="all-nodes">${BACK_ARROW_ICON_SVG}<span>All 16 Nodes</span></button>
+        <span class="topo-crumb-sep">▸</span>
+        <span class="topo-crumb-active" title="GKE Node: ${escapeHTML(activeNode.nodeName)}">
+          <span>${escapeHTML(activeNode.nodeLabel)}</span>
+          <span class="topo-crumb-meta">${pods.length} Pods · ${busyNodeSeats}/${totalNodeSeats} Seats</span>
+        </span>
+        <span class="topo-step-group" role="group" aria-label="Cycle GKE nodes">
+          <button type="button" class="topo-step-btn" data-topo-action="prev-node" title="Previous GKE Node" aria-label="Previous GKE Node">‹</button>
+          <button type="button" class="topo-step-btn" data-topo-action="next-node" title="Next GKE Node" aria-label="Next GKE Node">›</button>
+        </span>
+        <span class="topo-hint-pill">Click any pod to see all ${seatsPerPod} actors in that pod</span>
+      `;
+      return;
+    }
+
+    if (topoSelectedPod) {
+      const podInfo = podHoverDirectory[topoSelectedPod];
+      const podActors = (podInfo && podInfo.actors) ? podInfo.actors : [];
+      const nodeForPod = activeNode || latestNodeGroups.find((g) => (g.pods || []).some((p) => p.pod_name === topoSelectedPod)) || null;
+      const nodeCrumb = (multiNodeMode && nodeForPod)
+        ? `<button type="button" class="topo-crumb-btn" data-topo-action="zoom-node" data-node="${escapeHTML(nodeForPod.nodeName)}">${escapeHTML(nodeForPod.nodeLabel)} (16 Pods)</button><span class="topo-crumb-sep">▸</span>`
+        : '';
+      const rootLabel = multiNodeMode ? 'All 16 Nodes' : 'All Pods';
+      el.workerTopoNav.innerHTML = `
+        <button type="button" class="topo-crumb-btn" data-topo-action="all-nodes">${BACK_ARROW_ICON_SVG}<span>${rootLabel}</span></button>
+        <span class="topo-crumb-sep">▸</span>
+        ${nodeCrumb}
+        <span class="topo-crumb-active" title="Worker Pod: ${escapeHTML(topoSelectedPod)}">
+          <span>Pod ${escapeHTML(shortPodName(topoSelectedPod))}</span>
+          <span class="topo-crumb-meta">${podActors.length}/${seatsPerPod} Active Actor Seats</span>
+        </span>
+        <span class="topo-step-group" role="group" aria-label="Cycle worker pods">
+          <button type="button" class="topo-step-btn" data-topo-action="prev-pod" title="Previous Worker Pod" aria-label="Previous Worker Pod">‹</button>
+          <button type="button" class="topo-step-btn" data-topo-action="next-pod" title="Next Worker Pod" aria-label="Next Worker Pod">›</button>
+        </span>
+        <span class="topo-hint-pill">Click any actor seat for Spotlight · Click 65k ⌖ to zoom in fleet matrix</span>
+      `;
+    }
+  }
+
+  function zoomToTopologyNode(nodeName, highlightPodName) {
+    if (!nodeName) return;
+    topoSelectedNode = nodeName;
+    topoSelectedPod = null;
+    topoHighlightPod = highlightPodName || null;
+    hideHoverTooltip();
+    updateWorkerCards(latestWorkerList, latestWorkerSeats, latestWorkerPodsMeta);
+  }
+
+  function zoomToTopologyPod(podName, nodeName) {
+    if (!podName) return;
+    topoSelectedPod = podName;
+    if (nodeName) {
+      topoSelectedNode = nodeName;
+    } else if (podHoverDirectory[podName] && podHoverDirectory[podName].nodeName) {
+      topoSelectedNode = podHoverDirectory[podName].nodeName;
+    }
+    topoHighlightPod = null;
+    hideHoverTooltip();
+    updateWorkerCards(latestWorkerList, latestWorkerSeats, latestWorkerPodsMeta);
+  }
+
+  function resetTopologyZoom() {
+    topoSelectedNode = null;
+    topoSelectedPod = null;
+    topoHighlightPod = null;
+    hideHoverTooltip();
+    updateWorkerCards(latestWorkerList, latestWorkerSeats, latestWorkerPodsMeta);
+  }
+
+  function stepTopologyNode(delta) {
+    if (!latestNodeGroups || latestNodeGroups.length === 0) return;
+    const idx = latestNodeGroups.findIndex((g) => g.nodeName === topoSelectedNode);
+    const nextIdx = idx < 0 ? 0 : (idx + delta + latestNodeGroups.length) % latestNodeGroups.length;
+    zoomToTopologyNode(latestNodeGroups[nextIdx].nodeName);
+  }
+
+  function stepTopologyPod(delta) {
+    let podPool = [];
+    const activeNode = latestNodeGroups.find((g) => g.nodeName === topoSelectedNode);
+    if (activeNode && Array.isArray(activeNode.pods) && activeNode.pods.length > 0) {
+      podPool = activeNode.pods;
+    } else {
+      podPool = latestWorkerList || [];
+    }
+    if (podPool.length === 0) return;
+    const idx = podPool.findIndex((p) => p.pod_name === topoSelectedPod);
+    const nextIdx = idx < 0 ? 0 : (idx + delta + podPool.length) % podPool.length;
+    zoomToTopologyPod(podPool[nextIdx].pod_name, topoSelectedNode);
   }
 
   // renderSeatHTML renders one of a worker's seats: the actor holding it and
@@ -737,6 +999,10 @@
 
   function updateWorkerCards(workers, seats, workerPods) {
     if (!el.workerList) return;
+    latestWorkerList = (workers || []).slice();
+    latestWorkerSeats = seats;
+    latestWorkerPodsMeta = workerPods;
+
     const list = (workers || []).slice();
     const podCount = (workerPods && workerPods.available && workerPods.current > 0) ? workerPods.current : 2;
     const targetCount = Math.max(2, list.length, podCount);
@@ -760,18 +1026,33 @@
     list.sort((a, b) => (a.pod_name || '').localeCompare(b.pod_name || ''));
 
     podHoverDirectory = {};
+    seatedActorPodMap = {};
     for (let i = 0; i < list.length; i++) {
       const w = list[i];
+      const nName = podNodes[w.pod_name] || '';
+      const pActors = w.actors || [];
       podHoverDirectory[w.pod_name] = {
         podName: w.pod_name,
-        nodeName: podNodes[w.pod_name] || '',
-        actors: w.actors || [],
+        nodeName: nName,
+        actors: pActors,
         seats: seats
       };
+      const sPod = shortPodName(w.pod_name);
+      for (let sIdx = 0; sIdx < pActors.length; sIdx++) {
+        const wa = pActors[sIdx];
+        if (wa && wa.actor_id) {
+          seatedActorPodMap[wa.actor_id] = {
+            podName: w.pod_name,
+            shortPod: sPod,
+            nodeName: nName,
+            seatIndex: sIdx + 1,
+            state: wa.state || 'RUNNING'
+          };
+        }
+      }
     }
 
     // 16-Node x 16-Pod x 16-Seat high-scale cluster mode (> 16 worker pods):
-    // Group the 256 pods into 16 Node cards (2 rows x 8 columns), each with a 4x4 pod grid.
     if (list.length > 16) {
       const byNode = new Map();
       const unassigned = [];
@@ -794,23 +1075,105 @@
           pods: chunk
         });
       }
-      const cols = Math.min(8, Math.max(4, Math.ceil(nodeGroups.length / 2)));
+      latestNodeGroups = nodeGroups.slice(0, 16).map((g, i) => ({
+        nodeName: g.nodeName,
+        nodeLabel: 'node-' + String(i + 1).padStart(2, '0'),
+        nodeIndex: i,
+        pods: g.pods || []
+      }));
+
+      // Backfill assigned nodeName/nodeLabel onto podHoverDirectory & seatedActorPodMap
+      for (let nIdx = 0; nIdx < latestNodeGroups.length; nIdx++) {
+        const ng = latestNodeGroups[nIdx];
+        for (let pIdx = 0; pIdx < ng.pods.length; pIdx++) {
+          const pw = ng.pods[pIdx];
+          if (podHoverDirectory[pw.pod_name]) {
+            podHoverDirectory[pw.pod_name].nodeName = ng.nodeName;
+            podHoverDirectory[pw.pod_name].nodeLabel = ng.nodeLabel;
+          }
+          const pActors = pw.actors || [];
+          for (let aIdx = 0; aIdx < pActors.length; aIdx++) {
+            const wa = pActors[aIdx];
+            if (wa && wa.actor_id && seatedActorPodMap[wa.actor_id]) {
+              seatedActorPodMap[wa.actor_id].nodeName = ng.nodeName;
+              seatedActorPodMap[wa.actor_id].nodeLabel = ng.nodeLabel;
+            }
+          }
+        }
+      }
+
+      if (topoSelectedPod && !podHoverDirectory[topoSelectedPod]) {
+        topoSelectedPod = null;
+      }
+      if (topoSelectedNode && !latestNodeGroups.some((g) => g.nodeName === topoSelectedNode)) {
+        topoSelectedNode = null;
+      }
+      if (topoSelectedPod && !topoSelectedNode) {
+        const ownerNode = latestNodeGroups.find((g) => g.pods.some((p) => p.pod_name === topoSelectedPod));
+        if (ownerNode) topoSelectedNode = ownerNode.nodeName;
+      }
+
+      renderWorkerTopoNav(seats, true);
       el.workerList.classList.add('compact', 'node-matrix-grid');
+
+      // Level 2 Drill-Down: Single Pod -> 16 Actor Seat Cards (8x2 grid taking entire space)
+      if (topoSelectedPod) {
+        const ownerNode = latestNodeGroups.find((g) => g.pods.some((p) => p.pod_name === topoSelectedPod)) || null;
+        const activePod = (ownerNode && ownerNode.pods.find((p) => p.pod_name === topoSelectedPod)) ||
+          list.find((p) => p.pod_name === topoSelectedPod) ||
+          { pod_name: topoSelectedPod, actors: [] };
+        el.workerList.style.gridTemplateColumns = 'repeat(8, minmax(0, 1fr))';
+        const seatCards = [];
+        for (let sIdx = 0; sIdx < seats; sIdx++) {
+          seatCards.push(renderPodActorSeatDetailCardHTML(activePod, sIdx, seats, ownerNode));
+        }
+        el.workerList.innerHTML = seatCards.join('');
+        return;
+      }
+
+      // Level 1 Drill-Down: Single Node -> 16 Pod Cards with their 4x4 actor slots (8x2 grid taking entire space)
+      if (topoSelectedNode) {
+        const activeNode = latestNodeGroups.find((g) => g.nodeName === topoSelectedNode) || latestNodeGroups[0];
+        const nodePods = (activeNode && activeNode.pods) ? activeNode.pods.slice(0, 16) : [];
+        const cols = Math.min(8, Math.max(4, Math.ceil(Math.max(1, nodePods.length) / 2)));
+        el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+        el.workerList.innerHTML = nodePods.map((w) => render4x4SeatWorkerCardHTML(w, seats, activeNode.nodeName)).join('');
+        return;
+      }
+
+      // Level 0 Overview: All 16 Nodes (8x2 grid, each showing 4x4 pods)
+      const cols = Math.min(8, Math.max(4, Math.ceil(latestNodeGroups.length / 2)));
       el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
-      el.workerList.innerHTML = nodeGroups.slice(0, 16).map((g, i) => renderNodeMatrixCardHTML(g, i, seats)).join('');
+      el.workerList.innerHTML = latestNodeGroups.map((g, i) => renderNodeMatrixCardHTML(g, i, seats)).join('');
       return;
     }
 
     // Up to 16 worker pods, each with 16 actor seats (4x4 seat matrix per pod card):
+    latestNodeGroups = [];
     if (seats === 16) {
-      const cols = list.length > 8 ? 8 : list.length;
+      if (topoSelectedPod && !podHoverDirectory[topoSelectedPod]) {
+        topoSelectedPod = null;
+      }
+      renderWorkerTopoNav(seats, false);
       el.workerList.classList.add('compact', 'node-matrix-grid');
+      if (topoSelectedPod) {
+        const activePod = list.find((p) => p.pod_name === topoSelectedPod) || { pod_name: topoSelectedPod, actors: [] };
+        el.workerList.style.gridTemplateColumns = 'repeat(8, minmax(0, 1fr))';
+        const seatCards = [];
+        for (let sIdx = 0; sIdx < seats; sIdx++) {
+          seatCards.push(renderPodActorSeatDetailCardHTML(activePod, sIdx, seats, null));
+        }
+        el.workerList.innerHTML = seatCards.join('');
+        return;
+      }
+      const cols = list.length > 8 ? 8 : list.length;
       el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
-      el.workerList.innerHTML = list.map((w) => render4x4SeatWorkerCardHTML(w, seats)).join('');
+      el.workerList.innerHTML = list.map((w) => render4x4SeatWorkerCardHTML(w, seats, '')).join('');
       return;
     }
 
     // Standard mode (2..16 worker pods with list-based seat rows):
+    renderWorkerTopoNav(seats, false);
     const compact = list.length > 2;
     el.workerList.classList.remove('node-matrix-grid');
     el.workerList.classList.toggle('compact', compact);
@@ -853,6 +1216,32 @@
     '#cbd5e1'  // 9: unknown
   ];
 
+  const STATE_SHORT_LABELS = [
+    'IDLE', // 0
+    'GCS',  // 1
+    'WAKE', // 2
+    'SAVE', // 3
+    'RUN',  // 4
+    'THINK',// 5
+    'WAIT', // 6
+    'EXEC', // 7
+    'ERR',  // 8
+    'UNK'   // 9
+  ];
+
+  const STATE_FULL_LABELS = [
+    'READY',     // 0
+    'GCS SNAP',  // 1
+    'RESUMING',  // 2
+    'SUSPEND',   // 3
+    'RUNNING',   // 4
+    'THINKING',  // 5
+    'AWAITING',  // 6
+    'EXECUTING', // 7
+    'CRASHED',   // 8
+    'UNKNOWN'    // 9
+  ];
+
   let hoveredCanvasIndex = -1;
 
   function computeCanvasDims(total) {
@@ -864,12 +1253,232 @@
     return { cols: cols, rows: rows };
   }
 
+  function clampFleetPan() {
+    if (fleetZoom <= 1.001) {
+      fleetZoom = 1;
+      fleetPanX = 0;
+      fleetPanY = 0;
+      return;
+    }
+    if (fleetZoom > 32) fleetZoom = 32;
+    const maxPan = Math.max(0, 1 - 1 / fleetZoom);
+    fleetPanX = Math.max(0, Math.min(maxPan, fleetPanX));
+    fleetPanY = Math.max(0, Math.min(maxPan, fleetPanY));
+  }
+
+  function syncFleetZoomToolbarUI() {
+    const zText = (fleetZoom < 10 ? fleetZoom.toFixed(1).replace(/\.0$/, '') : String(Math.round(fleetZoom))) + '×';
+    if (el.fleetZoomReadout) {
+      el.fleetZoomReadout.textContent = zText;
+    }
+    if (el.btnFleetZoomReset) {
+      el.btnFleetZoomReset.hidden = fleetZoom <= 1.01;
+    }
+    if (el.fleetCanvas) {
+      el.fleetCanvas.classList.toggle('is-zoomed', fleetZoom > 1.01);
+    }
+    if (el.fleetZoomPresets) {
+      el.fleetZoomPresets.forEach((btn) => {
+        const target = parseFloat(btn.dataset.zoom || '1');
+        const active = Math.abs(fleetZoom - target) < 0.15;
+        btn.classList.toggle('active', active);
+      });
+    }
+    if (el.btnFleetLoupe) {
+      el.btnFleetLoupe.classList.toggle('active', fleetLoupeEnabled);
+      el.btnFleetLoupe.setAttribute('aria-pressed', fleetLoupeEnabled ? 'true' : 'false');
+    }
+    if (el.fleetMinimapWrap) {
+      el.fleetMinimapWrap.hidden = fleetZoom <= 1.02;
+    }
+  }
+
+  function setFleetZoom(newZoom, anchorUVX, anchorUVY) {
+    const clamped = Math.max(1, Math.min(32, newZoom));
+    const ux = typeof anchorUVX === 'number' ? Math.max(0, Math.min(1, anchorUVX)) : 0.5;
+    const uy = typeof anchorUVY === 'number' ? Math.max(0, Math.min(1, anchorUVY)) : 0.5;
+    const worldUVX = fleetPanX + ux / fleetZoom;
+    const worldUVY = fleetPanY + uy / fleetZoom;
+    fleetZoom = clamped;
+    fleetPanX = worldUVX - ux / fleetZoom;
+    fleetPanY = worldUVY - uy / fleetZoom;
+    clampFleetPan();
+    syncFleetZoomToolbarUI();
+    if (latestFleetCompact && latestFleetCompact.length > 256) {
+      renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+    }
+  }
+
+  function focusActorOnFleetCanvas(actorIdOrIdx, targetZoom) {
+    const total = latestActorCount || (latestFleetCompact ? latestFleetCompact.length : 65536);
+    const idx1 = typeof actorIdOrIdx === 'number' ? actorIdOrIdx : parseActorNumber(actorIdOrIdx);
+    if (!idx1 || idx1 < 1 || idx1 > total) return;
+    const dims = computeCanvasDims(total);
+    canvasCols = dims.cols;
+    canvasRows = dims.rows;
+    const idx0 = idx1 - 1;
+    const row = Math.floor(idx0 / canvasCols);
+    const col = idx0 % canvasCols;
+    fleetZoom = Math.max(targetZoom || 16, fleetZoom >= 16 ? fleetZoom : 16);
+    fleetPanX = ((col + 0.5) / canvasCols) - 0.5 / fleetZoom;
+    fleetPanY = ((row + 0.5) / canvasRows) - 0.5 / fleetZoom;
+    clampFleetPan();
+    highlightedActorIndex = idx1;
+    highlightedActorUntil = Date.now() + 5500;
+    if (el.fleetJumpInput) {
+      el.fleetJumpInput.value = String(idx1);
+    }
+    syncFleetZoomToolbarUI();
+    if (latestFleetCompact && latestFleetCompact.length > 256) {
+      renderFleetCanvas(latestFleetCompact, total);
+    }
+  }
+
+  function renderFleetMinimap(compactStr, total, palette, isLight, startCol, endCol, startRow, endRow) {
+    if (!el.fleetMinimapWrap || !el.fleetMinimap) return;
+    if (fleetZoom <= 1.02) {
+      el.fleetMinimapWrap.hidden = true;
+      return;
+    }
+    el.fleetMinimapWrap.hidden = false;
+    if (el.minimapCoords) {
+      const zStr = (fleetZoom < 10 ? fleetZoom.toFixed(1).replace(/\.0$/, '') : String(Math.round(fleetZoom))) + '×';
+      el.minimapCoords.textContent = zStr + ' · R' + (startRow + 1) + '–' + (endRow + 1) + ' C' + (startCol + 1) + '–' + (endCol + 1);
+    }
+
+    const mCanvas = el.fleetMinimap;
+    const mw = mCanvas.width || 256;
+    const mh = mCanvas.height || 64;
+    const mCtx = mCanvas.getContext('2d');
+    if (!mCtx) return;
+
+    mCtx.fillStyle = isLight ? '#f1f5f9' : '#0a0e17';
+    mCtx.fillRect(0, 0, mw, mh);
+
+    // Sample 2x2 blocks from 512x128 -> 256x64 minimap pixels
+    const stepC = Math.max(1, Math.floor(canvasCols / mw));
+    const stepR = Math.max(1, Math.floor(canvasRows / mh));
+    for (let mr = 0; mr < mh; mr++) {
+      const r = Math.min(canvasRows - 1, mr * stepR);
+      const rowOffset = r * canvasCols;
+      for (let mc = 0; mc < mw; mc++) {
+        const c = Math.min(canvasCols - 1, mc * stepC);
+        const idx = rowOffset + c;
+        if (idx >= total || idx >= compactStr.length) continue;
+        const code = (compactStr.charCodeAt(idx) - 64) & 15;
+        if (code === 0) continue;
+        mCtx.fillStyle = palette[code] || palette[9];
+        mCtx.fillRect(mc, mr, 1, 1);
+      }
+    }
+
+    // Draw current viewport box
+    const vx = Math.floor(fleetPanX * mw);
+    const vy = Math.floor(fleetPanY * mh);
+    const vw = Math.max(4, Math.ceil((1 / fleetZoom) * mw));
+    const vh = Math.max(3, Math.ceil((1 / fleetZoom) * mh));
+    mCtx.strokeStyle = isLight ? '#0f172a' : '#00ffcc';
+    mCtx.lineWidth = 1.5;
+    mCtx.strokeRect(vx + 0.5, vy + 0.5, Math.min(mw - vx - 1, vw), Math.min(mh - vy - 1, vh));
+    mCtx.fillStyle = isLight ? 'rgba(2, 132, 199, 0.16)' : 'rgba(0, 255, 204, 0.16)';
+    mCtx.fillRect(vx, vy, Math.min(mw - vx, vw), Math.min(mh - vy, vh));
+  }
+
+  function renderFleetMagnifierLoupe(ctx, compactStr, total, palette, isLight, dpr, targetW, targetH) {
+    if (!fleetLoupeEnabled || fleetZoom >= 3.5) return;
+    if (hoveredCanvasIndex < 1 || hoveredCanvasIndex > total) return;
+    if (lastCanvasMouseX < 0 || lastCanvasMouseY < 0) return;
+
+    const radius = 4; // 9x9 neighborhood
+    const gridN = radius * 2 + 1;
+    const cellPx = Math.round(13 * dpr);
+    const headerH = Math.round(18 * dpr);
+    const pad = Math.round(5 * dpr);
+    const boxW = gridN * cellPx + pad * 2;
+    const boxH = gridN * cellPx + pad * 2 + headerH;
+
+    // Position loupe to the left/top of cursor so it never collides with hover tooltip on bottom-right
+    const cursorX = lastCanvasMouseX * dpr;
+    const cursorY = lastCanvasMouseY * dpr;
+    let lx = cursorX - boxW - Math.round(16 * dpr);
+    let ly = cursorY - Math.round(boxH * 0.5);
+    if (lx < 8 * dpr) {
+      lx = Math.min(targetW - boxW - 8 * dpr, cursorX + Math.round(18 * dpr));
+      ly = cursorY - boxH - Math.round(14 * dpr);
+    }
+    if (ly < 8 * dpr) ly = 8 * dpr;
+    if (ly + boxH > targetH - 8 * dpr) ly = Math.max(8 * dpr, targetH - boxH - 8 * dpr);
+
+    ctx.save();
+    ctx.fillStyle = isLight ? 'rgba(255, 255, 255, 0.96)' : 'rgba(10, 14, 23, 0.94)';
+    ctx.strokeStyle = isLight ? '#0284c7' : '#00ffcc';
+    ctx.lineWidth = Math.max(1.5, 1.6 * dpr);
+    ctx.fillRect(lx, ly, boxW, boxH);
+    ctx.strokeRect(lx, ly, boxW, boxH);
+
+    // Header label
+    ctx.font = '800 ' + Math.round(9 * dpr) + 'px "JetBrains Mono", monospace';
+    ctx.fillStyle = isLight ? '#0369a1' : '#00ffcc';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('10× LOUPE · #' + hoveredCanvasIndex, lx + pad, ly + Math.round(headerH * 0.55));
+
+    const centerIdx0 = hoveredCanvasIndex - 1;
+    const centerR = Math.floor(centerIdx0 / canvasCols);
+    const centerC = centerIdx0 % canvasCols;
+    const gridTop = ly + headerH;
+
+    for (let dr = -radius; dr <= radius; dr++) {
+      const r = centerR + dr;
+      for (let dc = -radius; dc <= radius; dc++) {
+        const c = centerC + dc;
+        const gx = lx + pad + (dc + radius) * cellPx;
+        const gy = gridTop + (dr + radius) * cellPx;
+        const innerW = cellPx - Math.max(1, Math.round(1.2 * dpr));
+
+        if (r < 0 || r >= canvasRows || c < 0 || c >= canvasCols) {
+          ctx.fillStyle = isLight ? '#e2e8f0' : '#0f172a';
+          ctx.fillRect(gx, gy, innerW, innerW);
+          continue;
+        }
+        const idx0 = r * canvasCols + c;
+        if (idx0 >= total || idx0 >= compactStr.length) continue;
+        const idx1 = idx0 + 1;
+        const raw = compactStr.charCodeAt(idx0) - 64;
+        const code = raw & 15;
+        const leased = (raw & 16) !== 0;
+
+        ctx.fillStyle = palette[code] || palette[9];
+        ctx.fillRect(gx, gy, innerW, innerW);
+
+        const actorId = 'attendee-' + String(idx1).padStart(2, '0');
+        const onPod = !!seatedActorPodMap[actorId] || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
+        if (onPod) {
+          const core = Math.max(2, Math.round(3.2 * dpr));
+          ctx.fillStyle = isLight ? '#0f172a' : '#ffffff';
+          ctx.fillRect(gx + Math.floor((innerW - core) / 2), gy + Math.floor((innerW - core) / 2), core, core);
+        }
+        if (idx1 % 16 === 0) {
+          const pip = Math.max(2, Math.round(2.5 * dpr));
+          ctx.fillStyle = leased ? '#fbbf24' : (isLight ? '#0284c7' : '#00ffcc');
+          ctx.fillRect(gx + innerW - pip, gy, pip, pip);
+        }
+        if (dr === 0 && dc === 0) {
+          ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
+          ctx.lineWidth = Math.max(1.5, 1.8 * dpr);
+          ctx.strokeRect(gx - 0.5, gy - 0.5, innerW + 1, innerW + 1);
+        }
+      }
+    }
+    ctx.restore();
+  }
+
   function renderFleetCanvas(compactStr, totalActors) {
     if (!el.fleetCanvas || !compactStr) return;
     const total = totalActors > 0 ? totalActors : compactStr.length;
     const dims = computeCanvasDims(total);
     canvasCols = dims.cols;
     canvasRows = dims.rows;
+    clampFleetPan();
 
     const rect = el.fleetCanvas.getBoundingClientRect();
     const cssW = Math.max(320, Math.floor(rect.width || 1024));
@@ -889,57 +1498,210 @@
 
     ctx.clearRect(0, 0, targetW, targetH);
 
-    const cellW = targetW / canvasCols;
-    const cellH = targetH / canvasRows;
-    const gapX = cellW >= 3 ? 0.65 * dpr : 0;
-    const gapY = cellH >= 3 ? 0.65 * dpr : 0;
-    const dotW = Math.max(1, cellW - gapX);
-    const dotH = Math.max(1, cellH - gapY);
-
+    // Fast O(N) pass for global counters shown in subtitle
     let snapshottedCount = 0;
     let activeCount = 0;
     let leasedCount = 0;
-
-    for (let i = 0; i < total && i < compactStr.length; i++) {
+    const len = Math.min(total, compactStr.length);
+    for (let i = 0; i < len; i++) {
       const raw = compactStr.charCodeAt(i) - 64;
       const code = raw & 15;
-      const leased = (raw & 16) !== 0;
       if (code === 1) snapshottedCount++;
       else if (code >= 2 && code <= 8) activeCount++;
-      if (leased) leasedCount++;
+      if ((raw & 16) !== 0) leasedCount++;
+    }
 
-      const r = Math.floor(i / canvasCols);
-      const c = i % canvasCols;
-      const x = c * cellW;
-      const y = r * cellH;
+    const worldW = targetW * fleetZoom;
+    const worldH = targetH * fleetZoom;
+    const offsetX = fleetPanX * worldW;
+    const offsetY = fleetPanY * worldH;
+    const cellW = worldW / canvasCols;
+    const cellH = worldH / canvasRows;
+    const cssCellW = cellW / dpr;
+    const cssCellH = cellH / dpr;
 
-      ctx.fillStyle = palette[code] || palette[9];
-      ctx.fillRect(x, y, dotW, dotH);
+    const startCol = Math.max(0, Math.floor(fleetPanX * canvasCols));
+    const endCol = Math.min(canvasCols - 1, Math.ceil((fleetPanX + 1 / fleetZoom) * canvasCols));
+    const startRow = Math.max(0, Math.floor(fleetPanY * canvasRows));
+    const endRow = Math.min(canvasRows - 1, Math.ceil((fleetPanY + 1 / fleetZoom) * canvasRows));
 
-      if (leased) {
-        ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
-        ctx.lineWidth = Math.max(1, 1.2 * dpr);
-        ctx.strokeRect(x - 0.5, y - 0.5, dotW + 1, dotH + 1);
+    const isCardTier = cssCellW >= 26 && cssCellH >= 20;
+    const isTileTier = !isCardTier && cssCellW >= 5.5;
+    const gapX = isCardTier ? Math.max(2 * dpr, cellW * 0.08) : (cellW >= 3 ? Math.min(2.2 * dpr, Math.max(0.65 * dpr, cellW * 0.1)) : 0);
+    const gapY = isCardTier ? Math.max(2 * dpr, cellH * 0.08) : (cellH >= 3 ? Math.min(2.2 * dpr, Math.max(0.65 * dpr, cellH * 0.1)) : 0);
+    const dotW = Math.max(1, cellW - gapX);
+    const dotH = Math.max(1, cellH - gapY);
+
+    for (let r = startRow; r <= endRow; r++) {
+      const rowBase = r * canvasCols;
+      const y = r * cellH - offsetY;
+      for (let c = startCol; c <= endCol; c++) {
+        const i = rowBase + c;
+        if (i >= len) break;
+        const idx1 = i + 1;
+        const raw = compactStr.charCodeAt(i) - 64;
+        const code = raw & 15;
+        const leased = (raw & 16) !== 0;
+        const x = c * cellW - offsetX;
+        const color = palette[code] || palette[9];
+
+        if (isCardTier) {
+          // Tier 3 (16x - 32x+): Inspector Mini-Cards with Actor #ID, State Label, Pod Name & QR Tag
+          const actorId = 'attendee-' + String(idx1).padStart(2, '0');
+          const seatInfo = seatedActorPodMap[actorId];
+          const liveView = latestActorsMap[actorId];
+          const podName = (seatInfo && seatInfo.podName) || (liveView && liveView.worker_pod) || '';
+          const sPod = (seatInfo && seatInfo.shortPod) || (podName ? shortPodName(podName) : '');
+          const onPod = !!podName || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
+          const isQRSlot = (idx1 % 16 === 0);
+
+          ctx.fillStyle = isLight
+            ? (code === 0 ? '#f1f5f9' : '#ffffff')
+            : (code === 0 ? '#0f172a' : '#131d31');
+          ctx.fillRect(x, y, dotW, dotH);
+
+          // Colored top accent bar
+          const barH = Math.max(2.5 * dpr, Math.min(4.5 * dpr, dotH * 0.13));
+          ctx.fillStyle = color;
+          ctx.fillRect(x, y, dotW, barH);
+
+          // Card border
+          ctx.strokeStyle = leased ? '#fbbf24' : color;
+          ctx.lineWidth = (onPod || leased) ? Math.max(1.5, 1.6 * dpr) : Math.max(1, 1.0 * dpr);
+          ctx.strokeRect(x + 0.5, y + 0.5, dotW - 1, dotH - 1);
+
+          // Text labels inside card
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x + 1, y + 1, Math.max(1, dotW - 2), Math.max(1, dotH - 2));
+          ctx.clip();
+          ctx.textBaseline = 'top';
+
+          const idFontPx = Math.round(Math.max(8, Math.min(12.5, cssCellW * 0.21)) * dpr);
+          ctx.font = '800 ' + idFontPx + 'px "JetBrains Mono", monospace';
+          ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
+          ctx.fillText('#' + idx1, x + 3.5 * dpr, y + barH + 2 * dpr);
+
+          // Top-right QR / Live marker
+          if (leased || isQRSlot) {
+            const badgeColor = leased ? '#f59e0b' : (isLight ? '#0284c7' : '#00ffcc');
+            if (cssCellW >= 48) {
+              ctx.font = '800 ' + Math.round(7.5 * dpr) + 'px "JetBrains Mono", monospace';
+              ctx.fillStyle = badgeColor;
+              const bTxt = leased ? 'LIVE' : 'QR';
+              const tw = ctx.measureText(bTxt).width;
+              ctx.fillText(bTxt, x + dotW - tw - 3.5 * dpr, y + barH + 2.5 * dpr);
+            } else {
+              const pip = Math.max(3, Math.round(4 * dpr));
+              ctx.fillStyle = badgeColor;
+              ctx.fillRect(x + dotW - pip - 2 * dpr, y + barH + 2 * dpr, pip, pip);
+            }
+          }
+
+          // Middle row: State / Activity label
+          const stateFontPx = Math.round(Math.max(7.2, Math.min(10.5, cssCellW * 0.17)) * dpr);
+          ctx.font = '800 ' + stateFontPx + 'px "JetBrains Mono", monospace';
+          ctx.fillStyle = color;
+          const stLabel = cssCellW >= 54 ? (STATE_FULL_LABELS[code] || 'ACTIVE') : (STATE_SHORT_LABELS[code] || 'ACT');
+          ctx.fillText(stLabel, x + 3.5 * dpr, y + barH + idFontPx + 4 * dpr);
+
+          // Bottom row: Assigned Worker Pod or GCS / QR status (when height permits)
+          if (cssCellH >= 34) {
+            const metaFontPx = Math.round(Math.max(6.5, Math.min(9.5, cssCellW * 0.15)) * dpr);
+            ctx.font = '700 ' + metaFontPx + 'px "JetBrains Mono", monospace';
+            const metaY = y + dotH - metaFontPx - 3 * dpr;
+            if (sPod) {
+              ctx.fillStyle = isLight ? '#0369a1' : '#38bdf8';
+              ctx.fillText(sPod, x + 3.5 * dpr, metaY);
+            } else if (code === 6 || code === 1) {
+              ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+              ctx.fillText(cssCellW >= 52 ? 'gcs://snap' : 'GCS', x + 3.5 * dpr, metaY);
+            } else if (isQRSlot) {
+              ctx.fillStyle = isLight ? '#0284c7' : '#00ffcc';
+              ctx.fillText('QR 16x', x + 3.5 * dpr, metaY);
+            }
+          }
+          ctx.restore();
+        } else if (isTileTier) {
+          // Tier 2 (4x - 12x): Tactical Cohort Tiles with Physical Pod Seat core & QR corner markers
+          ctx.fillStyle = color;
+          ctx.fillRect(x, y, dotW, dotH);
+
+          const actorId = 'attendee-' + String(idx1).padStart(2, '0');
+          const onPod = !!seatedActorPodMap[actorId] || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
+          if (onPod) {
+            const core = Math.max(2 * dpr, Math.min(5 * dpr, Math.min(dotW, dotH) * 0.34));
+            ctx.fillStyle = isLight ? '#0f172a' : '#ffffff';
+            ctx.fillRect(x + (dotW - core) * 0.5, y + (dotH - core) * 0.5, core, core);
+          }
+          if (idx1 % 16 === 0) {
+            const pip = Math.max(2 * dpr, Math.min(4 * dpr, Math.min(dotW, dotH) * 0.28));
+            ctx.fillStyle = leased ? '#fbbf24' : (isLight ? '#0f172a' : '#00ffcc');
+            ctx.fillRect(x + dotW - pip, y, pip, pip);
+          }
+          if (leased) {
+            ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
+            ctx.lineWidth = Math.max(1.2, 1.4 * dpr);
+            ctx.strokeRect(x - 0.5, y - 0.5, dotW + 1, dotH + 1);
+          }
+        } else {
+          // Tier 1 (1x - 3x): High-density 65,536 Macro Heatmap
+          ctx.fillStyle = color;
+          ctx.fillRect(x, y, dotW, dotH);
+          if (leased) {
+            ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
+            ctx.lineWidth = Math.max(1, 1.2 * dpr);
+            ctx.strokeRect(x - 0.5, y - 0.5, dotW + 1, dotH + 1);
+          }
+        }
       }
     }
 
+    // Highlighted actor spotlight ring (from Quick Jump or "65k ⌖" button on a Pod seat)
+    if (highlightedActorIndex >= 1 && highlightedActorIndex <= total && Date.now() < highlightedActorUntil) {
+      const hIdx0 = highlightedActorIndex - 1;
+      const hr = Math.floor(hIdx0 / canvasCols);
+      const hc = hIdx0 % canvasCols;
+      const hx = hc * cellW - offsetX;
+      const hy = hr * cellH - offsetY;
+      ctx.save();
+      ctx.strokeStyle = '#00ffcc';
+      ctx.lineWidth = Math.max(2.5, 2.8 * dpr);
+      ctx.strokeRect(hx - 3 * dpr, hy - 3 * dpr, dotW + 6 * dpr, dotH + 6 * dpr);
+      ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
+      ctx.lineWidth = Math.max(1.2, 1.5 * dpr);
+      ctx.strokeRect(hx - 1 * dpr, hy - 1 * dpr, dotW + 2 * dpr, dotH + 2 * dpr);
+      ctx.restore();
+    }
+
+    // Hovered cell outline
     if (hoveredCanvasIndex >= 1 && hoveredCanvasIndex <= total) {
       const idx0 = hoveredCanvasIndex - 1;
       const hr = Math.floor(idx0 / canvasCols);
       const hc = idx0 % canvasCols;
-      const hx = hc * cellW;
-      const hy = hr * cellH;
+      const hx = hc * cellW - offsetX;
+      const hy = hr * cellH - offsetY;
       ctx.strokeStyle = isLight ? '#0f172a' : '#00ffcc';
-      ctx.lineWidth = Math.max(1.5, 1.8 * dpr);
+      ctx.lineWidth = Math.max(1.5, 2.0 * dpr);
       ctx.strokeRect(hx - 1, hy - 1, dotW + 2, dotH + 2);
     }
 
+    // Floating 10x Magnifier Loupe when hovering at low zoom
+    renderFleetMagnifierLoupe(ctx, compactStr, total, palette, isLight, dpr, targetW, targetH);
+
+    // Corner Mini-Map Navigator when zoomed in
+    renderFleetMinimap(compactStr, total, palette, isLight, startCol, endCol, startRow, endRow);
+
     if (el.fleetSub) {
-      const leaseNote = leasedCount > 0 ? (' · ' + leasedCount + ' live QR lease' + (leasedCount === 1 ? '' : 's')) : ' · every 16th slot QR-reservable';
+      const visibleActors = (endCol - startCol + 1) * (endRow - startRow + 1);
+      const zoomNote = fleetZoom > 1.02
+        ? (' · viewing ' + visibleActors.toLocaleString() + ' at ' + (fleetZoom < 10 ? fleetZoom.toFixed(1).replace(/\.0$/, '') : Math.round(fleetZoom)) + '× (drag to pan)')
+        : ' · scroll or click 4×/16×/32× to zoom';
+      const leaseNote = leasedCount > 0 ? (' · ' + leasedCount + ' live QR lease' + (leasedCount === 1 ? '' : 's')) : '';
       el.fleetSub.textContent =
-        total.toLocaleString() + ' actors (' + canvasCols + '×' + canvasRows + ' matrix) · ' +
+        total.toLocaleString() + ' actors (' + canvasCols + '×' + canvasRows + ') · ' +
         activeCount.toLocaleString() + ' active · ' +
-        snapshottedCount.toLocaleString() + ' suspended' + leaseNote;
+        snapshottedCount.toLocaleString() + ' suspended' + leaseNote + zoomNote;
     }
   }
 
@@ -953,6 +1715,10 @@
       if (el.fleetCanvasWrap) {
         el.fleetCanvasWrap.hidden = false;
       }
+      if (el.fleetZoomToolbar) {
+        el.fleetZoomToolbar.hidden = false;
+      }
+      syncFleetZoomToolbarUI();
       renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
       return;
     }
@@ -960,6 +1726,9 @@
     el.fleetGrid.hidden = false;
     if (el.fleetCanvasWrap) {
       el.fleetCanvasWrap.hidden = true;
+    }
+    if (el.fleetZoomToolbar) {
+      el.fleetZoomToolbar.hidden = true;
     }
     const actors = actorsMap || {};
     const ids = window.ActorView.fleetIDs(actors);
@@ -1151,8 +1920,17 @@
 
     // Worker pod
     if (el.spotlightWorker) {
-      el.spotlightWorker.textContent = data.worker_pod || 'None';
+      el.spotlightWorker.textContent = data.worker_pod ? (data.worker_pod + ' ↗') : 'None';
       el.spotlightWorker.className = 'drawer-metric-value' + (data.worker_pod ? ' highlight-cyan' : '');
+      if (data.worker_pod) {
+        el.spotlightWorker.dataset.pod = data.worker_pod;
+        el.spotlightWorker.style.cursor = 'pointer';
+        el.spotlightWorker.title = 'Click to zoom into ' + data.worker_pod + ' in Worker Pool Hardware Execution';
+      } else {
+        delete el.spotlightWorker.dataset.pod;
+        el.spotlightWorker.style.cursor = '';
+        el.spotlightWorker.removeAttribute('title');
+      }
     }
 
     // Snapshot
@@ -1796,6 +2574,8 @@
     if (el.hoverTooltip) {
       el.hoverTooltip.hidden = true;
     }
+    lastCanvasMouseX = -1;
+    lastCanvasMouseY = -1;
     if (hoveredCanvasIndex !== -1) {
       hoveredCanvasIndex = -1;
       if (latestFleetCompact && latestFleetCompact.length > 256) {
@@ -1810,12 +2590,45 @@
     if (!rect.width || !rect.height) return -1;
     const relX = Math.max(0, Math.min(rect.width - 0.01, e.clientX - rect.left));
     const relY = Math.max(0, Math.min(rect.height - 0.01, e.clientY - rect.top));
-    const col = Math.floor((relX / rect.width) * canvasCols);
-    const row = Math.floor((relY / rect.height) * canvasRows);
+    lastCanvasMouseX = relX;
+    lastCanvasMouseY = relY;
+    const uvX = relX / rect.width;
+    const uvY = relY / rect.height;
+    const worldUVX = fleetPanX + uvX / fleetZoom;
+    const worldUVY = fleetPanY + uvY / fleetZoom;
+    if (worldUVX < 0 || worldUVX >= 1 || worldUVY < 0 || worldUVY >= 1) return -1;
+    const col = Math.floor(worldUVX * canvasCols);
+    const row = Math.floor(worldUVY * canvasRows);
     const idx = row * canvasCols + col + 1;
     const total = latestActorCount || latestFleetCompact.length;
     if (idx < 1 || idx > total) return -1;
     return idx;
+  }
+
+  function panFleetMinimapFromEvent(e) {
+    if (!el.fleetMinimap || fleetZoom <= 1.01) return;
+    const rect = el.fleetMinimap.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const uvX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const uvY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    fleetPanX = uvX - 0.5 / fleetZoom;
+    fleetPanY = uvY - 0.5 / fleetZoom;
+    clampFleetPan();
+    if (latestFleetCompact && latestFleetCompact.length > 256) {
+      renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+    }
+  }
+
+  function triggerFleetJumpInput() {
+    if (!el.fleetJumpInput) return;
+    const raw = (el.fleetJumpInput.value || '').trim().replace(/^#/, '');
+    const num = parseInt(raw, 10);
+    const total = latestActorCount || (latestFleetCompact ? latestFleetCompact.length : 65536);
+    if (!num || num < 1 || num > total) {
+      el.fleetJumpInput.focus();
+      return;
+    }
+    focusActorOnFleetCanvas(num, 16);
   }
 
   function initControls() {
@@ -1927,9 +2740,30 @@
     if (el.spotlightBackdrop) {
       el.spotlightBackdrop.addEventListener('click', closeSpotlightDrawer);
     }
+    if (el.spotlightWorker) {
+      el.spotlightWorker.addEventListener('click', function() {
+        const podName = el.spotlightWorker.dataset.pod;
+        if (podName) {
+          closeSpotlightDrawer();
+          zoomToTopologyPod(podName);
+        }
+      });
+    }
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape' || e.key === 'Esc') {
-        closeSpotlightDrawer();
+        if (el.spotlightDrawer && el.spotlightDrawer.classList.contains('open')) {
+          closeSpotlightDrawer();
+        } else if (topoSelectedPod) {
+          if (topoSelectedNode && latestNodeGroups.length > 0) {
+            zoomToTopologyNode(topoSelectedNode);
+          } else {
+            resetTopologyZoom();
+          }
+        } else if (topoSelectedNode) {
+          resetTopologyZoom();
+        } else if (fleetZoom > 1.01) {
+          setFleetZoom(1, 0.5, 0.5);
+        }
         if (el.githubRepoLink && document.activeElement === el.githubRepoLink) {
           el.githubRepoLink.blur();
         }
@@ -1948,34 +2782,62 @@
       });
     }
 
+    // Hardware Topology Breadcrumb Navigation (All 16 Nodes -> Node -> Pod)
+    if (el.workerTopoNav) {
+      el.workerTopoNav.addEventListener('click', function(e) {
+        const btn = e.target.closest('[data-topo-action]');
+        if (!btn) return;
+        const action = btn.dataset.topoAction;
+        if (action === 'all-nodes') {
+          resetTopologyZoom();
+        } else if (action === 'zoom-node') {
+          zoomToTopologyNode(btn.dataset.node || topoSelectedNode);
+        } else if (action === 'prev-node') {
+          stepTopologyNode(-1);
+        } else if (action === 'next-node') {
+          stepTopologyNode(1);
+        } else if (action === 'prev-pod') {
+          stepTopologyPod(-1);
+        } else if (action === 'next-pod') {
+          stepTopologyPod(1);
+        }
+      });
+    }
+
+    // Hardware Topology Grid Hover & Drill-Down Clicks (Node -> Pod -> Actor)
     if (el.workerList) {
       el.workerList.addEventListener('mousemove', function(e) {
-        const cell = e.target.closest('.seat-cell');
-        if (!cell) {
+        const target = e.target.closest('[data-hover-kind]');
+        if (!target) {
           hideHoverTooltip();
           return;
         }
-        const kind = cell.dataset.hoverKind;
-        const podName = cell.dataset.pod || '';
+        const kind = target.dataset.hoverKind;
+        const podName = target.dataset.pod || '';
+        const nodeName = target.dataset.node || '';
         if (kind === 'pod' && podName) {
-          const info = podHoverDirectory[podName] || { podName: podName, nodeName: cell.dataset.node || '', actors: [], seats: latestSeatsPerWorker };
+          const info = podHoverDirectory[podName] || { podName: podName, nodeName: nodeName, actors: [], seats: latestSeatsPerWorker };
           const actors = info.actors || [];
           const cls = dominantPodClass(actors);
           const items = actors.map((wa) => {
             const b = actorBadgeForWorkerActor(wa);
             return formatActorName(wa.actor_id) + ' — ' + (b ? b.label : wa.state);
           });
+          const nodeDesc = info.nodeLabel ? (info.nodeLabel + ' (' + info.nodeName + ')') : (info.nodeName || 'Worker Pool');
           showHoverTooltip({
             cls: cls,
             title: podName,
             tag: actors.length + '/' + info.seats + ' SEATS',
-            state: actors.length > 0 ? (actors.length + ' active actor' + (actors.length === 1 ? '' : 's') + ' on pod') : 'All 16 actor seats idle',
-            meta: info.nodeName ? ('GKE Node: ' + info.nodeName) : 'Worker Pod (4×4 actor seats)',
+            state: actors.length > 0 ? (actors.length + ' active actor' + (actors.length === 1 ? '' : 's') + ' on pod · Click to zoom into node') : 'All 16 actor seats idle · Click to zoom into node',
+            meta: 'GKE Node: ' + nodeDesc,
             items: items
           }, e.clientX, e.clientY);
         } else if (kind === 'seat') {
-          const seatNum = cell.dataset.seat || '1';
-          const actorId = cell.dataset.actor || '';
+          const seatNum = target.dataset.seat || '1';
+          const actorId = target.dataset.actor || '';
+          const clickHint = topoSelectedPod
+            ? ' · Click card for Actor Spotlight'
+            : ' · Click to zoom into pod (' + shortPodName(podName) + ')';
           if (actorId) {
             const view = latestActorsMap[actorId] || { actor_id: actorId, state: 'RUNNING', worker_pod: podName };
             const b = window.ActorView.badge(view);
@@ -1983,7 +2845,7 @@
               cls: b.cls,
               title: formatActorName(actorId) + ' (' + actorId + ')',
               tag: 'SEAT ' + seatNum + '/16',
-              state: b.sub ? (b.label + ' · ' + b.sub) : b.label,
+              state: (b.sub ? (b.label + ' · ' + b.sub) : b.label) + clickHint,
               meta: 'Worker Pod: ' + podName
             }, e.clientX, e.clientY);
           } else {
@@ -1991,7 +2853,7 @@
               cls: 'never-started',
               title: 'Seat ' + seatNum + ' of 16',
               tag: 'IDLE',
-              state: 'Available execution seat',
+              state: 'Available execution seat' + (topoSelectedPod ? '' : clickHint),
               meta: 'Worker Pod: ' + podName
             }, e.clientX, e.clientY);
           }
@@ -1999,42 +2861,245 @@
       });
       el.workerList.addEventListener('mouseleave', hideHoverTooltip);
       el.workerList.addEventListener('click', function(e) {
+        // 1. "65k ⌖" button inside Level 2 Single Pod View: locate & zoom to actor in the 65k fleet matrix
+        const locateBtn = e.target.closest('[data-locate-actor]');
+        if (locateBtn) {
+          e.stopPropagation();
+          const actorId = locateBtn.dataset.locateActor;
+          if (actorId) {
+            switchViewMode('grid');
+            focusActorOnFleetCanvas(actorId, 16);
+          }
+          return;
+        }
+
+        // 2. Explicit Node corner zoom button or Node header click -> Level 1 (Single Node View: 16 pods with slots)
+        const zoomNodeTrigger = e.target.closest('[data-zoom-node]');
+        if (zoomNodeTrigger) {
+          e.stopPropagation();
+          zoomToTopologyNode(zoomNodeTrigger.dataset.zoomNode);
+          return;
+        }
+
+        // 3. Explicit Pod corner zoom button or Pod header click -> Level 2 (Single Pod View: 16 actors in pod)
+        const zoomPodTrigger = e.target.closest('[data-zoom-pod]');
+        if (zoomPodTrigger) {
+          e.stopPropagation();
+          zoomToTopologyPod(zoomPodTrigger.dataset.zoomPod, zoomPodTrigger.dataset.node || topoSelectedNode);
+          return;
+        }
+
+        // 4. In Level 2 (Single Pod View), clicking an occupied actor seat card opens Spotlight & highlights in 65k grid
+        const podActorCard = e.target.closest('.pod-actor-seat-card');
+        if (podActorCard) {
+          const actorId = podActorCard.dataset.actor;
+          if (actorId) {
+            focusActorOnFleetCanvas(actorId, Math.max(fleetZoom, 16));
+            openSpotlightDrawer(actorId);
+          }
+          return;
+        }
+
+        // 5. Clicking a cell inside a 4x4 grid:
+        //    - If it's a pod cell inside Level 0 (All 16 Nodes), zoom into that Node (Level 1) so all 16 pods with their slots take the entire space!
+        //    - If it's a seat cell inside Level 1 (Single Node View), zoom into that Pod (Level 2) so all 16 actors in that pod take the entire space!
         const cell = e.target.closest('.seat-cell');
-        if (cell && cell.dataset.actor) {
-          openSpotlightDrawer(cell.dataset.actor);
+        if (cell) {
+          const kind = cell.dataset.hoverKind;
+          if (kind === 'pod' && cell.dataset.node) {
+            zoomToTopologyNode(cell.dataset.node, cell.dataset.pod || null);
+            return;
+          }
+          if (kind === 'seat' && cell.dataset.pod && !topoSelectedPod) {
+            zoomToTopologyPod(cell.dataset.pod, cell.dataset.node || topoSelectedNode);
+            return;
+          }
+          if (cell.dataset.actor) {
+            openSpotlightDrawer(cell.dataset.actor);
+          }
         }
       });
     }
 
+    // 65,536 Fleet Matrix Zoom Toolbar Controls
+    if (el.fleetZoomPresets) {
+      el.fleetZoomPresets.forEach((btn) => {
+        btn.addEventListener('click', function() {
+          const target = parseFloat(btn.dataset.zoom || '1');
+          setFleetZoom(target, 0.5, 0.5);
+        });
+      });
+    }
+    if (el.btnFleetZoomIn) {
+      el.btnFleetZoomIn.addEventListener('click', function() {
+        const next = fleetZoom < 2 ? 2 : (fleetZoom < 4 ? 4 : (fleetZoom < 8 ? 8 : (fleetZoom < 16 ? 16 : 32)));
+        setFleetZoom(next, 0.5, 0.5);
+      });
+    }
+    if (el.btnFleetZoomOut) {
+      el.btnFleetZoomOut.addEventListener('click', function() {
+        const prev = fleetZoom > 16 ? 16 : (fleetZoom > 8 ? 8 : (fleetZoom > 4 ? 4 : (fleetZoom > 2 ? 2 : 1)));
+        setFleetZoom(prev, 0.5, 0.5);
+      });
+    }
+    if (el.btnFleetZoomReset) {
+      el.btnFleetZoomReset.addEventListener('click', function() {
+        setFleetZoom(1, 0.5, 0.5);
+      });
+    }
+    if (el.btnMinimapReset) {
+      el.btnMinimapReset.addEventListener('click', function(e) {
+        e.stopPropagation();
+        setFleetZoom(1, 0.5, 0.5);
+      });
+    }
+    if (el.btnFleetLoupe) {
+      el.btnFleetLoupe.addEventListener('click', function() {
+        fleetLoupeEnabled = !fleetLoupeEnabled;
+        syncFleetZoomToolbarUI();
+        if (latestFleetCompact && latestFleetCompact.length > 256) {
+          renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+        }
+      });
+    }
+    if (el.btnFleetJump) {
+      el.btnFleetJump.addEventListener('click', triggerFleetJumpInput);
+    }
+    if (el.fleetJumpInput) {
+      el.fleetJumpInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          triggerFleetJumpInput();
+        }
+      });
+    }
+
+    // Minimap Click & Drag Panning
+    if (el.fleetMinimap) {
+      el.fleetMinimap.addEventListener('mousedown', function(e) {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        minimapIsDragging = true;
+        panFleetMinimapFromEvent(e);
+      });
+    }
+    window.addEventListener('mousemove', function(e) {
+      if (minimapIsDragging) {
+        panFleetMinimapFromEvent(e);
+      }
+      if (fleetIsDragging && el.fleetCanvas) {
+        const rect = el.fleetCanvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        const dx = e.clientX - fleetDragStartX;
+        const dy = e.clientY - fleetDragStartY;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+          fleetDragMoved = true;
+        }
+        if (fleetDragMoved && fleetZoom > 1.01) {
+          fleetPanX = fleetDragStartPanX - (dx / rect.width) / fleetZoom;
+          fleetPanY = fleetDragStartPanY - (dy / rect.height) / fleetZoom;
+          clampFleetPan();
+          if (latestFleetCompact && latestFleetCompact.length > 256) {
+            renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+          }
+        }
+      }
+    });
+    window.addEventListener('mouseup', function() {
+      minimapIsDragging = false;
+      if (fleetIsDragging) {
+        fleetIsDragging = false;
+        if (el.fleetCanvas) {
+          el.fleetCanvas.classList.remove('is-dragging');
+        }
+      }
+    });
+
     if (el.fleetCanvas) {
+      // Wheel / Trackpad Pinch Zoom centered on cursor
+      el.fleetCanvas.addEventListener('wheel', function(e) {
+        if (!latestFleetCompact || latestFleetCompact.length <= 256) return;
+        e.preventDefault();
+        const rect = el.fleetCanvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        const uvX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const uvY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+        const factor = e.deltaY < 0 ? 1.28 : (1 / 1.28);
+        const nextZoom = Math.max(1, Math.min(32, fleetZoom * factor));
+        setFleetZoom(nextZoom, uvX, uvY);
+      }, { passive: false });
+
+      // Drag-to-pan when zoomed in
+      el.fleetCanvas.addEventListener('mousedown', function(e) {
+        if (e.button !== 0) return;
+        fleetIsDragging = true;
+        fleetDragMoved = false;
+        fleetDragStartX = e.clientX;
+        fleetDragStartY = e.clientY;
+        fleetDragStartPanX = fleetPanX;
+        fleetDragStartPanY = fleetPanY;
+        if (fleetZoom > 1.01) {
+          el.fleetCanvas.classList.add('is-dragging');
+        }
+      });
+
+      // Double-click to zoom in centered on clicked actor neighborhood
+      el.fleetCanvas.addEventListener('dblclick', function(e) {
+        if (!latestFleetCompact || latestFleetCompact.length <= 256) return;
+        e.preventDefault();
+        const rect = el.fleetCanvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        const uvX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const uvY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+        const nextZoom = fleetZoom < 3.5 ? 4 : (fleetZoom < 14 ? 16 : (fleetZoom < 28 ? 32 : 1));
+        setFleetZoom(nextZoom, uvX, uvY);
+      });
+
       el.fleetCanvas.addEventListener('mousemove', function(e) {
+        if (fleetIsDragging && fleetDragMoved) {
+          if (el.hoverTooltip) el.hoverTooltip.hidden = true;
+          return;
+        }
         const idx = actorIndexFromCanvasEvent(e);
         if (idx < 1) {
           hideHoverTooltip();
           return;
         }
-        if (hoveredCanvasIndex !== idx) {
-          hoveredCanvasIndex = idx;
+        const needsRedraw = (hoveredCanvasIndex !== idx) || (fleetLoupeEnabled && fleetZoom < 3.5);
+        hoveredCanvasIndex = idx;
+        if (needsRedraw) {
           renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
         }
         const actorId = 'attendee-' + String(idx).padStart(2, '0');
         const decoded = window.ActorView.decodeCompactBadge(latestFleetCompact.charCodeAt(idx - 1));
         const liveView = latestActorsMap[actorId];
+        const seatInfo = seatedActorPodMap[actorId];
         const b = liveView ? window.ActorView.badge(liveView) : decoded;
         const leased = (liveView && liveView.leased) || decoded.leased;
         const isReservable = (idx % 16 === 0);
         const tag = leased ? 'LIVE QR LEASE' : (isReservable ? 'QR SLOT (16x)' : ('#' + idx));
-        const pod = (liveView && liveView.worker_pod) ? ('Worker Pod: ' + liveView.worker_pod) : (isReservable ? 'Reserved for live QR scan · click to inspect' : 'Click dot to open Actor Spotlight');
+        const podName = (seatInfo && seatInfo.podName) || (liveView && liveView.worker_pod) || '';
+        const nodeLabel = (seatInfo && seatInfo.nodeLabel) ? (' (' + seatInfo.nodeLabel + ')') : '';
+        const podMeta = podName
+          ? ('Seated on Pod: ' + podName + nodeLabel + (seatInfo ? (' · Seat ' + seatInfo.seatIndex + '/16') : ''))
+          : (decoded.code === 6 || decoded.code === 1
+              ? 'Checkpointed in GCS · 0 pod RAM consumed while idle'
+              : (isReservable ? 'Reserved for live QR scan · click to inspect' : 'Click to open Actor Spotlight · Double-click or scroll to zoom'));
         showHoverTooltip({
           cls: b.cls,
           title: formatActorName(actorId) + ' (' + actorId + ')',
           tag: tag,
           state: b.sub ? (b.label + ' · ' + b.sub) : b.label,
-          meta: pod
+          meta: podMeta
         }, e.clientX, e.clientY);
       });
       el.fleetCanvas.addEventListener('mouseleave', hideHoverTooltip);
       el.fleetCanvas.addEventListener('click', function(e) {
+        if (fleetDragMoved) {
+          fleetDragMoved = false;
+          return;
+        }
         const idx = actorIndexFromCanvasEvent(e);
         if (idx >= 1) {
           const actorId = 'attendee-' + String(idx).padStart(2, '0');
