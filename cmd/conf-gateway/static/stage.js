@@ -25,6 +25,8 @@
     oversubWaiting: document.getElementById('oversub-waiting'),
     workspaceMode: document.getElementById('workspace-mode'),
     workspaceBound: document.getElementById('workspace-bound'),
+    githubRepoLink: document.getElementById('github-repo-link'),
+    githubQrCode: document.getElementById('github-qr-code'),
     qrCode: document.getElementById('qr-code'),
     qrLink: document.getElementById('qr-link'),
     qrUrlText: document.getElementById('qr-url-text'),
@@ -352,6 +354,27 @@
   // -------------------------------------------------------------------------
   // UI Initialization
   // -------------------------------------------------------------------------
+  function renderQRCodeInto(container, targetUrl, fallbackText) {
+    if (!container || !targetUrl) return;
+    try {
+      const svg = generateQRCodeSVG(targetUrl);
+      const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+      if (!doc || !doc.documentElement || doc.querySelector('parsererror')) {
+        throw new Error('SVG parse error');
+      }
+      container.replaceChildren(doc.documentElement);
+      container.addEventListener('click', function() {
+        window.open(targetUrl, '_blank', 'noopener,noreferrer');
+      });
+    } catch (err) {
+      console.error('Failed to generate offline QR code:', err);
+      const fallback = document.createElement('div');
+      fallback.className = 'qr-fallback';
+      fallback.textContent = fallbackText;
+      container.replaceChildren(fallback);
+    }
+  }
+
   function initOnboardingQR() {
     const chatUrl = window.location.origin + '/chat';
     if (el.qrUrlText) {
@@ -360,18 +383,12 @@
     if (el.qrLink) {
       el.qrLink.href = chatUrl;
     }
-    if (el.qrCode) {
-      try {
-        const svg = generateQRCodeSVG(chatUrl);
-        el.qrCode.innerHTML = svg;
-        el.qrCode.addEventListener('click', function() {
-          window.open(chatUrl, '_blank', 'noopener');
-        });
-      } catch (err) {
-        console.error('Failed to generate offline QR code:', err);
-        el.qrCode.innerHTML = '<div class="qr-fallback">Scan /chat on mobile</div>';
-      }
-    }
+    renderQRCodeInto(el.qrCode, chatUrl, 'Scan /chat on mobile');
+  }
+
+  function initGitHubRepoQR() {
+    if (!el.githubRepoLink || !el.githubQrCode) return;
+    renderQRCodeInto(el.githubQrCode, el.githubRepoLink.href, 'github.com/moficodes/agent-swarm');
   }
 
   // -------------------------------------------------------------------------
@@ -1477,6 +1494,9 @@
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape' || e.key === 'Esc') {
         closeSpotlightDrawer();
+        if (el.githubRepoLink && document.activeElement === el.githubRepoLink) {
+          el.githubRepoLink.blur();
+        }
       }
     });
 
@@ -1504,6 +1524,7 @@
 
   document.addEventListener('DOMContentLoaded', function() {
     initOnboardingQR();
+    initGitHubRepoQR();
     initControls();
     fetchSimulationStatus();
     fetchTelemetry();

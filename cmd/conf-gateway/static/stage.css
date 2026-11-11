@@ -176,6 +176,8 @@ html, body {
 
 /* Header */
 .stage-header {
+  position: relative;
+  z-index: 40;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -287,9 +289,88 @@ html, body {
 }
 
 .spec-card-link:hover .external-icon,
-.spec-card-link:focus-visible .external-icon {
+.spec-card-link:focus-visible .external-icon,
+.repo-card-wrap:hover .spec-card-link .external-icon,
+.repo-card-wrap:focus-within .spec-card-link .external-icon {
   opacity: 1;
   transform: translate(1px, -1px);
+}
+
+.repo-card-wrap {
+  position: relative;
+  display: flex;
+}
+
+.repo-card-wrap:hover .spec-card-link,
+.repo-card-wrap:focus-within .spec-card-link {
+  border-color: var(--neon-cyan);
+  background: var(--bg-card-hover);
+}
+
+.repo-card-wrap:hover .spec-link-value,
+.repo-card-wrap:focus-within .spec-link-value {
+  color: var(--neon-cyan);
+}
+
+.repo-qr-tooltip {
+  position: absolute;
+  top: calc(100% + 0.55rem);
+  left: 50%;
+  transform: translateX(-50%) translateY(-4px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  background: var(--bg-surface-alpha);
+  border: 1px solid var(--border-card);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(14px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 60;
+  transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s ease;
+}
+
+/* Hover bridge across the 0.55rem gap so moving the pointer onto the QR box keeps it open. */
+.repo-qr-tooltip::before {
+  content: "";
+  position: absolute;
+  top: -0.65rem;
+  left: 0;
+  right: 0;
+  height: 0.65rem;
+}
+
+.repo-card-wrap:hover .repo-qr-tooltip,
+.repo-card-wrap:focus-within .repo-qr-tooltip {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.repo-qr-tag {
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--neon-cyan);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.repo-qr-box {
+  width: 11rem;
+  height: 11rem;
+}
+
+.repo-qr-caption {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .spec-label {

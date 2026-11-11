@@ -370,32 +370,53 @@ func TestStatic_ChatMobileResponsiveLayout(t *testing.T) {
 }
 
 // TestStatic_StageGitHubRepoCardNextToActorState checks that /stage displays a
-// clickable GitHub repository spec-card with SVG icons immediately after the
-// ACTOR STATE card in .header-specs.
+// clickable GitHub repository spec-card with SVG icons and a hover/focus QR
+// code tooltip immediately after the ACTOR STATE card in .header-specs.
 func TestStatic_StageGitHubRepoCardNextToActorState(t *testing.T) {
 	html := readStatic(t, "stage.html")
 	actorStateIdx := strings.Index(html, `<span class="spec-label">ACTOR STATE</span>`)
 	repoIdx := strings.Index(html, `id="github-repo-link"`)
+	tooltipIdx := strings.Index(html, `id="github-qr-tooltip"`)
 	mockBannerIdx := strings.Index(html, `id="mock-banner"`)
-	if actorStateIdx < 0 || repoIdx < 0 || mockBannerIdx < 0 || !(actorStateIdx < repoIdx && repoIdx < mockBannerIdx) {
-		t.Fatalf("stage.html must place #github-repo-link immediately after ACTOR STATE inside .header-specs (actorState=%d repo=%d mockBanner=%d)", actorStateIdx, repoIdx, mockBannerIdx)
+	if actorStateIdx < 0 || repoIdx < 0 || tooltipIdx < 0 || mockBannerIdx < 0 ||
+		!(actorStateIdx < repoIdx && repoIdx < tooltipIdx && tooltipIdx < mockBannerIdx) {
+		t.Fatalf("stage.html must place #github-repo-link and #github-qr-tooltip immediately after ACTOR STATE inside .header-specs (actorState=%d repo=%d tooltip=%d mockBanner=%d)", actorStateIdx, repoIdx, tooltipIdx, mockBannerIdx)
 	}
 	for _, want := range []string{
+		`class="repo-card-wrap"`,
 		`href="https://github.com/moficodes/agent-swarm"`,
+		`aria-describedby="github-qr-tooltip"`,
 		`target="_blank"`,
 		`rel="noopener noreferrer"`,
 		`github.com/moficodes/agent-swarm`,
 		`class="spec-card spec-card-link"`,
 		`class="spec-link-icon"`,
+		`id="github-qr-code"`,
+		`role="tooltip"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("stage.html lacks %q", want)
 		}
 	}
 	css := readStatic(t, "stage.css")
-	for _, want := range []string{".spec-card-link", ".spec-link-value", ".spec-link-icon"} {
+	for _, want := range []string{
+		".spec-card-link",
+		".spec-link-value",
+		".spec-link-icon",
+		".repo-card-wrap",
+		".repo-qr-tooltip",
+		".repo-card-wrap:hover .repo-qr-tooltip",
+		".repo-card-wrap:focus-within .repo-qr-tooltip",
+		".repo-qr-box",
+	} {
 		if !strings.Contains(css, want) {
 			t.Errorf("stage.css lacks %q", want)
+		}
+	}
+	js := readStatic(t, "stage.js")
+	for _, want := range []string{"githubRepoLink", "githubQrCode", "renderQRCodeInto(", "initGitHubRepoQR()", "DOMParser"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("stage.js lacks %q", want)
 		}
 	}
 }
