@@ -22,7 +22,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/gateway"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
@@ -217,5 +219,154 @@ func TestApprove_InvalidDecisionIsBadRequest(t *testing.T) {
 	}
 	if got := h.received(); len(got) != 0 {
 		t.Errorf("actor received %d approvals, want 0", len(got))
+	}
+}
+
+func TestApprove_CheckpointedActorFallbackAfterGatewayRestart(t *testing.T) {
+	var received []types.ApprovalResponse
+	var mu sync.Mutex
+	upstream := http.NewServeMux()
+	upstream.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		var req types.ApprovalResponse
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		received = append(received, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{Execution: &types.ExecutionResult{Stdout: "resumed from snapshot\n", DurationMs: 2}})
+	})
+	upstreamSrv := httptest.NewServer(upstream)
+	t.Cleanup(upstreamSrv.Close)
+
+	ctrl := newFakeControl(actorstate.Status{
+		Name:        "attendee-16",
+		State:       types.StateSuspended,
+		SnapshotURI: "gs://bucket/snapshots/snap-16",
+	})
+	gw := newTestGateway(t, upstreamSrv.URL,
+		gateway.WithMaxActors(65536),
+		gateway.WithActorControl(ctrl),
+		gateway.WithPollInterval(10*time.Millisecond),
+	)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := gw.ActorView("attendee-16"); ok && !v.NeverStarted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Simulate a phone submitting an approval after a gateway restart (where
+	// gateway.pending["attendee-16"] is empty, but the actor has a live GCS snapshot).
+	rec := postJSON(gw, "attendee-16", "/api/approve", types.ApprovalResponse{
+		ApprovalID: "app-checkpointed-16",
+		Decision:   types.DecisionApprove,
+		Code:       "import os; os.system('evil')",
+		Language:   "bash",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	got := append([]types.ApprovalResponse(nil), received...)
+	mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("actor received %d approvals, want 1", len(got))
+	}
+	if got[0].Code != "" || got[0].Language != "" {
+		t.Errorf("actor received client code %q (%s), want empty so actor uses its own checkpointed pendingApproval", got[0].Code, got[0].Language)
+	}
+
+	// Replaying the consumed approval ID must still be rejected at the gateway.
+	replay := postJSON(gw, "attendee-16", "/api/approve", types.ApprovalResponse{
+		ApprovalID: "app-checkpointed-16",
+		Decision:   types.DecisionApprove,
+	})
+	if replay.Code != http.StatusConflict {
+		t.Errorf("replay status = %d, want 409", replay.Code)
+	}
+}
+
+func TestApprove_ReservedEvery16thHumanSlotSurvivesSimulationStop(t *testing.T) {
+	upstream := http.NewServeMux()
+	upstream.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:      "msg-16",
+			Sender:  types.SenderAssistant,
+			Content: "Needs approval",
+			Approval: &types.ApprovalRequest{
+				ApprovalID: "app-16",
+				Summary:    "run code",
+				Code:       actorProposedCode,
+				Language:   "python",
+				RiskLevel:  types.RiskLow,
+			},
+		})
+	})
+	upstream.HandleFunc("/api/approve", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{Execution: &types.ExecutionResult{Stdout: "ok\n", DurationMs: 1}})
+	})
+	upstreamSrv := httptest.NewServer(upstream)
+	t.Cleanup(upstreamSrv.Close)
+
+	gw := newTestGateway(t, upstreamSrv.URL, gateway.WithMaxActors(65536))
+
+	// Phone with cached token in localStorage sends chat turn on attendee-16
+	chatRec := postJSON(gw, "attendee-16", "/api/chat", types.ChatRequest{Message: "run scan"})
+	if chatRec.Code != http.StatusOK {
+		t.Fatalf("chat status = %d: %s", chatRec.Code, chatRec.Body.String())
+	}
+
+	// Simulation stop/restart runs ClearSimulatedActivity()
+	gw.ClearSimulatedActivity()
+
+	// Phone approves after some time; pending approval on attendee-16 must not have been cleared
+	appRec := postJSON(gw, "attendee-16", "/api/approve", types.ApprovalResponse{
+		ApprovalID: "app-16",
+		Decision:   types.DecisionApprove,
+	})
+	if appRec.Code != http.StatusOK {
+		t.Fatalf("approve after ClearSimulatedActivity status = %d, want 200: %s", appRec.Code, appRec.Body.String())
+	}
+}
+
+func TestSession_SkipsAlreadyCheckpointedEvery16thHumanSlot(t *testing.T) {
+	ctrl := newFakeControl(
+		actorstate.Status{
+			Name:        "attendee-16",
+			State:       types.StateSuspended,
+			SnapshotURI: "gs://bucket/actors/16/snapshots/snap-16",
+		},
+		actorstate.Status{
+			Name:        "attendee-32",
+			State:       types.StateSuspended,
+			SnapshotURI: "gs://bucket/tags/base-v1",
+		},
+	)
+	gw := newTestGateway(t, "http://127.0.0.1:0",
+		gateway.WithMaxActors(65536),
+		gateway.WithActorControl(ctrl),
+		gateway.WithPollInterval(10*time.Millisecond),
+	)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := gw.ActorView("attendee-16"); ok && !v.NeverStarted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	rec := getPath(gw, "/api/session")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var sess map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &sess); err != nil {
+		t.Fatalf("unmarshal session: %v", err)
+	}
+	if sess["attendee_id"] != "attendee-32" {
+		t.Errorf("attendee_id = %q, want attendee-32 (skipping already-checkpointed attendee-16)", sess["attendee_id"])
 	}
 }

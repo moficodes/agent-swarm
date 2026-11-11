@@ -74,8 +74,14 @@
     const es = new EventSource('/api/events?attendee_id=' + encodeURIComponent(state.attendeeId) +
       '&token=' + encodeURIComponent(state.token));
     state.eventSource = es;
+    let sseOpened = false;
+
+    es.onopen = function() {
+      sseOpened = true;
+    };
 
     es.addEventListener('actor_view', function(e) {
+      sseOpened = true;
       try {
         renderActorView(JSON.parse(e.data));
       } catch (err) {
@@ -89,11 +95,19 @@
 
     es.onerror = function() {
       // A 401/403 handshake rejection permanently closes EventSource
-      // (readyState === 2) instead of reconnecting; mint a fresh session once.
-      if (es.readyState === 2 && state.eventSource === es && allowRefreshOnClose) {
+      // (readyState === 2) before onopen fires. By contrast, if the stream was
+      // already open and later closed (e.g. mobile browser sleep or gateway rollout),
+      // keep the current attendee session and reconnect the SSE stream.
+      if (es.readyState === 2 && state.eventSource === es) {
         es.close();
         state.eventSource = null;
-        initSession(true);
+        if (sseOpened && window.ActorView.tokenUsable(state.token, state.attendeeId)) {
+          setTimeout(function() {
+            connectEventSource(allowRefreshOnClose);
+          }, 1500);
+        } else if (allowRefreshOnClose) {
+          initSession(true);
+        }
       }
     };
   }
@@ -584,6 +598,17 @@
       });
     });
   }
+
+  // Reconnect SSE stream cleanly when a mobile browser tab wakes from sleep
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible' && state.attendeeId && state.token) {
+      if (!state.eventSource || state.eventSource.readyState === 2) {
+        if (window.ActorView.tokenUsable(state.token, state.attendeeId)) {
+          connectEventSource(true);
+        }
+      }
+    }
+  });
 
   // Cleanup on unload
   window.addEventListener('beforeunload', function() {

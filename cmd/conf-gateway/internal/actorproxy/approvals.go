@@ -33,12 +33,16 @@ type approvals struct {
 	// inFlight holds the approval ID each attendee is currently
 	// forwarding, so a second copy of the same decision cannot run concurrently.
 	inFlight map[string]string
+	// consumed remembers the last approval ID completed per attendee so a
+	// consumed approval cannot be replayed even when actor-snapshot fallback is enabled.
+	consumed map[string]string
 }
 
 func newApprovals() *approvals {
 	return &approvals{
 		pending:  make(map[string]*types.ApprovalRequest),
 		inFlight: make(map[string]string),
+		consumed: make(map[string]string),
 	}
 }
 
@@ -47,12 +51,18 @@ func (a *approvals) SetPending(attendeeID string, req *types.ApprovalRequest) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.pending[attendeeID] = req
+	delete(a.consumed, attendeeID)
 }
 
 // ClearPending forgets the attendee's pending approval.
 func (a *approvals) ClearPending(attendeeID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if p := a.pending[attendeeID]; p != nil && p.ApprovalID != "" {
+		a.consumed[attendeeID] = p.ApprovalID
+	} else if inFlight := a.inFlight[attendeeID]; inFlight != "" {
+		a.consumed[attendeeID] = inFlight
+	}
 	delete(a.pending, attendeeID)
 }
 
@@ -72,6 +82,7 @@ func (a *approvals) ResetPending() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.pending = make(map[string]*types.ApprovalRequest)
+	a.consumed = make(map[string]string)
 }
 
 // ClearUnleasedPending forgets pending approvals for every attendee that is
@@ -93,6 +104,16 @@ func (a *approvals) ClearUnleasedPending(isLeased func(string) bool) {
 // is called. The pending approval itself stays until ClearPending, once the
 // actor answers 200. On failure it writes the error response.
 func (a *approvals) ClaimApproval(w http.ResponseWriter, r *http.Request, attendeeID string) (types.ApprovalResponse, func(), bool) {
+	return a.ClaimApprovalWithFallback(w, r, attendeeID, false)
+}
+
+// ClaimApprovalWithFallback behaves like ClaimApproval, but when
+// allowActorFallback is true and the gateway has no in-memory pending approval
+// for attendeeID (for example after a gateway restart while the actor remains
+// checkpointed in GCS with its own in-memory pendingApproval), it strips any
+// client-supplied code and forwards the decision so the actor container itself
+// can validate the approval ID against its checkpointed memory state.
+func (a *approvals) ClaimApprovalWithFallback(w http.ResponseWriter, r *http.Request, attendeeID string, allowActorFallback bool) (types.ApprovalResponse, func(), bool) {
 	var req types.ApprovalResponse
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json payload", http.StatusBadRequest)
@@ -105,10 +126,22 @@ func (a *approvals) ClaimApproval(w http.ResponseWriter, r *http.Request, attend
 
 	a.mu.Lock()
 	pending, ok := a.pending[attendeeID]
-	if !ok || pending == nil || pending.ApprovalID != req.ApprovalID {
-		a.mu.Unlock()
-		http.Error(w, "no matching pending approval", http.StatusConflict)
-		return req, nil, false
+	if ok && pending != nil {
+		if pending.ApprovalID != req.ApprovalID {
+			a.mu.Unlock()
+			http.Error(w, "no matching pending approval", http.StatusConflict)
+			return req, nil, false
+		}
+		req.Code = pending.Code
+		req.Language = pending.Language
+	} else {
+		if !allowActorFallback || req.ApprovalID == "" || a.consumed[attendeeID] == req.ApprovalID {
+			a.mu.Unlock()
+			http.Error(w, "no matching pending approval", http.StatusConflict)
+			return req, nil, false
+		}
+		req.Code = ""
+		req.Language = ""
 	}
 	if a.inFlight[attendeeID] == req.ApprovalID {
 		a.mu.Unlock()
@@ -116,8 +149,6 @@ func (a *approvals) ClaimApproval(w http.ResponseWriter, r *http.Request, attend
 		return req, nil, false
 	}
 	a.inFlight[attendeeID] = req.ApprovalID
-	req.Code = pending.Code
-	req.Language = pending.Language
 	a.mu.Unlock()
 
 	release := func() {

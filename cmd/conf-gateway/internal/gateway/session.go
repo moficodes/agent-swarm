@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,21 @@ import (
 )
 
 const attendeeLeaseTTL = 30 * time.Minute
+
+func isReservedHumanSlotID(attendeeID string, maxActors int) bool {
+	if maxActors <= actorstate.CompactFleetThreshold {
+		return false
+	}
+	numStr, ok := strings.CutPrefix(attendeeID, "attendee-")
+	if !ok {
+		return false
+	}
+	idx, err := strconv.Atoi(numStr)
+	if err != nil {
+		return false
+	}
+	return idx >= 16 && idx <= maxActors && idx%16 == 0
+}
 
 // LeaseAttendee marks an attendee slot as leased by a live QR-code user.
 func (g *Gateway) LeaseAttendee(attendeeID string) {
@@ -48,27 +64,34 @@ func (g *Gateway) IsLeased(attendeeID string) bool {
 }
 
 // leasedChecker returns a lock-free predicate reporting which attendee slots
-// currently hold an active human lease, safe to pass into Board and Proxy leaf
-// methods without acquiring g.mu under their locks.
+// currently hold an active human lease or are reserved for live human
+// attendees, safe to pass into Board and Proxy leaf methods without acquiring
+// g.mu under their locks.
 func (g *Gateway) leasedChecker() func(string) bool {
+	maxActors := g.maxActors
 	g.mu.RLock()
-	if len(g.leasedUntil) == 0 {
-		g.mu.RUnlock()
-		return nil
-	}
 	now := time.Now()
-	snap := make(map[string]bool, len(g.leasedUntil))
-	for id, until := range g.leasedUntil {
-		if now.Before(until) {
-			snap[id] = true
+	var snap map[string]bool
+	if len(g.leasedUntil) > 0 {
+		snap = make(map[string]bool, len(g.leasedUntil))
+		for id, until := range g.leasedUntil {
+			if now.Before(until) {
+				snap[id] = true
+			}
 		}
 	}
 	g.mu.RUnlock()
-	if len(snap) == 0 {
+	if len(snap) == 0 && maxActors <= actorstate.CompactFleetThreshold && g.broker == nil {
 		return nil
 	}
 	return func(id string) bool {
-		return snap[id]
+		if snap[id] {
+			return true
+		}
+		if isReservedHumanSlotID(id, maxActors) {
+			return true
+		}
+		return g.SubscriberCount(id) > 0
 	}
 }
 
@@ -86,6 +109,7 @@ func (g *Gateway) selectEvery16thAttendeeSlot(maxActors int) string {
 		return g.selectAttendeeSlot(0, maxActors)
 	}
 	var firstCandidate string
+	var firstAvailable string
 	for attempt := 0; attempt < numBuckets; attempt++ {
 		seq := atomic.AddUint64(&g.attendeeSeq, 1)
 		slotIndex := (int((seq-1)%uint64(numBuckets)) + 1) * 16
@@ -94,8 +118,19 @@ func (g *Gateway) selectEvery16thAttendeeSlot(maxActors int) string {
 			firstCandidate = candidate
 		}
 		if !g.isSlotActive(candidate) && !g.IsLeased(candidate) {
-			return candidate
+			if firstAvailable == "" {
+				firstAvailable = candidate
+			}
+			if g.board == nil {
+				return candidate
+			}
+			if v, ok := g.board.View(candidate); !ok || v.NeverStarted || strings.Contains(v.SnapshotURI, "/tags/") {
+				return candidate
+			}
 		}
+	}
+	if firstAvailable != "" {
+		return firstAvailable
 	}
 	return firstCandidate
 }
@@ -193,6 +228,9 @@ func (g *Gateway) isSlotActive(attendee string) bool {
 	inFlight := g.turnsInFlight[attendee]
 	g.mu.RUnlock()
 	if inFlight > 0 {
+		return true
+	}
+	if g.SubscriberCount(attendee) > 0 {
 		return true
 	}
 	return g.proxy != nil && g.proxy.PendingApproval(attendee) != nil

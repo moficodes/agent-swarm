@@ -21,11 +21,21 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorproxy"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
+
+func (g *Gateway) canFallbackApprovalToActor(attendeeID string) bool {
+	if g.control == nil || g.board == nil {
+		return false
+	}
+	v, ok := g.board.View(attendeeID)
+	return ok && !v.NeverStarted && !strings.Contains(v.SnapshotURI, "/tags/")
+}
 
 func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -79,7 +89,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if r.URL.Path == "/api/approve" {
-		apprReq, release, ok := g.proxy.ClaimApproval(w, r, attendeeID)
+		apprReq, release, ok := g.proxy.ClaimApprovalWithFallback(w, r, attendeeID, g.canFallbackApprovalToActor(attendeeID))
 		if !ok {
 			return
 		}
@@ -114,7 +124,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/api/approve" {
 		g.setActivity(attendeeID, types.ActivityThinking)
 	}
-	if !useMock && g.IsLeased(attendeeID) {
+	if !useMock && (g.maxActors > actorstate.CompactFleetThreshold || g.IsLeased(attendeeID)) {
 		g.LeaseAttendee(attendeeID)
 	}
 	g.beginTurn(attendeeID)
