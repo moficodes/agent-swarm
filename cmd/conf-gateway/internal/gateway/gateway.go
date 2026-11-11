@@ -483,14 +483,14 @@ func (g *Gateway) StopSimulation() {
 }
 
 // ClearSimulatedActivity resets gateway-side activity (Thinking, AwaitingApproval,
-// Executing) to ActivityIdle on every actor that is not leased by a live attendee.
+// Executing) to ActivityIdle on every actor that is not leased or reserved for a live attendee.
 func (g *Gateway) ClearSimulatedActivity() {
-	isLeased := g.leasedChecker()
+	isProtected := g.simCleanupProtectedChecker()
 	if g.board != nil {
-		g.board.ClearUnleasedActivity(isLeased)
+		g.board.ClearUnleasedActivity(isProtected)
 	}
 	if g.proxy != nil {
-		g.proxy.ClearUnleasedPending(isLeased)
+		g.proxy.ClearUnleasedPending(isProtected)
 	}
 }
 

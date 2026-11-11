@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
@@ -42,7 +41,7 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a token for this attendee is required", http.StatusUnauthorized)
 		return
 	}
-	if g.maxActors > actorstate.CompactFleetThreshold || g.IsLeased(attendeeID) {
+	if isReservedHumanSlotID(attendeeID, g.maxActors) || g.IsLeased(attendeeID) {
 		g.LeaseAttendee(attendeeID)
 	}
 

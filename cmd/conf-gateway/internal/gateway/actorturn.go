@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorproxy"
-	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
@@ -124,7 +123,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/api/approve" {
 		g.setActivity(attendeeID, types.ActivityThinking)
 	}
-	if !useMock && (g.maxActors > actorstate.CompactFleetThreshold || g.IsLeased(attendeeID)) {
+	if !useMock && (isReservedHumanSlotID(attendeeID, g.maxActors) || g.IsLeased(attendeeID)) {
 		g.LeaseAttendee(attendeeID)
 	}
 	g.beginTurn(attendeeID)

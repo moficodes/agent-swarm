@@ -64,28 +64,42 @@ func (g *Gateway) IsLeased(attendeeID string) bool {
 }
 
 // leasedChecker returns a lock-free predicate reporting which attendee slots
-// currently hold an active human lease or are reserved for live human
-// attendees, safe to pass into Board and Proxy leaf methods without acquiring
-// g.mu under their locks.
+// currently hold an active human lease, safe to pass into Board and Proxy leaf
+// methods without acquiring g.mu under their locks.
 func (g *Gateway) leasedChecker() func(string) bool {
-	maxActors := g.maxActors
 	g.mu.RLock()
+	if len(g.leasedUntil) == 0 {
+		g.mu.RUnlock()
+		return nil
+	}
 	now := time.Now()
-	var snap map[string]bool
-	if len(g.leasedUntil) > 0 {
-		snap = make(map[string]bool, len(g.leasedUntil))
-		for id, until := range g.leasedUntil {
-			if now.Before(until) {
-				snap[id] = true
-			}
+	snap := make(map[string]bool, len(g.leasedUntil))
+	for id, until := range g.leasedUntil {
+		if now.Before(until) {
+			snap[id] = true
 		}
 	}
 	g.mu.RUnlock()
-	if len(snap) == 0 && maxActors <= actorstate.CompactFleetThreshold && g.broker == nil {
+	if len(snap) == 0 {
 		return nil
 	}
 	return func(id string) bool {
-		if snap[id] {
+		return snap[id]
+	}
+}
+
+// simCleanupProtectedChecker returns a lock-free predicate reporting which
+// attendee slots must be preserved when ClearSimulatedActivity resets
+// simulated activity and pending approvals (leased human slots, reserved
+// every-16th human slots in 65k mode, and slots with active SSE subscribers).
+func (g *Gateway) simCleanupProtectedChecker() func(string) bool {
+	maxActors := g.maxActors
+	isLeased := g.leasedChecker()
+	if isLeased == nil && maxActors <= actorstate.CompactFleetThreshold && g.broker == nil {
+		return nil
+	}
+	return func(id string) bool {
+		if isLeased != nil && isLeased(id) {
 			return true
 		}
 		if isReservedHumanSlotID(id, maxActors) {
