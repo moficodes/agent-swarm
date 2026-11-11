@@ -495,6 +495,7 @@ conf_render() {
       -e "s|\${ALLOWED_GOOGLE_DOMAINS}|${ALLOWED_GOOGLE_DOMAINS:-}|g" \
       -e "s|\${GOOGLE_CLIENT_ID}|${GOOGLE_CLIENT_ID:-}|g" \
       -e "s|\${FIREBASE_API_KEY}|${FIREBASE_API_KEY:-}|g" \
+      -e "s|\${FIREBASE_PROJECT_ID}|${FIREBASE_PROJECT_ID:-${PROJECT_ID:-}}|g" \
       -e "s|\${CHAT_RATE_LIMIT_RPM}|${CHAT_RATE_LIMIT_RPM:-10}|g" \
       -e "s|\${SESSION_RATE_LIMIT_RPM}|${SESSION_RATE_LIMIT_RPM:-10}|g" \
       -e "s|\${SUSPEND_AFTER}|${DEMO_CONF_SUSPEND_AFTER:-${default_suspend_after}}|g" \
