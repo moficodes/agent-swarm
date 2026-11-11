@@ -80,3 +80,20 @@ in-flight requests (capped by `DEMO_CONF_MAX_WORKERS` in
 `manifests/autoscaling.yaml.tmpl`). The real fix belongs in `atenet-router`'s
 metrics, which should label parked requests with the target atespace/template
 or pool.
+
+## Interrupted `SuspendActor` calls leave actors wedged in `SUSPENDING`
+
+`ate-api-server` executes `SuspendActor` on the caller's gRPC request context
+even after committing `ACTOR_STATE_SUSPENDING` to PostgreSQL and starting
+`atelet.Checkpoint`. If the caller disconnects mid-checkpoint (for example
+during a `conf-gateway` rollout), `atelet` finishes checkpointing and tears
+down the sandbox, while `ate-api-server` aborts before detaching volumes,
+releasing the worker seat, or finalizing `ACTOR_STATE_SUSPENDED` — and neither
+`ResumeActor` nor `ReportActorSnapshotState` accepts an actor in `SUSPENDING`.
+`conf-gateway` works around this in three ways: draining in-flight `Suspend`
+calls before canceling them on shutdown, including `SUSPENDING` actors in
+`POST /api/reset`, and automatically re-driving Substrate's idempotent
+`SuspendActor` when an idle actor remains in `SUSPENDING` for more than 20s.
+The fix belongs in `ate-api-server`, which should detach its post-commit
+suspend workflow from the caller's context or reconcile orphaned `SUSPENDING`
+actors in `ate-controller`.

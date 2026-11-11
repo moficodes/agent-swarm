@@ -267,3 +267,60 @@ func TestScheduledSuspendSkippedAfterNewerTurn(t *testing.T) {
 		t.Errorf("%d suspends ran, want only the newer turn's", n)
 	}
 }
+
+type delayedSuspendControl struct {
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan bool
+}
+
+func (c *delayedSuspendControl) List(context.Context) ([]actorstate.Status, error) { return nil, nil }
+func (c *delayedSuspendControl) Revert(context.Context, string) error              { return nil }
+func (c *delayedSuspendControl) Suspend(ctx context.Context, _ string) error {
+	c.started <- struct{}{}
+	select {
+	case <-c.release:
+		c.canceled <- (ctx.Err() != nil)
+		return ctx.Err()
+	case <-ctx.Done():
+		c.canceled <- true
+		return ctx.Err()
+	}
+}
+
+func TestCloseDrainsInFlightSuspendBeforeCanceling(t *testing.T) {
+	actor, srv := newHeldActor(t, "one")
+	close(actor.release["one"])
+	ctrl := &delayedSuspendControl{
+		started:  make(chan struct{}, 1),
+		release:  make(chan struct{}),
+		canceled: make(chan bool, 1),
+	}
+	gw := NewGateway(srv.URL,
+		WithActorControl(ctrl),
+		WithSuspendAfter(0),
+		WithSuspendDrainTimeout(time.Second),
+	)
+
+	chat(gw, "attendee-07", "one")
+	<-ctrl.started
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		gw.Close()
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	select {
+	case wasCanceled := <-ctrl.canceled:
+		t.Fatalf("Close canceled in-flight Suspend before drain timeout (canceled=%v)", wasCanceled)
+	default:
+	}
+
+	close(ctrl.release)
+	<-closed
+	if wasCanceled := <-ctrl.canceled; wasCanceled {
+		t.Errorf("in-flight Suspend context was canceled during graceful drain")
+	}
+}

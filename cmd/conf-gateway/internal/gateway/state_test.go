@@ -525,3 +525,41 @@ func TestState_IgnoresNonAttendeeActors(t *testing.T) {
 		t.Errorf("Actors after golden actor deletion = %+v, want only attendee-01 SUSPENDED", tel.Actors)
 	}
 }
+
+func TestState_ResetAndPollerRecoverOrphanedSuspendingActors(t *testing.T) {
+	ctrl := newFakeControl(
+		actorstate.Status{Name: "attendee-01", State: types.StateSuspending, WorkerPod: "pool-a"},
+		actorstate.Status{Name: "attendee-02", State: types.StateSuspended},
+	)
+	gw := newTestGateway(t, "",
+		gateway.WithActorControl(ctrl),
+		gateway.WithPollInterval(5*time.Millisecond),
+		gateway.WithStuckSuspendingAfter(time.Hour),
+	)
+	sc := openEvents(t, gw, "attendee-01")
+	waitView(t, sc, func(v types.ActorView) bool { return v.State == types.StateSuspending })
+
+	// 1. Reset All re-drives idempotent SuspendActor on orphaned SUSPENDING actors.
+	body := postReset(t, gw)
+	if body.ActorsReset != 1 || body.SuspendErrors != 0 {
+		t.Fatalf("reset = %+v, want 1 actor reset and 0 errors", body)
+	}
+	if got := drain(ctrl.suspended); len(got) != 1 || !got["attendee-01"] {
+		t.Fatalf("reset suspended %v, want attendee-01", got)
+	}
+
+	// 2. Background poller automatically re-drives orphaned SUSPENDING actors once
+	// StuckSuspendingAfter elapses with no turn or local suspend in flight.
+	ctrlAuto := newFakeControl(
+		actorstate.Status{Name: "attendee-13", State: types.StateSuspending, WorkerPod: "pool-a"},
+	)
+	gwAuto := newTestGateway(t, "",
+		gateway.WithActorControl(ctrlAuto),
+		gateway.WithPollInterval(5*time.Millisecond),
+		gateway.WithStuckSuspendingAfter(25*time.Millisecond),
+	)
+	_ = gwAuto
+	if got := waitSuspended(t, ctrlAuto); got != "attendee-13" {
+		t.Fatalf("auto-recovered %q, want attendee-13", got)
+	}
+}

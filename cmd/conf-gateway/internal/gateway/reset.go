@@ -49,7 +49,7 @@ func (g *Gateway) handleReset(w http.ResponseWriter, r *http.Request) {
 	var active, crashed []string
 	for name, v := range g.board.Views() {
 		switch v.State {
-		case types.StateRunning, types.StateResuming:
+		case types.StateRunning, types.StateResuming, types.StateSuspending:
 			active = append(active, name)
 		case types.StateCrashed:
 			crashed = append(crashed, name)

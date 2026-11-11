@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
 // beginTurn marks a turn in flight and cancels any pending suspend, so an
@@ -56,10 +58,10 @@ func (g *Gateway) suspendAfterTurnLocked(attendee string) {
 		return
 	}
 	seq := g.turnSeq[attendee]
-	g.wg.Add(1)
 	if g.suspendAfter <= 0 {
+		g.suspendWG.Add(1)
 		go func() {
-			defer g.wg.Done()
+			defer g.suspendWG.Done()
 			g.suspendIfIdle(attendee, seq)
 		}()
 		return
@@ -67,14 +69,21 @@ func (g *Gateway) suspendAfterTurnLocked(attendee string) {
 	if t, ok := g.suspendTimers[attendee]; ok && t.Stop() {
 		g.wg.Done()
 	}
+	g.wg.Add(1)
 	var t *time.Timer
 	t = time.AfterFunc(g.suspendAfter, func() {
 		defer g.wg.Done()
 		g.mu.Lock()
+		if g.closed {
+			g.mu.Unlock()
+			return
+		}
 		if g.suspendTimers[attendee] == t {
 			delete(g.suspendTimers, attendee)
 		}
+		g.suspendWG.Add(1)
 		g.mu.Unlock()
+		defer g.suspendWG.Done()
 		g.suspendIfIdle(attendee, seq)
 	})
 	g.suspendTimers[attendee] = t
@@ -98,15 +107,78 @@ func (g *Gateway) suspendIfIdle(attendee string, seq uint64) {
 }
 
 func (g *Gateway) suspendActor(attendee string) {
-	ctx, cancel := context.WithTimeout(g.ctx, 30*time.Second)
+	g.mu.Lock()
+	g.suspendsInFlight[attendee]++
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.suspendsInFlight[attendee]--
+		if g.suspendsInFlight[attendee] <= 0 {
+			delete(g.suspendsInFlight, attendee)
+		}
+		g.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(g.suspendCtx, 30*time.Second)
 	defer cancel()
 	if err := g.control.Suspend(ctx, attendee); err != nil {
-		if g.ctx.Err() != nil {
-			return // the gateway is closing
+		if g.suspendCtx.Err() != nil {
+			return // the gateway's suspend drain window ended
 		}
 		log.Printf("[gateway] auto-suspend %s: %v", attendee, err)
 		g.mu.Lock()
 		g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendee, err))
 		g.mu.Unlock()
+	}
+}
+
+// reconcileStuckSuspending re-drives Substrate's idempotent SuspendActor
+// workflow for any actor reported in StateSuspending for at least
+// stuckSuspendingAfter while this gateway has no turn or suspend in flight for
+// it (for example after an interrupted caller left ateapi mid-suspend).
+func (g *Gateway) reconcileStuckSuspending(now time.Time) {
+	if g.control == nil || g.stuckSuspendingAfter <= 0 {
+		return
+	}
+	views := g.board.Views()
+	var toRecover []string
+
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return
+	}
+	for name := range g.suspendingSince {
+		if v, ok := views[name]; !ok || v.State != types.StateSuspending {
+			delete(g.suspendingSince, name)
+		}
+	}
+	for name, v := range views {
+		if v.State != types.StateSuspending {
+			continue
+		}
+		since, seen := g.suspendingSince[name]
+		if !seen {
+			g.suspendingSince[name] = now
+			continue
+		}
+		if now.Sub(since) < g.stuckSuspendingAfter {
+			continue
+		}
+		if g.turnsInFlight[name] > 0 || g.suspendsInFlight[name] > 0 {
+			continue
+		}
+		g.suspendingSince[name] = now
+		g.suspendWG.Add(1)
+		toRecover = append(toRecover, name)
+	}
+	g.mu.Unlock()
+
+	for _, name := range toRecover {
+		go func() {
+			defer g.suspendWG.Done()
+			log.Printf("[gateway] recovering actor %s stuck in SUSPENDING", name)
+			g.suspendActor(name)
+		}()
 	}
 }

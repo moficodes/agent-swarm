@@ -131,6 +131,7 @@ spec:
         app: conf-gateway
     spec:
       serviceAccountName: conf-gateway
+      terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

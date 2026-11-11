@@ -413,6 +413,7 @@ func main() {
 		gateway.WithMaxActors(cfg.ActorCount),
 		gateway.WithSeatsPerWorker(cfg.ActorsPerWorker),
 		gateway.WithSuspendAfter(cfg.SuspendAfter),
+		gateway.WithSuspendDrainTimeout(20 * time.Second),
 		gateway.WithHTTPClient(routerHTTPClient),
 		gateway.WithUsage(proxy),
 		gateway.WithModel(proxy),
@@ -477,8 +478,9 @@ func main() {
 
 	<-ctx.Done()
 	log.Printf("Shutting down conference edge gateway...")
+	gw.StopSimulation()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	if metricsSrv != nil {

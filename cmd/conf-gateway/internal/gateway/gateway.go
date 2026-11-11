@@ -109,6 +109,20 @@ func WithSuspendAfter(d time.Duration) Option {
 	return func(g *Gateway) { g.suspendAfter = d }
 }
 
+// WithSuspendDrainTimeout sets how long Close waits for in-flight actor
+// suspends to finish before canceling them, preventing gateway rollouts from
+// interrupting ateapi mid-checkpoint and leaving actors in SUSPENDING.
+func WithSuspendDrainTimeout(d time.Duration) Option {
+	return func(g *Gateway) { g.suspendDrainTimeout = d }
+}
+
+// WithStuckSuspendingAfter sets how long an actor may remain in SUSPENDING
+// with no local turn or suspend in flight before the gateway re-drives
+// Substrate's idempotent SuspendActor workflow. Non-positive disables recovery.
+func WithStuckSuspendingAfter(d time.Duration) Option {
+	return func(g *Gateway) { g.stuckSuspendingAfter = d }
+}
+
 // UsageSource reports model usage per actor.
 type UsageSource interface {
 	Usage(actor string) types.ModelUsage
@@ -249,14 +263,16 @@ type Gateway struct {
 	broker              *feed.Broker
 	actions             *feed.Log
 
-	control      actorstate.ActorControl
-	board        *actorstate.Board
-	pollInterval time.Duration
-	suspendAfter time.Duration
-	usage        UsageSource
-	model        actorproxy.ModelCaller
-	mockLLM      bool
-	statePollMs  atomic.Int64
+	control              actorstate.ActorControl
+	board                *actorstate.Board
+	pollInterval         time.Duration
+	suspendAfter         time.Duration
+	suspendDrainTimeout  time.Duration
+	stuckSuspendingAfter time.Duration
+	usage                UsageSource
+	model                actorproxy.ModelCaller
+	mockLLM              bool
+	statePollMs          atomic.Int64
 
 	mux         *http.ServeMux
 	proxy       *actorproxy.Proxy
@@ -275,6 +291,10 @@ type Gateway struct {
 	// suspendTimers holds each attendee's pending auto-suspend when
 	// suspendAfter is positive. Each pending timer holds one wg count.
 	suspendTimers map[string]*time.Timer
+	// suspendsInFlight counts active Suspend RPCs per attendee.
+	suspendsInFlight map[string]int
+	// suspendingSince records when ateapi first reported an actor in SUSPENDING.
+	suspendingSince map[string]time.Time
 	// turnsInFlight counts each attendee's proxied turns that have not
 	// finished. An actor is only scheduled for suspend when it reaches zero.
 	turnsInFlight map[string]int
@@ -292,33 +312,39 @@ type Gateway struct {
 	// closed is set by Close; no background work starts after it.
 	closed bool
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	suspendCtx    context.Context
+	suspendCancel context.CancelFunc
+	suspendWG     sync.WaitGroup
 }
 
 // NewGateway creates and initializes a new Gateway.
 func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw := &Gateway{
-		routerURL:           routerURL,
-		atespace:            "ate-demo-conf",
-		statusInterval:      500 * time.Millisecond,
-		workerScaleInterval: 2 * time.Second,
-		pollInterval:        time.Second,
-		httpClient:          &http.Client{Timeout: 5 * time.Second},
-		broker:              feed.NewBroker(),
-		actions:             feed.NewLog(100),
-		mux:                 http.NewServeMux(),
-		chatHistories:       make(map[string][]types.ChatMessage),
-		lastResults:         make(map[string]*types.ExecutionResult),
-		currentActionID:     make(map[string]string),
-		recentEvents:        make([]string, 0),
-		suspendTimers:       make(map[string]*time.Timer),
-		turnsInFlight:       make(map[string]int),
-		turnSeq:             make(map[string]uint64),
-		historyClears:       make(map[string]*historyClear),
-		maxActors:           50,
-		seatsPerWorker:      1,
+		routerURL:            routerURL,
+		atespace:             "ate-demo-conf",
+		statusInterval:       500 * time.Millisecond,
+		workerScaleInterval:  2 * time.Second,
+		pollInterval:         time.Second,
+		stuckSuspendingAfter: 20 * time.Second,
+		httpClient:           &http.Client{Timeout: 5 * time.Second},
+		broker:               feed.NewBroker(),
+		actions:              feed.NewLog(100),
+		mux:                  http.NewServeMux(),
+		chatHistories:        make(map[string][]types.ChatMessage),
+		lastResults:          make(map[string]*types.ExecutionResult),
+		currentActionID:      make(map[string]string),
+		recentEvents:         make([]string, 0),
+		suspendTimers:        make(map[string]*time.Timer),
+		suspendsInFlight:     make(map[string]int),
+		suspendingSince:      make(map[string]time.Time),
+		turnsInFlight:        make(map[string]int),
+		turnSeq:              make(map[string]uint64),
+		historyClears:        make(map[string]*historyClear),
+		maxActors:            50,
+		seatsPerWorker:       1,
 	}
 
 	for _, opt := range opts {
@@ -363,8 +389,11 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw.board = actorstate.NewBoard(gw.publishView)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	suspendCtx, suspendCancel := context.WithCancel(context.Background())
 	gw.ctx = ctx
 	gw.cancel = cancel
+	gw.suspendCtx = suspendCtx
+	gw.suspendCancel = suspendCancel
 	gw.wg.Add(1)
 	go gw.pollStatus(ctx)
 	if gw.workerScale != nil {
@@ -376,8 +405,11 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		gw.wg.Add(1)
 		go func() {
 			defer gw.wg.Done()
-			actorstate.Poll(ctx, gw.control, gw.pollInterval, gw.board, func(d time.Duration, _ error) {
+			actorstate.Poll(ctx, gw.control, gw.pollInterval, gw.board, func(d time.Duration, err error) {
 				gw.statePollMs.Store(d.Milliseconds())
+				if err == nil {
+					gw.reconcileStuckSuspending(time.Now())
+				}
 			})
 		}()
 	}
@@ -385,15 +417,21 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	return gw
 }
 
-// Close stops background work, including pending auto-suspends, and waits
-// for any suspend already running to finish.
-func (g *Gateway) Close() {
+// StopSimulation stops any active audience simulation so no new simulated turns
+// start while the HTTP server drains.
+func (g *Gateway) StopSimulation() {
 	g.mu.Lock()
 	sc := g.simController
 	g.mu.Unlock()
 	if sc != nil {
 		sc.Stop()
 	}
+}
+
+// Close stops background work, including pending auto-suspends, and waits
+// for any suspend already running to finish.
+func (g *Gateway) Close() {
+	g.StopSimulation()
 
 	g.mu.Lock()
 	g.closed = true
@@ -403,9 +441,25 @@ func (g *Gateway) Close() {
 		}
 		delete(g.suspendTimers, name)
 	}
+	drainTimeout := g.suspendDrainTimeout
 	g.mu.Unlock()
 
 	g.cancel()
+	if drainTimeout > 0 {
+		drained := make(chan struct{})
+		go func() {
+			g.suspendWG.Wait()
+			close(drained)
+		}()
+		timer := time.NewTimer(drainTimeout)
+		select {
+		case <-drained:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+	g.suspendCancel()
+	g.suspendWG.Wait()
 	g.wg.Wait()
 }
 
