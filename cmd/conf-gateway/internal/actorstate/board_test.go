@@ -406,3 +406,69 @@ func TestBoard_HyperMode16Million(t *testing.T) {
 		t.Errorf("stride-protected seated attendee-4096 = %d, want 4", got)
 	}
 }
+
+func TestBoard_HyperModeLifecycleResumingThinkingExecutingRunningSuspendingSuspended(t *testing.T) {
+	const total = 100000
+	b := actorstate.NewBoardWithCapacity(func(types.ActorView) {}, total)
+
+	codeOf := func(idx1 int) byte {
+		bin := b.FleetBinarySnapshot(total, nil, nil)
+		return bin[actorstate.FleetBinaryHeaderBytes+idx1-1]
+	}
+
+	// 0. NeverStarted -> code 0
+	if got := codeOf(42); got != 0 {
+		t.Fatalf("initial code = %d, want 0 (NeverStarted)", got)
+	}
+
+	// 1. BeginHyperResume -> code 2 (Resuming), surviving an intermediate empty poll before worker assignment.
+	b.BeginHyperResume("attendee-42", types.ActivityThinking)
+	if got := codeOf(42) & 15; got != 2 {
+		t.Fatalf("after BeginHyperResume code = %d, want 2 (Resuming)", got)
+	}
+	b.SetActiveStatuses(nil)
+	if got := codeOf(42) & 15; got != 2 {
+		t.Fatalf("after pre-assignment SetActiveStatuses code = %d, want 2 (Resuming preserved)", got)
+	}
+
+	// 2. Worker pod assigned -> StateRunning + ActivityThinking -> code 5 | 32 (onPod)
+	b.SetActiveStatuses([]actorstate.Status{
+		{Name: "attendee-42", State: types.StateRunning, WorkerPod: "worker-7"},
+	})
+	if got := codeOf(42); got != (5 | 32) {
+		t.Fatalf("after worker assignment code = %d, want %d (Thinking | onPod)", got, 5|32)
+	}
+
+	// 3. Auto-chained approve on already-seated actor -> ActivityExecuting -> code 7 | 32 (no Resuming detour)
+	b.BeginHyperResume("attendee-42", types.ActivityExecuting)
+	if got := codeOf(42); got != (7 | 32) {
+		t.Fatalf("during approve execution code = %d, want %d (Executing | onPod)", got, 7|32)
+	}
+
+	// 4. Turn finishes, warm SUSPEND_AFTER window -> StateRunning + ActivityIdle -> code 4 | 32
+	b.SetActivity("attendee-42", types.ActivityIdle)
+	if got := codeOf(42); got != (4 | 32) {
+		t.Fatalf("during warm running idle window code = %d, want %d (Running | onPod)", got, 4|32)
+	}
+
+	// 5. BeginHyperSuspend -> StateSuspending -> code 3 | 32, surviving an intermediate active-seat poll.
+	b.BeginHyperSuspend("attendee-42")
+	if got := codeOf(42); got != (3 | 32) {
+		t.Fatalf("during BeginHyperSuspend code = %d, want %d (Suspending | onPod)", got, 3|32)
+	}
+	b.SetActiveStatuses([]actorstate.Status{
+		{Name: "attendee-42", State: types.StateRunning, WorkerPod: "worker-7"},
+	})
+	if got := codeOf(42); got != (3 | 32) {
+		t.Fatalf("during active-seat poll mid-suspend code = %d, want %d (Suspending | onPod preserved)", got, 3|32)
+	}
+
+	// 6. FinishHyperSuspend(true) -> Checkpointed SUSPENDED -> code 1 (unseated)
+	b.FinishHyperSuspend("attendee-42", true)
+	if got := codeOf(42); got != 1 {
+		t.Fatalf("after FinishHyperSuspend code = %d, want 1 (Checkpointed SUSPENDED)", got)
+	}
+	if seats := b.ActiveSeatCount(); seats != 0 {
+		t.Fatalf("ActiveSeatCount after FinishHyperSuspend = %d, want 0", seats)
+	}
+}

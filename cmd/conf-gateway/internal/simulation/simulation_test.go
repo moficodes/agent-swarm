@@ -174,11 +174,13 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 	orchMu.Unlock()
 
-	// Drive a chat turn via HandleTurn with a short 5ms review delay.
+	// Drive a simulated turn via HandleTurn: simulated Mock LLM turns must
+	// auto-chain /api/chat -> /api/approve in a single turn without leaving
+	// the actor paused in AwaitingApproval.
 	turnBody, _ := json.Marshal(TurnPayload{
 		TurnID:        "t1",
 		Prompt:        "Run benchmark sandbox test",
-		ReviewDelayMs: 5,
+		ReviewDelayMs: 15000,
 		IdleDelayMs:   50,
 	})
 	req1 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader(turnBody))
@@ -189,15 +191,14 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 
 	target.mu.Lock()
-	if len(target.chats) != 1 || len(target.approvals) != 0 {
-		t.Fatalf("after first turn chats=%v approvals=%v", target.chats, target.approvals)
+	if len(target.chats) != 1 || len(target.approvals) != 1 || target.approvals[0] != target.chats[0] {
+		t.Fatalf("after first turn chats=%v approvals=%v, want 1 chat auto-chained into 1 matching approval", target.chats, target.approvals)
 	}
 	firstAttendee := target.chats[0]
 	target.mu.Unlock()
 
-	// Wait for the 5ms review delay to mature, then drive the next turn; Priority 1
-	// must approve the awaiting actor before starting another chat.
-	time.Sleep(15 * time.Millisecond)
+	// Driving a second HandleTurn immediately dispatches another distinct actor's
+	// full chat -> approve cycle.
 	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader(turnBody))
 	rec2 := httptest.NewRecorder()
 	r.HandleTurn(rec2, req2)
@@ -206,8 +207,8 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 
 	target.mu.Lock()
-	if len(target.approvals) != 1 || target.approvals[0] != firstAttendee {
-		t.Fatalf("after second turn approvals=%v, want [%s]", target.approvals, firstAttendee)
+	if len(target.chats) != 2 || len(target.approvals) != 2 || target.chats[1] == firstAttendee {
+		t.Fatalf("after second turn chats=%v approvals=%v, want 2 distinct auto-chained turns", target.chats, target.approvals)
 	}
 	target.mu.Unlock()
 
@@ -344,7 +345,7 @@ func (f *oversubFakeTarget) SeedSimulatedApproval(attendeeID, prompt string) str
 	return appID
 }
 
-func TestRunner_OversubscribedCohortSeedingAndSeatBackpressure(t *testing.T) {
+func TestRunner_RealExecutionOnlyWithoutStaticPurpleSeeding(t *testing.T) {
 	orchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -364,13 +365,14 @@ func TestRunner_OversubscribedCohortSeedingAndSeatBackpressure(t *testing.T) {
 	}
 	defer r.Stop()
 
-	// Even when physical seats are full (canAcquireSeat == false), HandleTurn
-	// must onboard a batch of oversubscribed actors into AwaitingApproval.
+	// When physical seats are full (canAcquireSeat == false), HandleTurn must
+	// apply backpressure (204 No Content) and NEVER synthetically paint un-run
+	// actors into static Purple (AwaitingApproval).
 	req := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
 	r.HandleTurn(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("HandleTurn during onboarding status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("HandleTurn while seat-blocked status = %d, want 204", rec.Code)
 	}
 
 	target.mu.Lock()
@@ -379,14 +381,14 @@ func TestRunner_OversubscribedCohortSeedingAndSeatBackpressure(t *testing.T) {
 	target.canAcquireSeat = true
 	target.mu.Unlock()
 
-	if seededCount != 64 {
-		t.Fatalf("seededCount = %d, want 64", seededCount)
+	if seededCount != 0 {
+		t.Fatalf("seededCount = %d, want 0 (real execution only)", seededCount)
 	}
 	if chatCount != 0 {
 		t.Fatalf("chatCount while seat-blocked = %d, want 0", chatCount)
 	}
 
-	// Once seat headroom opens up, HandleTurn both seeds and dispatches a live container turn.
+	// Once seat headroom opens up, HandleTurn dispatches a full chat -> approve container turn.
 	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{}`)))
 	rec2 := httptest.NewRecorder()
 	r.HandleTurn(rec2, req2)
@@ -395,8 +397,8 @@ func TestRunner_OversubscribedCohortSeedingAndSeatBackpressure(t *testing.T) {
 	}
 
 	target.mu.Lock()
-	if len(target.chats) != 1 {
-		t.Fatalf("chatCount after seat opened = %d, want 1", len(target.chats))
+	if len(target.chats) != 1 || len(target.approvals) != 1 {
+		t.Fatalf("after seat opened chats=%d approvals=%d, want 1 and 1", len(target.chats), len(target.approvals))
 	}
 	target.mu.Unlock()
 }

@@ -138,7 +138,12 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			podIndex[v.WorkerPod] = i
 			workers = append(workers, types.WorkerStatus{PodName: v.WorkerPod})
 		}
-		workers[i].Actors = append(workers[i].Actors, types.WorkerActor{ActorID: v.ActorID, State: v.State})
+		workers[i].Actors = append(workers[i].Actors, types.WorkerActor{
+			ActorID:  v.ActorID,
+			State:    v.State,
+			Activity: v.Activity,
+			Source:   v.Source,
+		})
 	}
 	if g.maxActors > actorstate.HyperFleetThreshold {
 		compactActors := make(map[string]types.ActorView, len(leasedIDs)+4)

@@ -30,6 +30,23 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
+type turnStartCtxKey struct{}
+
+func (g *Gateway) beginHyperTurnActivity(attendeeID string, act types.Activity) func() {
+	if g.board == nil || !g.board.IsHyperMode() || g.control == nil {
+		g.setActivity(attendeeID, act)
+		return func() {}
+	}
+	g.board.BeginHyperResume(attendeeID, act)
+	t := time.AfterFunc(2200*time.Millisecond, func() {
+		if g.ctx != nil && g.ctx.Err() != nil {
+			return
+		}
+		g.board.PromoteHyperResume(attendeeID)
+	})
+	return func() { t.Stop() }
+}
+
 func (g *Gateway) canFallbackApprovalToActor(reqCtx context.Context, attendeeID string) bool {
 	if g.control == nil || g.board == nil {
 		return false
@@ -142,7 +159,8 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		}
 		if apprReq.Decision == types.DecisionApprove {
 			entry.Activity = types.ActivityExecuting
-			g.setActivity(attendeeID, types.ActivityExecuting)
+			stopPromote := g.beginHyperTurnActivity(attendeeID, types.ActivityExecuting)
+			defer stopPromote()
 		}
 		if sampled {
 			g.RecordActionEntry(entry)
@@ -150,8 +168,12 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	} else {
 		sampled = true
 	}
+	if useMock && g.board != nil {
+		g.board.SetSource(attendeeID, types.SourceMock)
+	}
 	if r.URL.Path != "/api/approve" {
-		g.setActivity(attendeeID, types.ActivityThinking)
+		stopPromote := g.beginHyperTurnActivity(attendeeID, types.ActivityThinking)
+		defer stopPromote()
 	}
 	if !useMock && (isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) || g.IsLeased(attendeeID)) {
 		g.LeaseAttendee(attendeeID)
@@ -166,6 +188,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		g.mu.Unlock()
 	}
 
+	r = r.WithContext(context.WithValue(r.Context(), turnStartCtxKey{}, time.Now()))
 	g.proxy.ServeHTTP(w, actorproxy.WithMock(actorproxy.WithAttendee(r, attendeeID), useMock))
 }
 
@@ -256,6 +279,11 @@ func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID str
 			hold = g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
 		} else {
 			hold = g.mockTurnDelay(g.mockExecMin, g.mockExecMax)
+		}
+		if reqCtx != nil {
+			if startedAt, ok := reqCtx.Value(turnStartCtxKey{}).(time.Time); ok {
+				hold -= time.Since(startedAt)
+			}
 		}
 		if hold > 0 {
 			var reqDone <-chan struct{}

@@ -265,8 +265,10 @@ type WorkerStatus struct {
 
 // WorkerActor is one actor holding a seat on a worker pod.
 type WorkerActor struct {
-	ActorID string         `json:"actor_id"`
-	State   SubstrateState `json:"state"`
+	ActorID  string         `json:"actor_id"`
+	State    SubstrateState `json:"state"`
+	Activity Activity       `json:"activity,omitempty"`
+	Source   ReplySource    `json:"source,omitempty"`
 }
 
 // ActorDetails is everything the inspector drawer shows about one actor.

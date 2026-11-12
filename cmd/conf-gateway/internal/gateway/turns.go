@@ -137,7 +137,14 @@ func (g *Gateway) suspendActor(attendee string) {
 
 	ctx, cancel := context.WithTimeout(g.suspendCtx, 30*time.Second)
 	defer cancel()
-	if err := g.control.Suspend(ctx, attendee); err != nil {
+	if g.board != nil {
+		g.board.BeginHyperSuspend(attendee)
+	}
+	err := g.control.Suspend(ctx, attendee)
+	if g.board != nil {
+		g.board.FinishHyperSuspend(attendee, err == nil)
+	}
+	if err != nil {
 		if g.suspendCtx.Err() != nil {
 			return // the gateway's suspend drain window ended
 		}

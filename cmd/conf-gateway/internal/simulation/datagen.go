@@ -513,18 +513,11 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 			idleDelay = s.calculateInterTurnDelay(lDelay)
 		}
 		now := time.Now()
-		seeded := s.onboardOversubscribedCohort(now)
 		if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
 			if s.turnSem != nil {
 				<-s.turnSem
 			}
 			runWG.Done()
-			if seeded > 0 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(map[string]any{"executed": true, "action": "seed"})
-				return
-			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -534,12 +527,6 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 				<-s.turnSem
 			}
 			runWG.Done()
-			if seeded > 0 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(map[string]any{"executed": true, "action": "seed"})
-				return
-			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

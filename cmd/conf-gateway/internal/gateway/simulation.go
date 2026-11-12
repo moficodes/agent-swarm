@@ -48,7 +48,7 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 
 	maxSimRouterInFlight := 512
 	if g.maxActors > actorstate.HyperFleetThreshold {
-		maxSimRouterInFlight = 1536
+		maxSimRouterInFlight = 2048
 	}
 	if g.proxy != nil && g.proxy.SimRouterInFlight() >= maxSimRouterInFlight {
 		return false

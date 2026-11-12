@@ -618,3 +618,143 @@ func TestState_PollerSuspendsOrphanedRunningActorsUnlessBusy(t *testing.T) {
 		t.Fatalf("post-turn suspended %q, want attendee-08", got)
 	}
 }
+
+type hyperActiveControl struct {
+	*fakeControl
+}
+
+func (h hyperActiveControl) ListActiveSeats(ctx context.Context) ([]actorstate.Status, error) {
+	return h.List(ctx)
+}
+
+func TestState_HyperModeWorkersCarryActivityAndNoDoubleMockSleep(t *testing.T) {
+	chatEntered := make(chan struct{})
+	releaseChat := make(chan struct{})
+	var closeChatOnce sync.Once
+	defer closeChatOnce.Do(func() { close(releaseChat) })
+	suspendEntered := make(chan struct{})
+	releaseSuspend := make(chan struct{})
+	var closeSuspOnce sync.Once
+	defer closeSuspOnce.Do(func() { close(releaseSuspend) })
+
+	actor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/chat" {
+			chatEntered <- struct{}{}
+			<-releaseChat
+			// Simulate upstream container already sleeping 180ms so Gateway must NOT double-sleep another 180ms.
+			time.Sleep(180 * time.Millisecond)
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{
+				ID:      "m1",
+				Sender:  types.SenderAssistant,
+				Content: "planned",
+				Source:  types.SourceMock,
+				Approval: &types.ApprovalRequest{
+					ApprovalID: "app-hyper",
+					Code:       "print('ok')",
+					Language:   "python",
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:      "m2",
+			Sender:  types.SenderAssistant,
+			Content: "done",
+			Execution: &types.ExecutionResult{
+				ExitCode:   0,
+				Stdout:     "ok\n",
+				DurationMs: 12,
+			},
+		})
+	}))
+	t.Cleanup(actor.Close)
+
+	ctrl := newFakeControl()
+	customCtrl := &suspendHookControl{
+		hyperActiveControl: hyperActiveControl{fakeControl: ctrl},
+		onSuspend: func() {
+			suspendEntered <- struct{}{}
+			<-releaseSuspend
+		},
+	}
+
+	gw := newTestGateway(t, actor.URL,
+		gateway.WithMaxActors(100000),
+		gateway.WithSeatsPerWorker(64),
+		gateway.WithActorControl(customCtrl),
+		gateway.WithPollInterval(5*time.Millisecond),
+		gateway.WithSuspendAfter(10*time.Millisecond),
+		gateway.WithMockTurnDelays(180*time.Millisecond, 180*time.Millisecond, 0, 0),
+	)
+
+	start := time.Now()
+	chatDone := make(chan struct{})
+	go func() {
+		defer close(chatDone)
+		postJSON(gw, "attendee-77", "/api/chat", types.ChatRequest{Message: "bench", Mock: true})
+	}()
+	<-chatEntered
+
+	// Seat attendee-77 on pool-hyper-1 while chat is in flight; telemetry Workers must carry Activity=THINKING & Source=mock!
+	ctrl.set(actorstate.Status{Name: "attendee-77", State: types.StateRunning, WorkerPod: "pool-hyper-1"})
+	var sawThinkingOnWorker bool
+	for i := 0; i < 40; i++ {
+		tel := getTelemetry(t, gw)
+		for _, w := range tel.Workers {
+			for _, wa := range w.Actors {
+				if wa.ActorID == "attendee-77" && wa.Activity == types.ActivityThinking {
+					sawThinkingOnWorker = true
+				}
+			}
+		}
+		if sawThinkingOnWorker {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !sawThinkingOnWorker {
+		t.Fatalf("expected hyper-mode telemetry Workers to include Activity=THINKING for seated attendee-77")
+	}
+
+	closeChatOnce.Do(func() { close(releaseChat) })
+	<-chatDone
+	if elapsed := time.Since(start); elapsed >= 340*time.Millisecond {
+		t.Fatalf("mock chat turn took %v, want < 340ms (gateway double-slept mockThink delay!)", elapsed)
+	}
+
+	// Complete turn via approve so auto-suspend triggers.
+	if rec := postJSON(gw, "attendee-77", "/api/approve", types.ApprovalResponse{
+		ApprovalID: "app-hyper",
+		Decision:   types.DecisionApprove,
+		Mock:       true,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d", rec.Code)
+	}
+
+	<-suspendEntered
+	telSusp := getTelemetry(t, gw)
+	var sawSuspendingOnWorker bool
+	for _, w := range telSusp.Workers {
+		for _, wa := range w.Actors {
+			if wa.ActorID == "attendee-77" && wa.State == types.StateSuspending {
+				sawSuspendingOnWorker = true
+			}
+		}
+	}
+	closeSuspOnce.Do(func() { close(releaseSuspend) })
+	if !sawSuspendingOnWorker {
+		t.Fatalf("expected hyper-mode telemetry Workers to report State=SUSPENDING during checkpoint, got %+v", telSusp.Workers)
+	}
+}
+
+type suspendHookControl struct {
+	hyperActiveControl
+	onSuspend func()
+}
+
+func (s *suspendHookControl) Suspend(ctx context.Context, name string) error {
+	if s.onSuspend != nil {
+		s.onSuspend()
+	}
+	return s.hyperActiveControl.Suspend(ctx, name)
+}

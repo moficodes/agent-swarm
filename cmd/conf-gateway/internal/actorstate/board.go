@@ -129,6 +129,8 @@ type Board struct {
 	activeSeatCount int
 	hyperCount      int
 	compact         []byte
+	hyperResuming   map[string]types.Activity
+	hyperSuspending map[string]bool
 	unavailableMsg  string
 
 	// pubMu serializes publish calls in commit order. It is acquired while
@@ -157,6 +159,8 @@ func NewBoardWithCapacity(publish func(types.ActorView), maxActors int) *Board {
 	if maxActors > HyperFleetThreshold {
 		b.hyperCount = maxActors
 		b.compact = make([]byte, maxActors)
+		b.hyperResuming = make(map[string]types.Activity)
+		b.hyperSuspending = make(map[string]bool)
 	}
 	return b
 }
@@ -391,7 +395,17 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 			old = types.ActorView{ActorID: name, State: types.StateUnknown}
 		}
 		v := old
-		v.State, v.StateDetail, v.WorkerPod = s.State, "", s.WorkerPod
+		if b.hyperSuspending[name] {
+			v.State, v.StateDetail, v.WorkerPod = types.StateSuspending, "", s.WorkerPod
+		} else {
+			v.State, v.StateDetail, v.WorkerPod = s.State, "", s.WorkerPod
+			if pendAct, wasResuming := b.hyperResuming[name]; wasResuming {
+				delete(b.hyperResuming, name)
+				if v.Activity == types.ActivityIdle && pendAct != types.ActivityIdle {
+					v.Activity = pendAct
+				}
+			}
+		}
 		if s.SnapshotURI != "" {
 			v.SnapshotURI = s.SnapshotURI
 		}
@@ -418,6 +432,10 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 		if _, stillActive := byName[name]; stillActive {
 			continue
 		}
+		if _, resuming := b.hyperResuming[name]; resuming {
+			continue
+		}
+		delete(b.hyperSuspending, name)
 		v := old
 		v.State = types.StateSuspended
 		v.StateDetail = ""
@@ -486,12 +504,108 @@ func (b *Board) SetUnavailable(reason string) {
 
 // SetActivity records what the actor is doing for its attendee.
 func (b *Board) SetActivity(actor string, a types.Activity) {
-	b.update([]string{actor}, func(v *types.ActorView) { v.Activity = a })
+	b.update([]string{actor}, func(v *types.ActorView) {
+		if b.hyperCount > 0 {
+			delete(b.hyperResuming, actor)
+			if v.State == types.StateResuming {
+				if a == types.ActivityIdle && v.WorkerPod == "" {
+					v.State = types.StateSuspended
+				} else {
+					v.State = types.StateRunning
+				}
+			}
+		}
+		v.Activity = a
+	})
 }
 
 // SetSource records where the actor's last reply came from.
 func (b *Board) SetSource(actor string, s types.ReplySource) {
 	b.update([]string{actor}, func(v *types.ActorView) { v.Source = s })
+}
+
+// BeginHyperResume marks an unseated hyper-mode actor as StateResuming until
+// ListActiveSeats observes its worker pod assignment, then promotes it to targetActivity.
+// If the actor is already seated and running on a worker pod, it updates Activity directly.
+func (b *Board) BeginHyperResume(actor string, targetActivity types.Activity) {
+	if b.hyperCount == 0 {
+		b.SetActivity(actor, targetActivity)
+		return
+	}
+	b.update([]string{actor}, func(v *types.ActorView) {
+		if v.WorkerPod != "" && v.State == types.StateRunning && !b.hyperSuspending[actor] {
+			delete(b.hyperResuming, actor)
+			v.Activity = targetActivity
+			return
+		}
+		delete(b.hyperSuspending, actor)
+		b.hyperResuming[actor] = targetActivity
+		v.State = types.StateResuming
+		v.StateDetail = ""
+		v.Activity = types.ActivityIdle
+	})
+}
+
+// PromoteHyperResume transitions an actor still in hyperResuming into StateRunning
+// with its pending targetActivity if the container began executing before a poll tick.
+func (b *Board) PromoteHyperResume(actor string) {
+	if b.hyperCount == 0 {
+		return
+	}
+	b.update([]string{actor}, func(v *types.ActorView) {
+		pendAct, ok := b.hyperResuming[actor]
+		if !ok {
+			return
+		}
+		delete(b.hyperResuming, actor)
+		if v.State == types.StateResuming {
+			v.State = types.StateRunning
+		}
+		if v.Activity == types.ActivityIdle && pendAct != types.ActivityIdle {
+			v.Activity = pendAct
+		}
+	})
+}
+
+// BeginHyperSuspend marks a seated hyper-mode actor as StateSuspending while
+// its SuspendActor checkpoint RPC is in flight.
+func (b *Board) BeginHyperSuspend(actor string) {
+	if b.hyperCount == 0 {
+		return
+	}
+	b.update([]string{actor}, func(v *types.ActorView) {
+		delete(b.hyperResuming, actor)
+		if v.State == types.StateSuspended && v.WorkerPod == "" {
+			return
+		}
+		b.hyperSuspending[actor] = true
+		v.State = types.StateSuspending
+		v.StateDetail = ""
+	})
+}
+
+// FinishHyperSuspend completes an in-flight hyper-mode SuspendActor transition.
+func (b *Board) FinishHyperSuspend(actor string, succeeded bool) {
+	if b.hyperCount == 0 {
+		return
+	}
+	b.update([]string{actor}, func(v *types.ActorView) {
+		delete(b.hyperSuspending, actor)
+		if succeeded {
+			v.State = types.StateSuspended
+			v.StateDetail = ""
+			v.WorkerPod = ""
+			v.NeverStarted = false
+			return
+		}
+		if v.State == types.StateSuspending {
+			if v.WorkerPod != "" {
+				v.State = types.StateRunning
+			} else {
+				v.State = types.StateSuspended
+			}
+		}
+	})
 }
 
 // SeedSimulatedActivity records both activity and reply source in a single board update.
@@ -532,13 +646,20 @@ func (b *Board) SeedSimulatedActivityIndices(indices []int, a types.Activity, s 
 func (b *Board) Reset() {
 	if b.hyperCount > 0 {
 		b.mu.Lock()
+		clear(b.hyperResuming)
+		clear(b.hyperSuspending)
 		for i := range b.compact {
 			b.compact[i] &^= (compactActMask | compactMockSource)
 		}
 		names := slices.Collect(maps.Keys(b.views))
 		b.mu.Unlock()
 		if len(names) > 0 {
-			b.update(names, func(v *types.ActorView) { v.Activity, v.Source = types.ActivityIdle, "" })
+			b.update(names, func(v *types.ActorView) {
+				if v.State == types.StateResuming && v.WorkerPod == "" {
+					v.State = types.StateSuspended
+				}
+				v.Activity, v.Source = types.ActivityIdle, ""
+			})
 		}
 		return
 	}
@@ -581,17 +702,22 @@ func (b *Board) ClearUnleasedActivityIndices(protectedIndices map[int]bool, isLe
 		}
 		var targetNames []string
 		for name, v := range b.views {
-			if v.Activity == types.ActivityIdle || v.Activity == "" {
+			_, isResuming := b.hyperResuming[name]
+			if (v.Activity == types.ActivityIdle || v.Activity == "") && !isResuming {
 				continue
 			}
 			if isLeased != nil && isLeased(name) {
 				continue
 			}
+			delete(b.hyperResuming, name)
 			targetNames = append(targetNames, name)
 		}
 		b.mu.Unlock()
 		if len(targetNames) > 0 {
 			b.update(targetNames, func(v *types.ActorView) {
+				if v.State == types.StateResuming && v.WorkerPod == "" {
+					v.State = types.StateSuspended
+				}
 				v.Activity = types.ActivityIdle
 			})
 		}

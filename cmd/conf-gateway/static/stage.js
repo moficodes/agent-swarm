@@ -752,6 +752,14 @@
     if (full) {
       return window.ActorView.badge(full);
     }
+    if (wa.activity || (wa.state && wa.state !== 'RUNNING')) {
+      return window.ActorView.badge({ state: wa.state, activity: wa.activity || '' });
+    }
+    const idx = parseActorNumber(wa.actor_id);
+    const len = getCompactFleetLength();
+    if (idx >= 1 && idx <= len) {
+      return window.ActorView.decodeCompactBadge(getFleetRawCode(idx - 1) + 64);
+    }
     return window.ActorView.badge({ state: wa.state });
   }
 
@@ -836,8 +844,10 @@
 
   function describeSeatActivity(wa, badgeObj) {
     const cls = badgeObj ? badgeObj.cls : 'running';
+    const full = (wa && wa.actor_id) ? latestActorsMap[wa.actor_id] : null;
+    const src = (wa && wa.source) || (full && full.source) || '';
     switch (cls) {
-      case 'thinking': return 'Gemini 3.8 Flash';
+      case 'thinking': return src === 'mock' ? 'Mock LLM Planner' : 'Gemini 3.8 Flash';
       case 'executing': return 'gVisor Sandbox';
       case 'awaiting': return 'Human Review Gate';
       case 'resuming': return 'Restoring GCS Snap';
