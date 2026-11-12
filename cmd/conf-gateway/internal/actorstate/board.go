@@ -132,6 +132,7 @@ type Board struct {
 	hyperResuming   map[string]types.Activity
 	hyperSuspending map[string]bool
 	unavailableMsg  string
+	hasUnavailable  bool
 
 	// pubMu serializes publish calls in commit order. It is acquired while
 	// mu is still held, so the order in which updates commit their views is
@@ -213,6 +214,7 @@ func (b *Board) syncCompactFromViewLocked(idx int, v types.ActorView) {
 	}
 	if v.State == types.StateUnavailable {
 		cb |= compactUnavailable
+		b.hasUnavailable = true
 	} else {
 		cb &^= compactUnavailable
 	}
@@ -376,9 +378,12 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 
 	var changed []types.ActorView
 	b.mu.Lock()
-	b.unavailableMsg = ""
-	for i := range b.compact {
-		b.compact[i] &^= compactUnavailable
+	if b.hasUnavailable || b.unavailableMsg != "" {
+		b.unavailableMsg = ""
+		b.hasUnavailable = false
+		for i := range b.compact {
+			b.compact[i] &^= compactUnavailable
+		}
 	}
 
 	for name, s := range byName {
@@ -475,6 +480,7 @@ func (b *Board) SetUnavailable(reason string) {
 	if b.hyperCount > 0 {
 		b.mu.Lock()
 		b.unavailableMsg = reason
+		b.hasUnavailable = true
 		for i := range b.compact {
 			b.compact[i] |= compactUnavailable
 		}

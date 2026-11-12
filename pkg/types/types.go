@@ -260,7 +260,11 @@ type WorkerPods struct {
 // WorkerStatus is one worker pod and the actors ateapi reports on it.
 type WorkerStatus struct {
 	PodName string        `json:"pod_name"`
-	Actors  []WorkerActor `json:"actors"`
+	Actors  []WorkerActor `json:"actors,omitempty"`
+	// ActorNums compactly encodes 1-based attendee numbers in hyper mode when
+	// tens of thousands of seats are occupied simultaneously, avoiding multi-MB
+	// JSON serialization per poll while stage.js resolves live badges via fleet.bin.
+	ActorNums []int `json:"actor_nums,omitempty"`
 }
 
 // WorkerActor is one actor holding a seat on a worker pod.

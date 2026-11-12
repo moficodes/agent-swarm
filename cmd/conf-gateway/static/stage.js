@@ -571,6 +571,22 @@
 
     const seats = data.seats_per_worker > 0 ? data.seats_per_worker : 4;
     const p = data.worker_pods || {};
+    if (Array.isArray(data.workers)) {
+      for (let i = 0; i < data.workers.length; i++) {
+        const w = data.workers[i];
+        if (w && (!w.actors || w.actors.length === 0) && Array.isArray(w.actor_nums) && w.actor_nums.length > 0) {
+          const hydrated = new Array(w.actor_nums.length);
+          for (let j = 0; j < w.actor_nums.length; j++) {
+            const num = w.actor_nums[j];
+            hydrated[j] = {
+              actor_id: 'attendee-' + (num < 10 ? '0' + num : String(num)),
+              state: 'RUNNING'
+            };
+          }
+          w.actors = hydrated;
+        }
+      }
+    }
     latestActorsMap = data.actors || {};
     if (data.fleet_compact) {
       latestFleetCompact = data.fleet_compact;
@@ -763,20 +779,21 @@
     return window.ActorView.badge({ state: wa.state });
   }
 
-  function dominantPodClass(actors) {
+  function dominantPodClass(actors, sampleSeed) {
     if (!actors || actors.length === 0) return 'empty';
-    let bestCls = 'running';
-    let bestRank = -1;
+    let transitionCls = '';
     for (let i = 0; i < actors.length; i++) {
       const b = actorBadgeForWorkerActor(actors[i]);
       const cls = b ? b.cls : 'running';
-      const rank = BADGE_PRIORITY[cls] !== undefined ? BADGE_PRIORITY[cls] : 1;
-      if (rank > bestRank) {
-        bestRank = rank;
-        bestCls = cls;
+      if (cls === 'problem') return 'problem';
+      if (!transitionCls && (cls === 'resuming' || cls === 'suspending')) {
+        transitionCls = cls;
       }
     }
-    return bestCls;
+    if (transitionCls) return transitionCls;
+    const idx = Math.abs(typeof sampleSeed === 'number' ? sampleSeed : 0) % actors.length;
+    const picked = actorBadgeForWorkerActor(actors[idx]);
+    return (picked && picked.cls) ? picked.cls : 'running';
   }
 
   const ZOOM_CORNER_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
@@ -918,7 +935,7 @@
       }
       const actors = w.actors || [];
       busyNodeSeats += actors.length;
-      const cls = dominantPodClass(actors);
+      const cls = dominantPodClass(actors, nodeIdx * 64 + i);
       const firstActor = actors.length > 0 ? (actors[0].actor_id || '') : '';
       cells.push(
         `<div class="seat-cell ${cls}" data-hover-kind="pod" data-pod="${escapeHTML(w.pod_name)}" data-node="${escapeHTML(nodeName)}" data-actor="${escapeHTML(firstActor)}">${is8x8 ? '' : actors.length}</div>`
@@ -1668,11 +1685,7 @@
         if ((raw & 16u) != 0u) return 90;
         uint c = raw & 15u;
         if (c == 8u) return 85;
-        if (c == 7u) return 80;
-        if (c == 5u) return 75;
-        if (c == 2u || c == 3u) return 70;
-        if (c == 4u) return 65;
-        if (c == 6u) return 40;
+        if (c >= 2u && c <= 7u) return 70;
         if (c == 1u) return 20;
         return 0;
       }
@@ -1713,19 +1726,23 @@
         vec2 gridCoord = worldUV * vec2(u_grid);
         vec2 cellPx = (u_viewport * u_zoom) / vec2(u_grid);
 
-        // Sub-pixel macro zoom: max-priority pool up to 4x4 texels covered by this screen pixel
-        // so active seated sandboxes and live QR leases always stand out crisply at 1x..4x!
+        // Sub-pixel macro zoom: sample up to 8x8 texels covered by this screen pixel
+        // with deterministic pixel-hash tie-breaking across active states so every
+        // real sandbox state (Resuming, Thinking, Awaiting, Executing, Running,
+        // Suspending, and GCS Checkpointed) shines side-by-side at 1x..4x!
         if (cellPx.x < 1.05 || cellPx.y < 1.05) {
           vec2 span = vec2(u_grid) / (u_viewport * u_zoom);
-          int stepsX = clamp(int(ceil(span.x)), 1, 4);
-          int stepsY = clamp(int(ceil(span.y)), 1, 4);
+          int stepsX = clamp(int(ceil(span.x)), 1, 8);
+          int stepsY = clamp(int(ceil(span.y)), 1, 8);
           ivec2 baseCell = ivec2(floor(gridCoord));
+          int pxSalt = int(gl_FragCoord.x) * 7 + int(gl_FragCoord.y) * 13;
           uint bestRaw = 0u;
           int bestPrio = -1;
-          for (int sy = 0; sy < 4; sy++) {
+          int activeSeen = 0;
+          for (int sy = 0; sy < 8; sy++) {
             if (sy >= stepsY) break;
             int ty = clamp(baseCell.y + int(float(sy) * span.y / float(stepsY)), 0, u_grid.y - 1);
-            for (int sx = 0; sx < 4; sx++) {
+            for (int sx = 0; sx < 8; sx++) {
               if (sx >= stepsX) break;
               int tx = clamp(baseCell.x + int(float(sx) * span.x / float(stepsX)), 0, u_grid.x - 1);
               uint r = texelFetch(u_tex, ivec2(tx, ty), 0).r;
@@ -1733,6 +1750,12 @@
               if (p > bestPrio) {
                 bestPrio = p;
                 bestRaw = r;
+                if (p == 70) activeSeen = 1;
+              } else if (p == 70 && bestPrio == 70) {
+                activeSeen++;
+                if (((pxSalt + activeSeen) % activeSeen) == 0) {
+                  bestRaw = r;
+                }
               }
             }
           }

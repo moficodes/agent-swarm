@@ -172,31 +172,45 @@ func (p *Proxy) call(ctx context.Context, actor string, call types.ModelCall) (i
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.Timeout)
 	defer cancel()
-	out, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(p.cfg.Upstream, "/")+call.Path, bytes.NewReader(call.Body))
-	if err != nil {
-		return errorBody(http.StatusInternalServerError, "building upstream request failed")
-	}
-	out.Header.Set("Content-Type", "application/json")
-	out.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	upstreamURL := strings.TrimRight(p.cfg.Upstream, "/") + call.Path
 
-	start := time.Now()
-	resp, err := p.client.Do(out)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return errorBody(http.StatusGatewayTimeout, "Vertex AI call timed out")
+	for attempt := 0; attempt < 2; attempt++ {
+		out, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(call.Body))
+		if err != nil {
+			return errorBody(http.StatusInternalServerError, "building upstream request failed")
 		}
-		return errorBody(http.StatusBadGateway, "Vertex AI call failed")
+		out.Header.Set("Content-Type", "application/json")
+		out.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+
+		start := time.Now()
+		resp, err := p.client.Do(out)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return errorBody(http.StatusGatewayTimeout, "Gemini on Agent Platform call timed out")
+			}
+			return errorBody(http.StatusBadGateway, "Gemini on Agent Platform call failed")
+		}
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return errorBody(http.StatusBadGateway, "reading Gemini on Agent Platform response failed")
+		}
+		if attempt == 0 && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable) {
+			t := time.NewTimer(350 * time.Millisecond)
+			select {
+			case <-t.C:
+				continue
+			case <-ctx.Done():
+				t.Stop()
+				return resp.StatusCode, respBody
+			}
+		}
+		if resp.StatusCode == http.StatusOK {
+			p.record(actor, respBody, time.Since(start))
+		}
+		return resp.StatusCode, respBody
 	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if err != nil {
-		return errorBody(http.StatusBadGateway, "reading Vertex AI response failed")
-	}
-	if resp.StatusCode == http.StatusOK {
-		p.record(actor, respBody, time.Since(start))
-	}
-	return resp.StatusCode, respBody
+	return errorBody(http.StatusBadGateway, "Gemini on Agent Platform call failed")
 }
 
 // errorBody is a refusal in Vertex AI's error shape, so the genai SDK reports

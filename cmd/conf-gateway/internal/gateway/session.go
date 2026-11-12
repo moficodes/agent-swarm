@@ -15,6 +15,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -195,6 +196,27 @@ func (g *Gateway) selectReservedAttendeeSlot(maxActors int) string {
 			}
 			if g.board == nil {
 				return candidate
+			}
+			if maxActors > actorstate.HyperFleetThreshold && g.control != nil && attempt < 32 {
+				if getter, hasGet := g.control.(actorstate.SingleActorGetter); hasGet {
+					parentCtx := g.ctx
+					if parentCtx == nil {
+						parentCtx = context.Background()
+					}
+					ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
+					s, err := getter.Get(ctx, candidate)
+					cancel()
+					if err == nil {
+						uri := s.SnapshotURI
+						if s.InProgressSnapshotURI != "" {
+							uri = s.InProgressSnapshotURI
+						}
+						if s.State == types.StateSuspended && (uri == "" || strings.Contains(uri, "/tags/")) {
+							return candidate
+						}
+						continue
+					}
+				}
 			}
 			if v, ok := g.board.View(candidate); !ok || v.NeverStarted || strings.Contains(v.SnapshotURI, "/tags/") {
 				return candidate

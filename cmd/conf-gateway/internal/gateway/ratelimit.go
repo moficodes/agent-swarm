@@ -41,11 +41,12 @@ func WithSessionRateLimitRPM(rpm int) Option {
 
 // rateLimiter enforces a sliding-window limit per key.
 type rateLimiter struct {
-	limit  int
-	window time.Duration
-	now    func() time.Time
-	mu     sync.Mutex
-	hits   map[string][]time.Time
+	limit     int
+	window    time.Duration
+	now       func() time.Time
+	mu        sync.Mutex
+	hits      map[string][]time.Time
+	lastSweep time.Time
 }
 
 func newRateLimiter(rpm int, now func() time.Time) *rateLimiter {
@@ -73,7 +74,8 @@ func (l *rateLimiter) allow(key string) bool {
 	now := l.now()
 	cutoff := now.Add(-l.window)
 
-	if len(l.hits) > 1024 {
+	if len(l.hits) > 1024 && (l.lastSweep.IsZero() || now.Sub(l.lastSweep) >= 15*time.Second) {
+		l.lastSweep = now
 		for k, ts := range l.hits {
 			kept := ts[:0]
 			for _, t := range ts {
@@ -111,6 +113,7 @@ func (l *rateLimiter) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.hits = make(map[string][]time.Time)
+	l.lastSweep = time.Time{}
 }
 
 var (

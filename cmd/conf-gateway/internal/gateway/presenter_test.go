@@ -26,6 +26,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -463,6 +464,36 @@ func TestChat_RateLimit10RPM(t *testing.T) {
 	respOther.Body.Close()
 	if respOther.StatusCode != http.StatusOK {
 		t.Fatalf("attendee-02 status = %d, want 200", respOther.StatusCode)
+	}
+}
+
+func TestChat_HighCardinalityRateLimiterStaysFast(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{
+			ID:      "msg-fast",
+			Sender:  types.SenderAssistant,
+			Content: "ok",
+		})
+	}))
+	t.Cleanup(upstream.Close)
+
+	gw := newTestGateway(t, upstream.URL, gateway.WithMaxActors(4096), gateway.WithChatRateLimitRPM(10))
+	h := gw.Handler()
+
+	// Exercise >2,000 unique attendee keys back-to-back to ensure rateLimiter
+	// sweeps are throttled instead of O(N^2) scanning on every request past 1,024.
+	for i := 1; i <= 2048; i++ {
+		id := "attendee-" + strconv.Itoa(i)
+		tok := gw.MintToken(id)
+		req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"hi"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("attendee %s status = %d, want 200", id, rec.Code)
+		}
 	}
 }
 

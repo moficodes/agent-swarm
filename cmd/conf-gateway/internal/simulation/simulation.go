@@ -72,6 +72,13 @@ type SeatLoadChecker interface {
 	CanAcquireSimulatedSeat() bool
 }
 
+// SeatHolder is optionally implemented by Target so multi-turn simulated
+// sessions keep their live gVisor sandbox warm on its worker pod seat between
+// turns without holding an open HTTP request in atenet-router.
+type SeatHolder interface {
+	HoldSeat(attendeeID string, d time.Duration)
+}
+
 // ApprovalSeeder is optionally implemented by Target to seed a checkpointed
 // actor's human-review state (AwaitingApproval) during massive oversubscription.
 type ApprovalSeeder interface {
@@ -150,6 +157,16 @@ func WithMaxTargetMPS(mps int) SimulationOption {
 	return func(s *SimulationRunner) {
 		if mps > 0 {
 			s.maxTargetMPS = mps
+		}
+	}
+}
+
+// WithPresenterKey sets the gateway presenter key attached to simulated
+// requests so presenter-started simulations bypass attendee chat rate limits.
+func WithPresenterKey(key string) SimulationOption {
+	return func(s *SimulationRunner) {
+		if key != "" {
+			s.presenterKey = key
 		}
 	}
 }
@@ -606,6 +623,20 @@ func (s *SimulationRunner) executeNextTurn(ctx context.Context, prompt string, r
 	return s.runClaimedTurn(ctx, slotIndex, phase, approvalID, prompt, reviewDelay, idleDelay)
 }
 
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	select {
+	case <-ctx.Done():
+		t.Stop()
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
 func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, phase slotPhase, approvalID, prompt string, _ /* reviewDelay */, idleDelay time.Duration) (bool, string, string, error) {
 	attendeeID := fmt.Sprintf("attendee-%02d", slotIndex)
 	token := s.target.MintToken(attendeeID)
@@ -626,19 +657,69 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 		return true, attendeeID, "approve", err
 	}
 
-	if prompt == "" {
-		prompt = simulationPrompts[slotIndex%len(simulationPrompts)]
+	s.slotMu.Lock()
+	totalCount := max(0, len(s.slots)-1)
+	s.slotMu.Unlock()
+
+	s.mu.RLock()
+	fastMode := s.readingDelay < 100*time.Millisecond
+	s.mu.RUnlock()
+
+	turnsInSession := 1
+	if totalCount > 65536 && !fastMode {
+		turnsInSession = 4 + (slotIndex % 3)
 	}
-	chatMsg, err := s.sendChat(ctx, attendeeID, token, prompt)
+	holder, hasHolder := s.target.(SeatHolder)
+
+	var err error
 	action := "chat"
-	if err == nil && chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
-		s.slotMu.Lock()
-		if slotIndex < len(s.slots) {
-			s.slots[slotIndex].phase = phaseApproveInFlight
+	for turnIdx := 0; turnIdx < turnsInSession; turnIdx++ {
+		turnPrompt := prompt
+		if turnIdx > 0 || turnPrompt == "" {
+			turnPrompt = simulationPrompts[(slotIndex+turnIdx)%len(simulationPrompts)]
 		}
-		s.slotMu.Unlock()
-		err = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
-		action = "turn"
+		var chatMsg *types.ChatMessage
+		chatMsg, err = s.sendChat(ctx, attendeeID, token, turnPrompt)
+		if err != nil {
+			break
+		}
+		if chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
+			if turnsInSession > 1 && (slotIndex+turnIdx)%5 < 3 {
+				reviewPause := time.Duration(20000+rand.Intn(16000)) * time.Millisecond
+				if hasHolder {
+					holder.HoldSeat(attendeeID, reviewPause+8*time.Second)
+				}
+				if !sleepWithContext(ctx, reviewPause) {
+					err = ctx.Err()
+					break
+				}
+			}
+			s.slotMu.Lock()
+			if slotIndex < len(s.slots) {
+				s.slots[slotIndex].phase = phaseApproveInFlight
+			}
+			s.slotMu.Unlock()
+			err = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
+			action = "turn"
+			if err != nil {
+				break
+			}
+		}
+		if turnIdx+1 < turnsInSession {
+			runPause := time.Duration(52000+rand.Intn(36000)) * time.Millisecond
+			if hasHolder {
+				holder.HoldSeat(attendeeID, runPause+8*time.Second)
+			}
+			s.slotMu.Lock()
+			if slotIndex < len(s.slots) {
+				s.slots[slotIndex].phase = phaseChatInFlight
+			}
+			s.slotMu.Unlock()
+			if !sleepWithContext(ctx, runPause) {
+				err = ctx.Err()
+				break
+			}
+		}
 	}
 
 	s.slotMu.Lock()
@@ -783,6 +864,9 @@ func (s *SimulationRunner) sendChat(ctx context.Context, attendeeID, token, prom
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-Attendee-ID", attendeeID)
+	if s.presenterKey != "" {
+		req.Header.Set("X-Presenter-Key", s.presenterKey)
+	}
 
 	rec := httptest.NewRecorder()
 	s.target.Handler().ServeHTTP(rec, req)
@@ -823,6 +907,9 @@ func (s *SimulationRunner) sendApprove(ctx context.Context, attendeeID, token, a
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-Attendee-ID", attendeeID)
+	if s.presenterKey != "" {
+		req.Header.Set("X-Presenter-Key", s.presenterKey)
+	}
 
 	rec := httptest.NewRecorder()
 	s.target.Handler().ServeHTTP(rec, req)

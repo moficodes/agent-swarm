@@ -137,7 +137,7 @@ func targetMPSForCount(count int, maxOverride int) int {
 		if maxOverride > 0 {
 			return maxOverride
 		}
-		return 2400
+		return 3600
 	}
 }
 
@@ -495,15 +495,7 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !resetting && simCount > 65536 {
-		if s.turnSem != nil {
-			select {
-			case s.turnSem <- struct{}{}:
-			default:
-				runWG.Done()
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-		}
+		runWG.Done()
 		reviewDelay := time.Duration(payload.ReviewDelayMs) * time.Millisecond
 		if reviewDelay <= 0 {
 			reviewDelay = s.calculateReviewDelay(0, rDelay)
@@ -513,35 +505,49 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 			idleDelay = s.calculateInterTurnDelay(lDelay)
 		}
 		now := time.Now()
-		if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
+		dispatched := 0
+		const hyperBatchFanout = 2
+	fanoutLoop:
+		for range hyperBatchFanout {
 			if s.turnSem != nil {
-				<-s.turnSem
+				select {
+				case s.turnSem <- struct{}{}:
+				default:
+					break fanoutLoop
+				}
 			}
-			runWG.Done()
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		slotIndex, phase, approvalID, ok := s.claimNextSlot(now)
-		if !ok {
-			if s.turnSem != nil {
-				<-s.turnSem
-			}
-			runWG.Done()
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		go func(prompt string) {
-			defer func() {
+			if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
 				if s.turnSem != nil {
 					<-s.turnSem
 				}
-				runWG.Done()
-			}()
-			_, _, _, _ = s.runClaimedTurn(simCtx, slotIndex, phase, approvalID, prompt, reviewDelay, idleDelay)
-		}(payload.Prompt)
+				break fanoutLoop
+			}
+			slotIndex, phase, approvalID, ok := s.claimNextSlot(now)
+			if !ok {
+				if s.turnSem != nil {
+					<-s.turnSem
+				}
+				break fanoutLoop
+			}
+			runWG.Add(1)
+			dispatched++
+			go func(idx int, ph slotPhase, appID, prompt string) {
+				defer func() {
+					if s.turnSem != nil {
+						<-s.turnSem
+					}
+					runWG.Done()
+				}()
+				_, _, _, _ = s.runClaimedTurn(simCtx, idx, ph, appID, prompt, reviewDelay, idleDelay)
+			}(slotIndex, phase, approvalID, payload.Prompt)
+		}
+		if dispatched == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(map[string]any{"executed": true, "queued": true})
+		_ = json.NewEncoder(w).Encode(map[string]any{"executed": true, "queued": true, "dispatched": dispatched})
 		return
 	}
 

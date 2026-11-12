@@ -159,6 +159,87 @@ func (g *Gateway) suspendActor(attendee string) {
 	}
 }
 
+// HoldSeat extends a warm seated actor's post-turn auto-suspend timer so a
+// multi-turn session keeps its live sandbox on the worker pod between turns
+// without holding an open HTTP stream through atenet-router.
+func (g *Gateway) HoldSeat(attendee string, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.control == nil || g.closed || g.turnsInFlight[attendee] > 0 {
+		return
+	}
+	if t, ok := g.suspendTimers[attendee]; ok && t.Stop() {
+		g.wg.Done()
+	}
+	seq := g.turnSeq[attendee]
+	g.wg.Add(1)
+	var t *time.Timer
+	t = time.AfterFunc(d, func() {
+		defer g.wg.Done()
+		g.mu.Lock()
+		if g.closed {
+			g.mu.Unlock()
+			return
+		}
+		if g.suspendTimers[attendee] == t {
+			delete(g.suspendTimers, attendee)
+		}
+		g.suspendWG.Add(1)
+		g.mu.Unlock()
+		defer g.suspendWG.Done()
+		g.suspendIfIdle(attendee, seq)
+	})
+	g.suspendTimers[attendee] = t
+}
+
+func (g *Gateway) drainUnleasedHeldSeats(isProtected func(string) bool) {
+	if g.control == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return
+	}
+	baseDelay := max(g.suspendAfter, 500*time.Millisecond)
+	step := 0
+	for attendee, oldTimer := range g.suspendTimers {
+		if isProtected != nil && isProtected(attendee) {
+			continue
+		}
+		if g.turnsInFlight[attendee] > 0 {
+			continue
+		}
+		if oldTimer.Stop() {
+			g.wg.Done()
+		}
+		seq := g.turnSeq[attendee]
+		stagger := baseDelay + time.Duration((step%32)*400)*time.Millisecond
+		step++
+		g.wg.Add(1)
+		var nt *time.Timer
+		nt = time.AfterFunc(stagger, func() {
+			defer g.wg.Done()
+			g.mu.Lock()
+			if g.closed {
+				g.mu.Unlock()
+				return
+			}
+			if g.suspendTimers[attendee] == nt {
+				delete(g.suspendTimers, attendee)
+			}
+			g.suspendWG.Add(1)
+			g.mu.Unlock()
+			defer g.suspendWG.Done()
+			g.suspendIfIdle(attendee, seq)
+		})
+		g.suspendTimers[attendee] = nt
+	}
+}
+
 func (g *Gateway) scheduleSuspendRetry(attendee string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -17,6 +17,7 @@ package routerstatus_test
 import (
 	"context"
 	"slices"
+	"sync"
 	"testing"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -55,4 +56,41 @@ func TestEndpointSliceTargets_ReadyRouterPodsOnly(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("Targets = %v, want %v", got, want)
 	}
+}
+
+func TestEndpointSliceAddrs_ResolvesNamedPortAndReadyPods(t *testing.T) {
+	es := slice("r-https", "atenet-router", ep("10.0.1.5", true), ep("10.0.1.6", false), ep("10.0.1.7", true))
+	es.Ports = []discoveryv1.EndpointPort{
+		{Name: ptr.To("connect-tls"), Port: ptr.To(int32(8444))},
+		{Name: ptr.To("https"), Port: ptr.To(int32(8443))},
+	}
+	client := fake.NewClientset(es)
+	resolver := routerstatus.NewEndpointSliceAddrs(client, "ate-system", "atenet-router", "https", 443)
+	got, err := resolver.Addrs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(got)
+	want := []string{"10.0.1.5:8443", "10.0.1.7:8443"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Addrs = %v, want %v", got, want)
+	}
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cGot, cErr := resolver.Addrs(context.Background())
+			if cErr != nil {
+				t.Errorf("concurrent Addrs error: %v", cErr)
+				return
+			}
+			slices.Sort(cGot)
+			if !slices.Equal(cGot, want) {
+				t.Errorf("concurrent Addrs = %v, want %v", cGot, want)
+			}
+		}()
+	}
+	wg.Wait()
 }

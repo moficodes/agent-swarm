@@ -41,7 +41,7 @@ const (
 	ateSignerName      = "servicedns.podcert.ate.dev/identity"
 	canaryLabelKey     = "podcert.ate.dev/canarying"
 	canaryLabelLive    = "live"
-	controlConnPoolLen = 16
+	controlConnPoolLen = 32
 )
 
 // GRPCControl implements ActorControl directly over gRPC to ate-api-server,
@@ -342,8 +342,7 @@ func (g *GRPCControl) Get(ctx context.Context, name string) (Status, error) {
 // out ListWorkerActorAssignments across occupied workers. This avoids paging
 // 16,777,216 idle suspended actors on every poll tick.
 func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
-	listClient, err := g.getListClient(ctx)
-	if err != nil {
+	if _, err := g.getClient(ctx); err != nil {
 		return nil, err
 	}
 
@@ -354,6 +353,10 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 	var occupied []occupiedWorker
 	var pageToken string
 	for {
+		listClient, err := g.getClient(ctx)
+		if err != nil {
+			return nil, err
+		}
 		resp, err := listClient.ListWorkers(ctx, &ateapi.ListWorkersRequest{
 			Options: &ateapi.ListOptions{
 				PageSize:  1000,
@@ -386,18 +389,13 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 		return nil, nil
 	}
 
-	// Ensure the shared client pool is warm before fanning out worker queries.
-	if _, err := g.getClient(ctx); err != nil {
-		return nil, err
-	}
-
 	workerCh := make(chan occupiedWorker, len(occupied))
 	for _, ow := range occupied {
 		workerCh <- ow
 	}
 	close(workerCh)
 
-	concurrency := min(len(occupied), 32)
+	concurrency := min(len(occupied), 96)
 	var (
 		resMu    sync.Mutex
 		out      []Status

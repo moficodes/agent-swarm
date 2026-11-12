@@ -48,7 +48,10 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 
 	maxSimRouterInFlight := 512
 	if g.maxActors > actorstate.HyperFleetThreshold {
-		maxSimRouterInFlight = 2048
+		maxSimRouterInFlight = 6144
+		if parked, ok := g.scopedParking(); ok && parked > 4096 {
+			return false
+		}
 	}
 	if g.proxy != nil && g.proxy.SimRouterInFlight() >= maxSimRouterInFlight {
 		return false
@@ -146,6 +149,11 @@ func WithSimulationMaxConcurrentTurns(n int) SimulationOption {
 // WithSimulationMaxTargetMPS overrides the peak target MPS configured on data-generator.
 func WithSimulationMaxTargetMPS(mps int) SimulationOption {
 	return simulation.WithMaxTargetMPS(mps)
+}
+
+// WithSimulationPresenterKey attaches the presenter key to simulated turns.
+func WithSimulationPresenterKey(key string) SimulationOption {
+	return simulation.WithPresenterKey(key)
 }
 
 // NewSimulationRunner constructs a SimulationRunner bound to the provided Gateway.

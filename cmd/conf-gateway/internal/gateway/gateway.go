@@ -472,12 +472,12 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw.sessionLimiter = newRateLimiter(gw.sessionRateLimitRPM, nil)
 
 	if gw.simController == nil {
-		var simOpts []SimulationOption
+		simOpts := []SimulationOption{WithSimulationPresenterKey(gw.presenterKey)}
 		if gw.dataGeneratorURL != "" {
 			simOpts = append(simOpts, WithDataGeneratorExecutor(gw.dataGeneratorURL, gw.simulationTurnURL, gw.presenterKey))
 		}
 		if gw.maxActors > actorstate.HyperFleetThreshold {
-			simOpts = append(simOpts, WithSimulationMaxConcurrentTurns(65536))
+			simOpts = append(simOpts, WithSimulationMaxConcurrentTurns(262144))
 			if gw.maxSimulationMPS > 0 {
 				simOpts = append(simOpts, WithSimulationMaxTargetMPS(gw.maxSimulationMPS))
 			}
@@ -561,6 +561,7 @@ func (g *Gateway) ClearSimulatedActivity() {
 	if g.proxy != nil {
 		g.proxy.ClearUnleasedPending(isProtected)
 	}
+	g.drainUnleasedHeldSeats(isProtected)
 }
 
 // Close stops background work, including pending auto-suspends, and waits

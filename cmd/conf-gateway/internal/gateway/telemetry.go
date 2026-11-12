@@ -180,6 +180,33 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	slices.SortFunc(workers, func(a, b types.WorkerStatus) int { return strings.Compare(a.PodName, b.PodName) })
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		totalWorkerSeats := 0
+		for i := range workers {
+			totalWorkerSeats += len(workers[i].Actors)
+		}
+		if totalWorkerSeats > 8192 {
+			for i := range workers {
+				if len(workers[i].Actors) == 0 {
+					continue
+				}
+				nums := make([]int, 0, len(workers[i].Actors))
+				allNumeric := true
+				for _, wa := range workers[i].Actors {
+					if idx, ok := actorstate.ParseAttendeeIndex(wa.ActorID, g.maxActors); ok {
+						nums = append(nums, idx)
+					} else {
+						allNumeric = false
+						break
+					}
+				}
+				if allNumeric {
+					workers[i].ActorNums = nums
+					workers[i].Actors = nil
+				}
+			}
+		}
+	}
 
 	g.mu.RLock()
 	eventsCopy := slices.Clone(g.recentEvents)

@@ -332,6 +332,16 @@ func newModelProxy(ctx context.Context, cfg Config) (*modelproxy.Proxy, error) {
 	return modelproxy.New(pc)
 }
 
+func inClusterRestConfig() (*rest.Config, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	restCfg.QPS = 50
+	restCfg.Burst = 100
+	return restCfg, nil
+}
+
 // newRouterHTTPClient builds the HTTP client for atenet-router. When neither
 // RouterCAFile nor RouterCredBundle is set (for example in local mode), it
 // returns http.DefaultClient; otherwise both must be set for mTLS.
@@ -339,7 +349,16 @@ func newRouterHTTPClient(cfg Config) (*http.Client, error) {
 	if cfg.RouterCAFile == "" && cfg.RouterCredBundle == "" {
 		return http.DefaultClient, nil
 	}
-	return routertls.NewHTTPClient(cfg.RouterCAFile, cfg.RouterCredBundle)
+	var opts []routertls.ClientOption
+	if !cfg.LocalMode && cfg.RouterStatusDiscovery == "endpointslices" {
+		if restCfg, err := inClusterRestConfig(); err == nil {
+			if client, cErr := kubernetes.NewForConfig(restCfg); cErr == nil {
+				addrs := routerstatus.NewEndpointSliceAddrs(client, routerStatusNamespace, routerStatusService, "https", 8443)
+				opts = append(opts, routertls.WithEndpointResolver(addrs.Addrs))
+			}
+		}
+	}
+	return routertls.NewHTTPClient(cfg.RouterCAFile, cfg.RouterCredBundle, opts...)
 }
 
 // newRouterStatusSource builds the router pod source cfg.RouterStatusDiscovery
@@ -351,7 +370,7 @@ func newRouterStatusSource(cfg Config) (routerstatus.Source, error) {
 	case "static":
 		return routerstatus.StaticTargets{cfg.StatusURL}, nil
 	case "endpointslices":
-		restCfg, err := rest.InClusterConfig()
+		restCfg, err := inClusterRestConfig()
 		if err != nil {
 			return nil, fmt.Errorf("loading in-cluster config: %w", err)
 		}
@@ -380,7 +399,7 @@ func newActorControl(cfg Config) (*actorstate.KubectlATE, error) {
 // newInClusterGRPCControl builds a direct gRPC ActorControl client when running
 // inside a Kubernetes cluster, avoiding per-poll kubectl-ate subprocesses.
 func newInClusterGRPCControl(cfg Config) (*actorstate.GRPCControl, error) {
-	restCfg, err := rest.InClusterConfig()
+	restCfg, err := inClusterRestConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +413,7 @@ func newInClusterGRPCControl(cfg Config) (*actorstate.GRPCControl, error) {
 // newWorkerScaleReader builds a reader for the configured worker pool's size
 // from the in-cluster Kubernetes API.
 func newWorkerScaleReader(cfg Config) (*workerscale.Reader, error) {
-	restCfg, err := rest.InClusterConfig()
+	restCfg, err := inClusterRestConfig()
 	if err != nil {
 		return nil, fmt.Errorf("loading in-cluster config: %w", err)
 	}

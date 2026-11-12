@@ -18,27 +18,54 @@
 package routertls
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ClientOption configures the mTLS HTTP client built by NewHTTPClient.
+type ClientOption func(*clientOptions)
+
+type clientOptions struct {
+	endpointResolver func(context.Context) ([]string, error)
+}
+
+// WithEndpointResolver configures the HTTP transport to round-robin TCP dials
+// across discovered ready router pod endpoints (e.g. <podIP>:8443 from
+// EndpointSlices) while preserving TLS ServerName verification against the
+// Service hostname, avoiding single-VIP ephemeral TCP port exhaustion at >25k
+// concurrent connections.
+func WithEndpointResolver(fn func(context.Context) ([]string, error)) ClientOption {
+	return func(o *clientOptions) {
+		o.endpointResolver = fn
+	}
+}
 
 // NewHTTPClient returns an *http.Client configured for mTLS to atenet-router
 // when caFile and credBundle are set, or (nil, nil) when both are empty.
 // Setting only one of the two returns an error. Both files are validated once
 // up front and re-read whenever their stat changes on subsequent handshakes.
-func NewHTTPClient(caFile, credBundle string) (*http.Client, error) {
+func NewHTTPClient(caFile, credBundle string, opts ...ClientOption) (*http.Client, error) {
 	if caFile == "" && credBundle == "" {
 		return nil, nil
 	}
 	if caFile == "" || credBundle == "" {
 		return nil, errors.New("both ROUTER_CA_FILE and ROUTER_CRED_BUNDLE must be set together")
+	}
+	var cfg clientOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	loadPool := newPoolCache(caFile)
 	if _, err := loadPool(); err != nil {
@@ -56,15 +83,35 @@ func NewHTTPClient(caFile, credBundle string) (*http.Client, error) {
 	tr := base.Clone()
 	// Keep ForceAttemptHTTP2 disabled when talking to the ClusterIP Service VIP
 	// (atenet-router.ate-system.svc:443): HTTP/1.1 keep-alive pools spread across
-	// all router pods via kube-proxy and prevent mass simulated stream cancellations
-	// from wedging or head-of-line blocking a shared HTTP/2 connection.
+	// all router pods and prevent mass simulated stream cancellations from
+	// wedging or head-of-line blocking a shared HTTP/2 connection.
 	tr.ForceAttemptHTTP2 = false
-	tr.MaxIdleConns = 4096
-	tr.MaxIdleConnsPerHost = 4096
+	tr.MaxIdleConns = 16384
+	tr.MaxIdleConnsPerHost = 16384
 	tr.MaxConnsPerHost = 0
 	tr.IdleConnTimeout = 60 * time.Second
 	tr.TLSHandshakeTimeout = 10 * time.Second
 	tr.ResponseHeaderTimeout = 90 * time.Second
+	if cfg.endpointResolver != nil {
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		var rrSeq atomic.Uint64
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if eps, err := cfg.endpointResolver(ctx); err == nil && len(eps) > 0 {
+				start := int(rrSeq.Add(1) % uint64(len(eps)))
+				tries := min(len(eps), 3)
+				for i := 0; i < tries; i++ {
+					cand := eps[(start+i)%len(eps)]
+					if conn, dialErr := dialer.DialContext(ctx, network, cand); dialErr == nil {
+						return conn, nil
+					}
+				}
+			}
+			return dialer.DialContext(ctx, network, addr)
+		}
+	}
 	tr.TLSClientConfig = &tls.Config{
 		MinVersion: getMinTLSVersion(),
 		// Chain and hostname verification run in VerifyConnection against the

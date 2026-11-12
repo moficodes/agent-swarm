@@ -17,10 +17,12 @@ package actorproxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
@@ -365,4 +367,57 @@ func TestProxy_IsolatesHumanTransportFromMockSaturation(t *testing.T) {
 
 	close(releaseMock)
 	<-mockDone
+}
+
+func TestProxy_RetriesEnvoyResetBeforeHeadersOnHumanTurns(t *testing.T) {
+	var chatAttempts atomic.Int32
+	var resultAttempts atomic.Int32
+	var lastChatBody string
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/chat":
+			b, _ := io.ReadAll(r.Body)
+			lastChatBody = string(b)
+			if chatAttempts.Add(1) == 1 {
+				http.Error(w, "upstream connect error or disconnect/reset before headers. reset reason: connection termination", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(types.ModelCallStep{
+				ModelCall: &types.ModelCall{CallID: "c1"},
+			})
+		case types.ModelResultPath:
+			if resultAttempts.Add(1) == 1 {
+				http.Error(w, "upstream connect error or disconnect/reset before headers. reset reason: connection termination", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "m-retried", Content: "recovered"})
+		}
+	}))
+	defer router.Close()
+	u, _ := url.Parse(router.URL)
+
+	model := funcModelCaller(func(ctx context.Context, actor string, call types.ModelCall) types.ModelResult {
+		return types.ModelResult{CallID: call.CallID, Status: http.StatusOK}
+	})
+	p := New(u, "space", []byte("secret"), nil, model, Hooks{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"hello"}`))
+	p.ServeHTTP(rec, WithMock(WithAttendee(req, "attendee-4096"), false))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	if lastChatBody != `{"message":"hello"}` {
+		t.Fatalf("retried chat body = %q, want original JSON", lastChatBody)
+	}
+	if got := chatAttempts.Load(); got != 2 {
+		t.Fatalf("chatAttempts = %d, want 2", got)
+	}
+	if got := resultAttempts.Load(); got != 2 {
+		t.Fatalf("resultAttempts = %d, want 2", got)
+	}
 }
