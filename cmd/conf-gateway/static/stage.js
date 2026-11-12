@@ -35,6 +35,15 @@
     parkingStateText: document.getElementById('parking-state-text'),
     parkingProgressBar: document.getElementById('parking-progress-bar'),
     parkingPulseDot: document.getElementById('parking-pulse-dot'),
+    stageContent: document.getElementById('stage-content'),
+    workersSection: document.getElementById('workers-section'),
+    fleetSection: document.getElementById('fleet-section'),
+    btnWorkersSplit: document.getElementById('btn-workers-split'),
+    btnWorkersMax: document.getElementById('btn-workers-max'),
+    btnWorkersMaxLabel: document.getElementById('btn-workers-max-label'),
+    btnFleetSplit: document.getElementById('btn-fleet-split'),
+    btnFleetMax: document.getElementById('btn-fleet-max'),
+    btnFleetMaxLabel: document.getElementById('btn-fleet-max-label'),
     workerList: document.getElementById('worker-list'),
     workerTopoNav: document.getElementById('worker-topo-nav'),
     workerPoolReplicas: document.getElementById('worker-pool-replicas'),
@@ -129,6 +138,7 @@
   let topoSelectedNode = null;
   let topoSelectedPod = null;
   let topoHighlightPod = null;
+  let stagePaneLayout = 'split';
   let canvasCols = 512;
   let canvasRows = 128;
   let fleetZoom = 1;
@@ -1040,8 +1050,64 @@
     }
   }
 
+  function syncPaneLayoutControls() {
+    const isNodes = stagePaneLayout === 'nodes';
+    const isFleet = stagePaneLayout === 'fleet';
+
+    if (el.stageContent) {
+      el.stageContent.dataset.paneLayout = stagePaneLayout;
+    }
+    if (el.btnWorkersSplit) {
+      el.btnWorkersSplit.hidden = !isFleet;
+    }
+    if (el.btnWorkersMax) {
+      el.btnWorkersMax.classList.toggle('active', isNodes);
+      el.btnWorkersMax.setAttribute('aria-pressed', isNodes ? 'true' : 'false');
+      el.btnWorkersMax.title = isNodes
+        ? 'Restore Split View (show both Nodes and Fleet Matrix)'
+        : 'Maximize Node View (minimize Fleet Matrix)';
+      el.btnWorkersMax.setAttribute('aria-label', el.btnWorkersMax.title);
+    }
+    if (el.btnWorkersMaxLabel) {
+      el.btnWorkersMaxLabel.textContent = isNodes ? 'Split View' : 'Maximize';
+    }
+
+    if (el.btnFleetSplit) {
+      el.btnFleetSplit.hidden = !isNodes;
+    }
+    if (el.btnFleetMax) {
+      el.btnFleetMax.classList.toggle('active', isFleet);
+      el.btnFleetMax.setAttribute('aria-pressed', isFleet ? 'true' : 'false');
+      el.btnFleetMax.title = isFleet
+        ? 'Restore Split View (show both Nodes and Fleet Matrix)'
+        : 'Maximize Fleet Matrix (minimize Node View)';
+      el.btnFleetMax.setAttribute('aria-label', el.btnFleetMax.title);
+    }
+    if (el.btnFleetMaxLabel) {
+      el.btnFleetMaxLabel.textContent = isFleet ? 'Split View' : 'Maximize';
+    }
+  }
+
+  function setStagePaneLayout(mode) {
+    const next = (mode === 'nodes' || mode === 'fleet') ? mode : 'split';
+    if (stagePaneLayout === next) {
+      syncPaneLayoutControls();
+      return;
+    }
+    stagePaneLayout = next;
+    syncPaneLayoutControls();
+    hideHoverTooltip();
+    requestFleetRedraw();
+    window.requestAnimationFrame(function() {
+      requestFleetRedraw();
+    });
+  }
+
   function zoomToTopologyNode(nodeName, highlightPodName) {
     if (!nodeName) return;
+    if (stagePaneLayout === 'fleet') {
+      setStagePaneLayout('split');
+    }
     topoSelectedNode = nodeName;
     topoSelectedPod = null;
     topoHighlightPod = highlightPodName || null;
@@ -1051,6 +1117,9 @@
 
   function zoomToTopologyPod(podName, nodeName) {
     if (!podName) return;
+    if (stagePaneLayout === 'fleet') {
+      setStagePaneLayout('split');
+    }
     topoSelectedPod = podName;
     if (nodeName) {
       topoSelectedNode = nodeName;
@@ -2087,10 +2156,10 @@
             ctx.clip();
             ctx.textBaseline = 'top';
 
-            const idFontPx = Math.round(Math.max(7.5, Math.min(12.5, cssCellW * 0.19)) * dpr);
+            const idFontPx = Math.round(Math.max(7.0, Math.min(11.5, Math.min(cssCellW * 0.19, cssCellH * 0.30))) * dpr);
             ctx.font = '800 ' + idFontPx + 'px "JetBrains Mono", monospace';
             ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
-            ctx.fillText('#' + idx1, x + 3.5 * dpr, y + barH + 2 * dpr);
+            ctx.fillText('#' + idx1, x + 3.5 * dpr, y + barH + 1.5 * dpr);
 
             if (leased || isQRSlot) {
               const badgeColor = leased ? '#f59e0b' : (isLight ? '#0284c7' : '#00ffcc');
@@ -2099,7 +2168,7 @@
                 ctx.fillStyle = badgeColor;
                 const bTxt = leased ? 'LIVE' : 'QR';
                 const tw = ctx.measureText(bTxt).width;
-                ctx.fillText(bTxt, x + dotW - tw - 3.5 * dpr, y + barH + 2.5 * dpr);
+                ctx.fillText(bTxt, x + dotW - tw - 3.5 * dpr, y + barH + 2 * dpr);
               } else {
                 const pip = Math.max(3, Math.round(4 * dpr));
                 ctx.fillStyle = badgeColor;
@@ -2107,11 +2176,11 @@
               }
             }
 
-            const stateFontPx = Math.round(Math.max(7.2, Math.min(10.5, cssCellW * 0.17)) * dpr);
+            const stateFontPx = Math.round(Math.max(6.5, Math.min(10.0, Math.min(cssCellW * 0.17, cssCellH * 0.25))) * dpr);
             ctx.font = '800 ' + stateFontPx + 'px "JetBrains Mono", monospace';
             ctx.fillStyle = color;
             const stLabel = cssCellW >= 54 ? (STATE_FULL_LABELS[code] || 'ACTIVE') : (STATE_SHORT_LABELS[code] || 'ACT');
-            ctx.fillText(stLabel, x + 3.5 * dpr, y + barH + idFontPx + 4 * dpr);
+            ctx.fillText(stLabel, x + 3.5 * dpr, y + barH + idFontPx + 2.5 * dpr);
 
             if (cssCellH >= 34) {
               const metaFontPx = Math.round(Math.max(6.5, Math.min(9.5, cssCellW * 0.15)) * dpr);
@@ -2688,6 +2757,9 @@
         el.stageStreamView.classList.remove('active');
       }
     } else if (mode === 'stream') {
+      if (stagePaneLayout === 'nodes') {
+        setStagePaneLayout('split');
+      }
       if (el.viewModeStream) {
         el.viewModeStream.classList.add('active');
         el.viewModeStream.setAttribute('aria-pressed', 'true');
@@ -3368,6 +3440,9 @@
           e.stopPropagation();
           const actorId = locateBtn.dataset.locateActor;
           if (actorId) {
+            if (stagePaneLayout === 'nodes') {
+              setStagePaneLayout('split');
+            }
             switchViewMode('grid');
             focusActorOnFleetCanvas(actorId, latestActorCount > 65536 ? 256 : 16);
           }
@@ -3421,6 +3496,47 @@
           }
         }
       });
+    }
+
+    // 3-Mode Stage Pane Maximize / Split Controls (Split | Maximize Nodes | Maximize Fleet)
+    syncPaneLayoutControls();
+    if (el.btnWorkersMax) {
+      el.btnWorkersMax.addEventListener('click', function() {
+        setStagePaneLayout(stagePaneLayout === 'nodes' ? 'split' : 'nodes');
+      });
+    }
+    if (el.btnWorkersSplit) {
+      el.btnWorkersSplit.addEventListener('click', function() {
+        setStagePaneLayout('split');
+      });
+    }
+    if (el.btnFleetMax) {
+      el.btnFleetMax.addEventListener('click', function() {
+        setStagePaneLayout(stagePaneLayout === 'fleet' ? 'split' : 'fleet');
+      });
+    }
+    if (el.btnFleetSplit) {
+      el.btnFleetSplit.addEventListener('click', function() {
+        setStagePaneLayout('split');
+      });
+    }
+    if (el.workersSection) {
+      const wTitleRow = el.workersSection.querySelector('.workers-title-row');
+      if (wTitleRow) {
+        wTitleRow.addEventListener('click', function(e) {
+          if (stagePaneLayout !== 'fleet' || e.target.closest('button')) return;
+          setStagePaneLayout('split');
+        });
+      }
+    }
+    if (el.fleetSection) {
+      const fTitleRow = el.fleetSection.querySelector('.fleet-title-row');
+      if (fTitleRow) {
+        fTitleRow.addEventListener('click', function(e) {
+          if (stagePaneLayout !== 'nodes' || e.target.closest('button, input')) return;
+          setStagePaneLayout('split');
+        });
+      }
     }
 
     // Fleet Matrix Zoom Toolbar Controls (65,536 & 16,777,216 actors)

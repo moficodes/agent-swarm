@@ -184,15 +184,28 @@ limitations under the License.
       </section>
 
       <!-- Center & Right: Worker Hardware Cards + Attendee Fleet Grid -->
-      <section class="stage-content">
+      <section id="stage-content" class="stage-content" data-pane-layout="split">
         <!-- Worker Hardware Pool Display (one card per worker pod) -->
-        <div class="workers-section">
+        <div id="workers-section" class="workers-section">
           <div class="section-title-row workers-title-row">
             <div class="workers-heading-group">
               <h3 class="section-label">WORKER POOL HARDWARE EXECUTION</h3>
               <div id="worker-topo-nav" class="worker-topo-nav" aria-label="Hardware topology drill-down navigation"></div>
             </div>
-            <span id="worker-pool-replicas" class="section-sub">Execution Seats</span>
+            <div class="workers-title-right">
+              <span id="worker-pool-replicas" class="section-sub">Execution Seats</span>
+              <div class="pane-size-controls" role="group" aria-label="Node view size controls">
+                <button type="button" id="btn-workers-split" class="btn-pane-size" title="Restore Split View (show both Nodes and Fleet Matrix)" aria-label="Restore Split View" hidden>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+                  <span>Split</span>
+                </button>
+                <button type="button" id="btn-workers-max" class="btn-pane-size" title="Maximize Node View (minimize Fleet Matrix)" aria-label="Maximize Node View" aria-pressed="false">
+                  <svg class="icon-pane-max" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                  <svg class="icon-pane-restore" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                  <span id="btn-workers-max-label">Maximize</span>
+                </button>
+              </div>
+            </div>
           </div>
           <div id="worker-list" class="workers-grid">
             <div class="card worker-card">
@@ -229,7 +242,7 @@ limitations under the License.
         </div>
 
         <!-- Attendee Fleet Grid & Integrated Stream View -->
-        <div class="fleet-section">
+        <div id="fleet-section" class="fleet-section">
           <!-- Grid View Mode -->
           <div id="stage-grid-view" class="stage-view-container active">
             <div class="section-title-row fleet-title-row">
@@ -254,7 +267,7 @@ limitations under the License.
                   <button type="button" id="btn-fleet-zoom-in" class="btn-fleet-step" title="Zoom in" aria-label="Zoom in">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
-                  <button type="button" id="btn-fleet-zoom-reset" class="btn-fleet-reset" title="Reset zoom to 1× full 65,536 view" hidden>Reset</button>
+                  <button type="button" id="btn-fleet-zoom-reset" class="btn-fleet-reset" title="Reset zoom to 1× full view" hidden>Reset</button>
                 </div>
                 <button type="button" id="btn-fleet-loupe" class="btn-fleet-loupe active" aria-pressed="true" title="Toggle 10× floating magnifier loupe on hover at low zoom">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
@@ -263,6 +276,20 @@ limitations under the License.
                 <div class="fleet-jump-box">
                   <input type="number" id="fleet-jump-input" class="fleet-jump-input" min="1" max="16777216" placeholder="Actor #..." aria-label="Jump to Actor ID">
                   <button type="button" id="btn-fleet-jump" class="btn-fleet-jump" title="Zoom to Actor #">Go</button>
+                </div>
+              </div>
+
+              <div class="fleet-title-right">
+                <div class="pane-size-controls" role="group" aria-label="Fleet matrix size controls">
+                  <button type="button" id="btn-fleet-split" class="btn-pane-size" title="Restore Split View (show both Nodes and Fleet Matrix)" aria-label="Restore Split View" hidden>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+                    <span>Split</span>
+                  </button>
+                  <button type="button" id="btn-fleet-max" class="btn-pane-size" title="Maximize Fleet Matrix (minimize Node View)" aria-label="Maximize Fleet Matrix" aria-pressed="false">
+                    <svg class="icon-pane-max" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                    <svg class="icon-pane-restore" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                    <span id="btn-fleet-max-label">Maximize</span>
+                  </button>
                 </div>
               </div>
 
