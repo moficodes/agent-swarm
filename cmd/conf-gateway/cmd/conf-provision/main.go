@@ -150,6 +150,7 @@ func main() {
 	humanTemplate := flag.String("human-template", "", "Optional ActorTemplate name for periodic human slots (idx % human-stride == 0)")
 	humanStride := flag.Int("human-stride", 0, "Periodic human slot stride (0 = disabled)")
 	recreateHuman := flag.Bool("recreate-human", false, "Delete and recreate only periodic human slots using -human-template")
+	deleteAll := flag.Bool("delete-all", false, "Delete actors in [start..end] instead of creating them")
 	count := flag.Int("count", 50, "Total number of attendee actors to ensure")
 	startFlag := flag.Int("start", 1, "1-based starting actor index (ignored when -shards > 0)")
 	endFlag := flag.Int("end", 0, "1-based inclusive ending actor index (0 = -count; ignored when -shards > 0)")
@@ -196,6 +197,75 @@ func main() {
 	defer ctrl.Close()
 
 	start := time.Now()
+	if *deleteAll {
+		totalInRange := rangeEnd - rangeStart + 1
+		log.Printf("Deleting %d actors in range [%d..%d] in %s with concurrency %d...",
+			totalInRange, rangeStart, rangeEnd, *atespace, *concurrency)
+		jobs := make(chan int, min(4096, totalInRange))
+		go func() {
+			defer close(jobs)
+			for i := rangeStart; i <= rangeEnd; i++ {
+				select {
+				case <-ctx.Done():
+					return
+				case jobs <- i:
+				}
+			}
+		}()
+
+		var deleted atomic.Int64
+		var failed atomic.Int64
+		var wg sync.WaitGroup
+		workers := max(1, min(*concurrency, totalInRange))
+		logEvery := int64(25000)
+		if totalInRange <= 100000 {
+			logEvery = 2000
+		}
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for idx := range jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					name := fmt.Sprintf("attendee-%02d", idx)
+					var lastErr error
+					for attempt := 0; attempt < 6; attempt++ {
+						delCtx, delCancel := context.WithTimeout(ctx, 25*time.Second)
+						err := ctrl.DeleteActor(delCtx, name)
+						delCancel()
+						if err == nil || status.Code(err) == codes.NotFound {
+							lastErr = nil
+							break
+						}
+						lastErr = err
+						time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+					}
+					if lastErr != nil {
+						failed.Add(1)
+						log.Printf("failed to delete %s: %v", name, lastErr)
+						continue
+					}
+					n := deleted.Add(1)
+					if n%logEvery == 0 || int(n) == totalInRange {
+						elapsed := time.Since(start)
+						rate := float64(n) / max(elapsed.Seconds(), 0.001)
+						log.Printf("  deleted %d / %d actors in range [%d..%d] (%.0f actors/s, %s elapsed)",
+							n, totalInRange, rangeStart, rangeEnd, rate, elapsed.Round(time.Millisecond))
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		if f := failed.Load(); f > 0 {
+			log.Fatalf("delete-all finished with %d failures out of %d actors in range [%d..%d]", f, totalInRange, rangeStart, rangeEnd)
+		}
+		log.Printf("Successfully deleted %d actors in range [%d..%d] in %s (%s)",
+			deleted.Load(), rangeStart, rangeEnd, time.Since(start).Round(time.Millisecond), *atespace)
+		return
+	}
+
 	trimmedHumanTemplate := strings.TrimSpace(*humanTemplate)
 	if *recreateHuman {
 		if trimmedHumanTemplate == "" || *humanStride <= 1 {

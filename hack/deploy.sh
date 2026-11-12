@@ -167,20 +167,6 @@ conf_template_name() {
   [[ -z "${s}" ]] && echo "conf-agent" || echo "conf-agent-${s}"
 }
 
-conf_human_template_name() {
-  if [[ -n "${DEMO_CONF_HUMAN_TEMPLATE_NAME+x}" ]]; then
-    echo "${DEMO_CONF_HUMAN_TEMPLATE_NAME}"
-    return
-  fi
-  local stride
-  stride="$(conf_human_slot_stride)"
-  if ((10#${stride:-0} > 1)) && { [[ "$(conf_profile)" == "hyperswarm" ]] || ((10#$(conf_actors) > 65536)); }; then
-    echo "$(conf_template_name)-human"
-  else
-    echo ""
-  fi
-}
-
 conf_rbac_prefix() {
   local ns
   ns="$(conf_ns)"
@@ -557,8 +543,8 @@ conf_render() {
   local default_provision_shards=32
   local default_provision_conc=64
   if [[ "$(conf_profile)" == "hyperswarm" ]] || ((10#${actors:-50} > 65536)); then
-    default_actor_cpu=20
-    default_actor_mem=134217728
+    default_actor_cpu=500
+    default_actor_mem=536870912
     default_think_min=9000
     default_think_max=13000
     default_exec_min=8000
@@ -566,6 +552,7 @@ conf_render() {
     default_suspend_after="3s"
     default_datagen_replicas=32
     default_gw_mem_limit="16Gi"
+    default_provision_shards=64
   elif ((10#${actors:-50} > 256)); then
     default_actor_cpu=100
     default_actor_mem=134217728
@@ -596,7 +583,6 @@ conf_render() {
       -e "s|\${WORKER_POOL}|$(conf_worker_pool)|g" \
       -e "s|\${WORKLOAD_LABEL}|$(conf_workload_label)|g" \
       -e "s|\${TEMPLATE_NAME}|$(conf_template_name)|g" \
-      -e "s|\${HUMAN_TEMPLATE_NAME}|$(conf_human_template_name)|g" \
       -e "s|\${RBAC_PREFIX}|$(conf_rbac_prefix)|g" \
       -e "s|\${EXTERNAL_METRIC}|$(conf_external_metric)|g" \
       -e "s|\${DASHBOARD_SUFFIX}|$(conf_dashboard_suffix)|g" \
@@ -637,6 +623,7 @@ conf_render() {
       -e "s|\${DATAGEN_WORKER_REPLICAS}|${DEMO_CONF_DATAGEN_WORKER_REPLICAS:-${default_datagen_replicas}}|g" \
       -e "s|\${PROVISION_SHARDS}|${DEMO_CONF_PROVISION_SHARDS:-${default_provision_shards}}|g" \
       -e "s|\${PROVISION_CONCURRENCY}|${DEMO_CONF_PROVISION_CONCURRENCY:-${default_provision_conc}}|g" \
+      -e "s|\${PROVISION_DELETE_ALL}|${DEMO_CONF_PROVISION_DELETE_ALL:-false}|g" \
       -e "s|\${WORKER_CPU_REQUEST}|${worker_cpu_req}|g" \
       -e "s|\${WORKER_CPU_LIMIT}|$((10#${seats} * 10#${actor_cpu} + cpu_headroom))m|g" \
       -e "s|\${WORKER_MEMORY_REQUEST}|${worker_mem_req}|g" \
@@ -676,24 +663,6 @@ conf_render() {
 
 conf_render_hpa() {
   conf_render manifests/autoscaling.yaml.tmpl | sed -n '/^apiVersion: autoscaling\/v2$/,$p'
-}
-
-conf_render_human_template() {
-  local human_tmpl
-  human_tmpl="$(conf_human_template_name)"
-  DEMO_CONF_TEMPLATE_NAME="${human_tmpl}" \
-  DEMO_CONF_ACTOR_CPU_MILLICORES="${DEMO_CONF_HUMAN_ACTOR_CPU_MILLICORES:-500}" \
-  DEMO_CONF_ACTOR_MEMORY_BYTES="${DEMO_CONF_HUMAN_ACTOR_MEMORY_BYTES:-536870912}" \
-  DEMO_CONF_MOCK_THINK_MIN_MS="0" \
-  DEMO_CONF_MOCK_THINK_MAX_MS="0" \
-  DEMO_CONF_MOCK_EXEC_MIN_MS="0" \
-  DEMO_CONF_MOCK_EXEC_MAX_MS="0" \
-    conf_render "$1"
-}
-
-create_human_actor_template() {
-  local atespace="$1" human_tmpl="$2" timeout_secs="${3:-300}"
-  create_actor_template conf_render_human_template manifests/actortemplate.yaml.tmpl "${atespace}" "${human_tmpl}" "${timeout_secs}"
 }
 
 conf_render_shared_prometheus() {
@@ -1086,11 +1055,6 @@ conf_deploy() {
   fi
   ensure_atespace "${ns}"
   create_actor_template conf_render manifests/actortemplate.yaml.tmpl "${ns}" "${tmpl}" 300
-  local human_tmpl
-  human_tmpl="$(conf_human_template_name)"
-  if [[ -n "${human_tmpl}" ]]; then
-    create_human_actor_template "${ns}" "${human_tmpl}" 300
-  fi
 
   if [[ -n "${DATA_GENERATOR_REPO:-}" ]]; then
     log_step "Building data-generator orchestrator and worker images from ${DATA_GENERATOR_REPO}..."
@@ -1124,8 +1088,6 @@ conf_deploy() {
     go run ./cmd/conf-gateway/cmd/conf-provision \
       --atespace="${ns}" \
       --template="${tmpl}" \
-      --human-template="${human_tmpl}" \
-      --human-stride="$(conf_human_slot_stride)" \
       --count="${DEMO_CONF_ACTORS}" \
       --context="${KUBECTL_CONTEXT:-}"
   else
@@ -1153,10 +1115,9 @@ conf_deploy() {
 }
 
 conf_delete() {
-  local ns tmpl human_tmpl apiservice apiservice_rc=0 apiservice_owner
+  local ns tmpl apiservice apiservice_rc=0 apiservice_owner
   ns="$(conf_ns)"
   tmpl="$(conf_template_name)"
-  human_tmpl="$(conf_human_template_name)"
   log_step "Deleting the conference demo in ${ns}"
   log_target_context
   run_kubectl delete job conf-provision -n "${ns}" --ignore-not-found
@@ -1166,9 +1127,6 @@ conf_delete() {
     run_kubectl delete -f <(conf_render manifests/gateway-ingress.yaml.tmpl) --ignore-not-found
   fi
   run_kubectl delete secret conf-gateway -n "${ns}" --ignore-not-found
-  if [[ -n "${human_tmpl}" ]]; then
-    delete_actor_template "${ns}" "${human_tmpl}"
-  fi
   delete_actor_template "${ns}" "${tmpl}"
   run_kubectl_ate delete atespace "${ns}" 2>/dev/null \
     || log_step "atespace ${ns} not deleted (may not exist or is not empty)"

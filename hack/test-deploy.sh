@@ -726,23 +726,16 @@ for pair in 'ACTOR_COUNT:16777216' 'ACTORS_PER_WORKER:64' 'HUMAN_SLOT_STRIDE:409
   fi
 done
 hyper_pool="$(DEMO_CONF_PROFILE=hyperswarm conf_render manifests/workerpool.yaml.tmpl)"
-for want in "replicas: 4096" "cpu: 750m" "memory: 4096Mi" "cpu: 1290m"; do
+for want in "replicas: 4096" "cpu: 750m" "memory: 4096Mi" "cpu: 32250m"; do
   if ! grep -qF -- "${want}" <<<"${hyper_pool}"; then
     echo "FAIL: hyperswarm workerpool manifest lacks ${want}" >&2
     fail=1
   fi
 done
 hyper_tmpl="$(DEMO_CONF_PROFILE=hyperswarm conf_render manifests/actortemplate.yaml.tmpl)"
-for want in "cpuMillicores: 20" "memoryBytes: 134217728"; do
+for want in "cpuMillicores: 500" "memoryBytes: 536870912"; do
   if ! grep -qF -- "${want}" <<<"${hyper_tmpl}"; then
     echo "FAIL: hyperswarm actortemplate manifest lacks ${want}" >&2
-    fail=1
-  fi
-done
-hyper_human_tmpl="$(DEMO_CONF_PROFILE=hyperswarm conf_render_human_template manifests/actortemplate.yaml.tmpl)"
-for want in "name: conf-agent-human" "cpuMillicores: 500" "memoryBytes: 536870912"; do
-  if ! grep -qF -- "${want}" <<<"${hyper_human_tmpl}"; then
-    echo "FAIL: hyperswarm human actortemplate manifest lacks ${want}" >&2
     fail=1
   fi
 done

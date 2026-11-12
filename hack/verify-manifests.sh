@@ -40,7 +40,7 @@ render() {
       -e "s|\${WORKER_POOL}|conf-workers|g" \
       -e "s|\${WORKLOAD_LABEL}|conference|g" \
       -e "s|\${TEMPLATE_NAME}|conf-agent|g" \
-      -e "s|\${HUMAN_TEMPLATE_NAME}||g" \
+      -e "s|\${PROVISION_DELETE_ALL}|false|g" \
       -e "s|\${RBAC_PREFIX}||g" \
       -e "s|\${EXTERNAL_METRIC}|conf_worker_demand|g" \
       -e "s|\${DASHBOARD_SUFFIX}||g" \

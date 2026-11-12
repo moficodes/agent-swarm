@@ -955,5 +955,11 @@ func (s *SimulationRunner) sendApprove(ctx context.Context, attendeeID, token, a
 		}
 		return fmt.Errorf("approve request failed with status %d", res.StatusCode)
 	}
+	var approveMsg types.ChatMessage
+	if err := json.NewDecoder(res.Body).Decode(&approveMsg); err == nil {
+		if approveMsg.Execution != nil && approveMsg.Execution.ExitCode != 0 {
+			return fmt.Errorf("sandbox execution failed (exit %d): %s", approveMsg.Execution.ExitCode, approveMsg.Execution.Stderr)
+		}
+	}
 	return nil
 }
