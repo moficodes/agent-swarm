@@ -25,15 +25,27 @@ import (
 const unavailableReason = "ateapi unreachable"
 
 // Poll lists actors every interval until ctx ends, applying each result to
-// b. observe, if set, receives each poll's latency and error.
+// b. When b is in hyper-fleet mode (> 65,536 actors) and c implements
+// ActiveSeatLister, Poll queries active worker assignments instead of paging
+// all actors. observe, if set, receives each poll's latency and error.
 func Poll(ctx context.Context, c ActorControl, interval time.Duration, b *Board, observe func(time.Duration, error)) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var lastErr string
+	seatLister, hasSeatLister := c.(ActiveSeatLister)
+	useActiveSeats := b != nil && b.IsHyperMode() && hasSeatLister
 	for {
 		start := time.Now()
 		pollCtx, cancel := context.WithTimeout(ctx, max(interval*20, 45*time.Second))
-		statuses, err := c.List(pollCtx)
+		var (
+			statuses []Status
+			err      error
+		)
+		if useActiveSeats {
+			statuses, err = seatLister.ListActiveSeats(pollCtx)
+		} else {
+			statuses, err = c.List(pollCtx)
+		}
 		cancel()
 		if ctx.Err() != nil {
 			return
@@ -46,7 +58,11 @@ func Poll(ctx context.Context, c ActorControl, interval time.Duration, b *Board,
 			b.SetUnavailable(unavailableReason)
 		} else {
 			lastErr = ""
-			b.SetStatuses(statuses)
+			if useActiveSeats {
+				b.SetActiveStatuses(statuses)
+			} else {
+				b.SetStatuses(statuses)
+			}
 		}
 		if observe != nil {
 			observe(time.Since(start), err)

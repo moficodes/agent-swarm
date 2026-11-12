@@ -15,17 +15,28 @@
 package gateway
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
+
+var telemetryGzipPool = sync.Pool{
+	New: func() any {
+		gz, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+		return gz
+	},
+}
 
 // MetricsHandler returns an HTTP handler serving Prometheus metrics for this
 // gateway instance on /metrics (intended for an internal-only metrics port).
@@ -61,6 +72,32 @@ func (g *Gateway) scopedParking() (int, bool) {
 	return min(snap.Parked, g.proxy.RouterInFlight()), snap.Available
 }
 
+func (g *Gateway) handleFleetBinary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	leasedIDs := g.LeasedIDs()
+	bin := g.board.FleetBinarySnapshot(g.maxActors, g.leasedChecker(), leasedIDs)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if len(bin) > 4096 && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Add("Vary", "Accept-Encoding")
+		gz := telemetryGzipPool.Get().(*gzip.Writer)
+		gz.Reset(w)
+		_, _ = gz.Write(bin)
+		_ = gz.Close()
+		telemetryGzipPool.Put(gz)
+		return
+	}
+	_, _ = w.Write(bin)
+}
+
 func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -72,7 +109,12 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		pods = *p
 	}
 
-	views, fleetCompact, runningActors, suspendedActors := g.board.TelemetrySnapshot(g.maxActors, g.leasedChecker())
+	compactParam := r.URL.Query().Get("compact")
+	includeCompact := compactParam != "0" && (compactParam != "auto" || g.maxActors <= actorstate.HyperFleetThreshold)
+	leasedIDs := g.LeasedIDs()
+	views, fleetCompact, runningActors, suspendedActors, activeCohort, snapshotted, leasedCount := g.board.TelemetrySnapshotOptions(
+		g.maxActors, g.leasedChecker(), leasedIDs, includeCompact,
+	)
 	names := slices.Sorted(maps.Keys(views))
 	var workers []types.WorkerStatus
 	podIndex := make(map[string]int)
@@ -97,6 +139,18 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			workers = append(workers, types.WorkerStatus{PodName: v.WorkerPod})
 		}
 		workers[i].Actors = append(workers[i].Actors, types.WorkerActor{ActorID: v.ActorID, State: v.State})
+	}
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		compactActors := make(map[string]types.ActorView, len(leasedIDs)+4)
+		for name, v := range views {
+			if v.Leased || v.State == types.StateCrashed || name == "attendee-01" {
+				compactActors[name] = v
+			}
+		}
+		if _, hasFirst := compactActors["attendee-01"]; !hasFirst {
+			compactActors["attendee-01"] = g.currentView("attendee-01")
+		}
+		views = compactActors
 	}
 	if g.maxActors > 256 && g.seatsPerWorker > 0 {
 		seatPriority := func(s types.SubstrateState) int {
@@ -129,26 +183,40 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	parked, parkingOK := g.scopedParking()
 
 	telem := types.StageTelemetry{
-		Atespace:         g.atespace,
-		ParkedRequests:   parked,
-		ParkingAvailable: parkingOK,
-		Workers:          workers,
-		Actors:           views,
-		FleetCompact:     fleetCompact,
-		RunningActors:    runningActors,
-		SuspendedActors:  suspendedActors,
-		RecentEvents:     eventsCopy,
-		MockLLM:          g.mockLLM,
-		StatePollMs:      g.statePollMs.Load(),
-		WorkerPods:       pods,
-		ActorCount:       g.maxActors,
-		SeatsPerWorker:   g.seatsPerWorker,
+		Atespace:           g.atespace,
+		ParkedRequests:     parked,
+		ParkingAvailable:   parkingOK,
+		Workers:            workers,
+		Actors:             views,
+		FleetCompact:       fleetCompact,
+		RunningActors:      runningActors,
+		SuspendedActors:    suspendedActors,
+		ActiveCohortActors: activeCohort,
+		SnapshottedActors:  snapshotted,
+		LeasedActors:       leasedCount,
+		RecentEvents:       eventsCopy,
+		MockLLM:            g.mockLLM,
+		StatePollMs:        g.statePollMs.Load(),
+		WorkerPods:         pods,
+		ActorCount:         g.maxActors,
+		SeatsPerWorker:     g.seatsPerWorker,
+		HumanSlotStride:    g.HumanSlotStride(),
 	}
 	if g.usage != nil {
 		telem.ModelUsage = g.usage.TotalUsage()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if g.maxActors > actorstate.HyperFleetThreshold && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Add("Vary", "Accept-Encoding")
+		gz := telemetryGzipPool.Get().(*gzip.Writer)
+		gz.Reset(w)
+		_ = json.NewEncoder(gz).Encode(telem)
+		_ = gz.Close()
+		telemetryGzipPool.Put(gz)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(telem)
 }
 
@@ -166,6 +234,23 @@ func (g *Gateway) handleActorDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := g.currentView(actorID)
+	if g.maxActors > actorstate.HyperFleetThreshold && g.control != nil {
+		if getter, hasGet := g.control.(actorstate.SingleActorGetter); hasGet {
+			reqCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			if s, err := getter.Get(reqCtx, actorID); err == nil {
+				view.State = s.State
+				view.StateDetail = ""
+				view.WorkerPod = s.WorkerPod
+				view.SnapshotURI = s.SnapshotURI
+				if s.InProgressSnapshotURI != "" {
+					view.SnapshotURI = s.InProgressSnapshotURI
+				}
+				view.VolumeType, view.VolumeShare, view.VolumeURI = s.VolumeType, s.VolumeShare, s.VolumeURI
+				view.NeverStarted = s.State == types.StateSuspended && s.SnapshotURI == "" && s.InProgressSnapshotURI == ""
+			}
+			cancel()
+		}
+	}
 	view.Leased = g.IsLeased(actorID)
 
 	g.mu.RLock()

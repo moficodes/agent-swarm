@@ -68,6 +68,9 @@ type Hooks struct {
 	// the client still receives it. msg is nil when the body is not a
 	// ChatMessage.
 	OnReply func(attendee string, status int, msg *types.ChatMessage)
+	// OnReplyWithContext is like OnReply, passing the inbound request context
+	// so mock turn holds abort immediately if the caller disconnects or cancels.
+	OnReplyWithContext func(ctx context.Context, attendee string, status int, msg *types.ChatMessage)
 	// OnError runs when the router cannot be reached, before the 502 is
 	// written.
 	OnError func(attendee string, err error)
@@ -225,7 +228,9 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	if err := json.Unmarshal(bodyBytes, &chatMsg); err == nil {
 		msg = &chatMsg
 	}
-	if p.hooks.OnReply != nil {
+	if p.hooks.OnReplyWithContext != nil {
+		p.hooks.OnReplyWithContext(resp.Request.Context(), attendeeID, resp.StatusCode, msg)
+	} else if p.hooks.OnReply != nil {
 		p.hooks.OnReply(attendeeID, resp.StatusCode, msg)
 	}
 	return nil

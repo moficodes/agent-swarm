@@ -53,6 +53,7 @@ func NewHTTPClient(caFile, credBundle string) (*http.Client, error) {
 		base = &http.Transport{}
 	}
 	tr := base.Clone()
+	tr.ForceAttemptHTTP2 = true
 	tr.MaxIdleConns = 4096
 	tr.MaxIdleConnsPerHost = 4096
 	tr.MaxConnsPerHost = 0

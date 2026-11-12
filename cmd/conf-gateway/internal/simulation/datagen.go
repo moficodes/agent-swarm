@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -117,7 +118,7 @@ type TurnPayload struct {
 	IdleDelayMs   int    `json:"idle_delay_ms"`
 }
 
-func targetMPSForCount(count int) int {
+func targetMPSForCount(count int, maxOverride int) int {
 	switch {
 	case count <= 16:
 		return 4
@@ -125,15 +126,25 @@ func targetMPSForCount(count int) int {
 		return 25
 	case count <= 4096:
 		return 160
-	default:
+	case count <= 65536:
 		return 240
+	case count <= 262144:
+		if maxOverride > 0 {
+			return max(240, maxOverride/2)
+		}
+		return 1200
+	default:
+		if maxOverride > 0 {
+			return maxOverride
+		}
+		return 2400
 	}
 }
 
 func (s *SimulationRunner) configureDataGenerator(ctx context.Context, count int, paused bool) error {
 	targetMPS := 0
 	if !paused {
-		targetMPS = targetMPSForCount(count)
+		targetMPS = targetMPSForCount(count, s.maxTargetMPS)
 	}
 	return s.configureDataGeneratorWithSchema(ctx, targetMPS, dataGeneratorSchemaYAML, count, paused)
 }
@@ -291,6 +302,7 @@ func (s *SimulationRunner) StartReset(crashed, active []string) (bool, error) {
 	s.mu.Lock()
 	s.simCtx = ctx
 	s.cancel = cancel
+	s.runWG = &sync.WaitGroup{}
 	s.initResetLocked(crashed, active)
 	s.mu.Unlock()
 
@@ -460,13 +472,15 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.RLock()
 	running := s.running
+	simCount := s.count
 	resetting := s.isResetting()
 	simCtx := s.simCtx
+	runWG := s.runWG
 	rDelay := s.readingDelay
 	lDelay := s.loopDelay
-	active := (running || resetting) && simCtx != nil && simCtx.Err() == nil
+	active := (running || resetting) && simCtx != nil && simCtx.Err() == nil && runWG != nil
 	if active {
-		s.wg.Add(1)
+		runWG.Add(1)
 	}
 	s.mu.RUnlock()
 
@@ -474,7 +488,77 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	defer s.wg.Done()
+
+	var payload TurnPayload
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&payload)
+	}
+
+	if !resetting && simCount > 65536 {
+		if s.turnSem != nil {
+			select {
+			case s.turnSem <- struct{}{}:
+			default:
+				runWG.Done()
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		reviewDelay := time.Duration(payload.ReviewDelayMs) * time.Millisecond
+		if reviewDelay <= 0 {
+			reviewDelay = s.calculateReviewDelay(0, rDelay)
+		}
+		idleDelay := time.Duration(payload.IdleDelayMs) * time.Millisecond
+		if idleDelay <= 0 {
+			idleDelay = s.calculateInterTurnDelay(lDelay)
+		}
+		now := time.Now()
+		seeded := s.onboardOversubscribedCohort(now)
+		if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
+			if s.turnSem != nil {
+				<-s.turnSem
+			}
+			runWG.Done()
+			if seeded > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{"executed": true, "action": "seed"})
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		slotIndex, phase, approvalID, ok := s.claimNextSlot(now)
+		if !ok {
+			if s.turnSem != nil {
+				<-s.turnSem
+			}
+			runWG.Done()
+			if seeded > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{"executed": true, "action": "seed"})
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		go func(prompt string) {
+			defer func() {
+				if s.turnSem != nil {
+					<-s.turnSem
+				}
+				runWG.Done()
+			}()
+			_, _, _, _ = s.runClaimedTurn(simCtx, slotIndex, phase, approvalID, prompt, reviewDelay, idleDelay)
+		}(payload.Prompt)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"executed": true, "queued": true})
+		return
+	}
+
+	defer runWG.Done()
 
 	if s.turnSem != nil {
 		select {
@@ -484,11 +568,6 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-	}
-
-	var payload TurnPayload
-	if r.Body != nil {
-		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&payload)
 	}
 
 	ctx := r.Context()

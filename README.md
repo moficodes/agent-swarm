@@ -25,9 +25,11 @@ limitations under the License.
   GKE 1.37 or later, which some zones offer only in the RAPID channel.
   `hack/create-cluster.sh` creates one:
 
-      PROJECT_ID=my-project CLUSTER_NAME=substrate-poc hack/create-cluster.sh
+      PROJECT_ID=my-project CLUSTER_NAME=my-swarm-cluster hack/create-cluster.sh
       # Or for the 65,536-actor (16^4) Mega Swarm profile (16 x c3-standard-8 nodes):
-      PROJECT_ID=my-project CLUSTER_NAME=substrate-65k hack/create-cluster.sh --profile=megaswarm
+      PROJECT_ID=my-project CLUSTER_NAME=my-megaswarm-cluster hack/create-cluster.sh --profile=megaswarm
+      # Or for the 16,777,216-actor (64^4) Hyper Swarm profile (64 x n4-highmem-64 worker nodes + dedicated Postgres/system pools):
+      PROJECT_ID=my-project CLUSTER_NAME=my-hyperswarm-cluster hack/create-cluster.sh --profile=hyperswarm
 
   It takes the newest 1.37 release in RAPID and adds a maintenance exclusion
   against node and minor upgrades until the version's end of support, since a
@@ -66,12 +68,12 @@ limitations under the License.
       gcloud auth configure-docker us-west1-docker.pkg.dev
       export KO_DOCKER_REPO=us-west1-docker.pkg.dev/PROJECT_ID/ate-images
 
-  For Vertex AI replies (`PROJECT_ID` set for `hack/deploy.sh`), also run
+  For Gemini on Agent Platform replies (`PROJECT_ID` set for `hack/deploy.sh`), also run
   `gcloud services enable aiplatform.googleapis.com`; setup-gcp doesn't
   enable it. `hack/deploy.sh` creates the `conf-gateway` service account
-  and its Vertex AI binding itself.
+  and its Agent Platform binding itself.
 - `go` 1.27, `kubectl`, `ko`, `docker buildx`, `jq`, `shellcheck` (for
-  `make verify`), and `gcloud` (only needed for Vertex AI).
+  `make verify`), and `gcloud` (only needed for Agent Platform).
 - Environment variables: `KO_DOCKER_REPO` is required.
   `PROJECT_ID` is optional and enables Gemini on Agent Platform; leave it unset to run with
   mock replies. Also optional: `VERTEX_LOCATION`, `DEMO_DOMAIN`,
@@ -178,11 +180,11 @@ actor (conf-workload, on a conf-workers pod; no egress)
   |  back to /api/model-result through the router
   v
 conf-gateway makes the model call
-  |  Vertex AI call, Workload Identity token
+  |  Gemini on Agent Platform call, Workload Identity token
   v
-Vertex AI (generateContent)
+Gemini on Agent Platform (generateContent)
 
-conf-gateway  --kubectl-ate-->  ateapi (api.ate-system.svc:443)
+conf-gateway  --gRPC / kubectl-ate-->  ateapi (api.ate-system.svc:443)
               (polls actor state; also issues the suspend after a turn)
 ```
 
@@ -255,15 +257,35 @@ make deploy DEPLOY_FLAGS=--patch-router
 
 # "megaswarm" profile (65,536 actors = 16^4, 256 workers across 16 nodes, 16 seats/worker, GCS + /tmp/workspace):
 make deploy-megaswarm DEPLOY_FLAGS=--patch-router
+
+# "hyperswarm" profile (16,777,216 actors = 64^4, 4,096 workers across 64 nodes, 64 seats/worker, 64x oversubscription):
+make deploy-hyperswarm DEPLOY_FLAGS=--patch-router
 ```
 
 `make deploy` runs `hack/deploy.sh up $(DEPLOY_FLAGS)` (defaulting to
-`DEMO_CONF_PROFILE=swarm`), while `make deploy-megaswarm` passes
-`--profile=megaswarm` (or set `DEMO_CONF_PROFILE=megaswarm` in the environment).
+`DEMO_CONF_PROFILE=swarm`), while `make deploy-megaswarm` and
+`make deploy-hyperswarm` pass `--profile=megaswarm` and
+`--profile=hyperswarm` (or set `DEMO_CONF_PROFILE` in the environment).
 Every individual `DEMO_CONF_*` variable overrides the selected profile's
 defaults. Leave `DEPLOY_FLAGS` unset to deploy without patching the router, or
 set `DEMO_CONF_PATCH_ROUTER=true` in the environment instead, which has the same
 effect regardless of any flags passed.
+
+On `hyperswarm` (`64` worker nodes × `64` worker pods/node × `64` actor seats/pod ×
+`64x` oversubscription = `16,777,216` actors), `hack/create-cluster.sh --profile=hyperswarm`
+provisions dedicated `ate-postgres` and `ate-system-infra` node pools alongside
+the `64` worker nodes so `hack/deploy.sh` can install `ate-system` with
+`--cluster-size=size10 --cordon-system-infra-components`, scale `ate-api-server`
+and `atenet-router` (`--parked-request-max=65536`) to 16 replicas, and provision
+all `16,777,216` actors in ~28 minutes via an in-cluster sharded Indexed Job
+(`manifests/provision-job.yaml.tmpl`). Every `4,096`th actor (`attendee-4096`,
+`attendee-8192`, ..., `4,096` slots total) is reserved exclusively for live QR
+`/chat` attendees, and `/stage` streams a binary `/api/stage/fleet.bin` snapshot
+into a `4,096 × 4,096` WebGL2 `R8UI` GPU shader with `64 × 64 × 64` hardware
+topology drill-down. Keep the GCS snapshot bucket in the same region as the GKE
+cluster using standard flat-namespace uniform bucket-level access (Substrate
+`v1.0.0`'s STS Credential Access Boundary scopes down to `.../objects/...`,
+which GCS Hierarchical Namespace rejects when auto-creating managed folders).
 
 `hack/deploy.sh` sources no dev-env file: it targets `KUBECTL_CONTEXT` if
 set, otherwise the current kube context, and logs which one at the start of
@@ -407,7 +429,7 @@ Gemini reply carries no tag.
   restart drops them all.
 - Plain HTTP end to end unless `DEMO_DOMAIN` is set to front the gateway
   with a TLS Ingress.
-- An actor can make the gateway spend Vertex AI quota, within the allowlist,
+- An actor can make the gateway spend Agent Platform quota, within the allowlist,
   up to four calls per attendee request and two in flight at a time.
 - A relayed turn holds its gateway request open for every model call it
   makes, bounded by the actor's 60s turn timeout.
@@ -441,7 +463,7 @@ make e2e         # the same check against a real deployed cluster
 in-flight requests (parking the rest) and serves `/statusz`, then starts the
 gateway against it with `LOCAL_MODE=true` (skips ateapi entirely, so every
 actor shows "State unavailable") and `DEMO_MOCK_LLM=true` (the deterministic
-mock reasoning engine instead of a Vertex AI call). Open
+mock reasoning engine instead of an Agent Platform call). Open
 `http://127.0.0.1:18090/chat`; the presenter URL, with its key, is printed in
 the gateway's log output.
 

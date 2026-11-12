@@ -71,6 +71,10 @@ deploy-swarm:
 deploy-megaswarm:
 	bash hack/deploy.sh up --profile=megaswarm $(DEPLOY_FLAGS)
 
+.PHONY: deploy-hyperswarm
+deploy-hyperswarm:
+	bash hack/deploy.sh up --profile=hyperswarm $(DEPLOY_FLAGS)
+
 .PHONY: undeploy
 undeploy:
 	bash hack/deploy.sh down $(DEPLOY_FLAGS)
@@ -78,6 +82,10 @@ undeploy:
 .PHONY: undeploy-megaswarm
 undeploy-megaswarm:
 	bash hack/deploy.sh down --profile=megaswarm $(DEPLOY_FLAGS)
+
+.PHONY: undeploy-hyperswarm
+undeploy-hyperswarm:
+	bash hack/deploy.sh down --profile=hyperswarm $(DEPLOY_FLAGS)
 
 .PHONY: e2e
 e2e:

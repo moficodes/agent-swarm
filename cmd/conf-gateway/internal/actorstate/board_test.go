@@ -15,6 +15,7 @@
 package actorstate_test
 
 import (
+	"encoding/binary"
 	"runtime"
 	"sync"
 	"testing"
@@ -282,5 +283,126 @@ func TestBoard_TelemetrySnapshotCompactAndStandard(t *testing.T) {
 	}
 	if _, ok := actorsLarge["attendee-16"]; !ok {
 		t.Errorf("leased attendee-16 should remain in pruned actors map")
+	}
+}
+
+func TestBoard_HyperMode16Million(t *testing.T) {
+	const total = 16777216
+	b := actorstate.NewBoardWithCapacity(func(types.ActorView) {}, total)
+	if !b.IsHyperMode() {
+		t.Fatalf("expected IsHyperMode() == true for %d actors", total)
+	}
+
+	b.SeedSimulatedActivityIndices([]int{1, 2, 16777215}, types.ActivityAwaitingApproval, types.SourceMock)
+	b.SetActiveStatuses([]actorstate.Status{
+		{Name: "attendee-4096", State: types.StateRunning, WorkerPod: "conf-workers-pod-1"},
+		{Name: "attendee-8192", State: types.StateRunning, WorkerPod: "conf-workers-pod-2"},
+	})
+	if got := b.ActiveSeatCount(); got != 2 {
+		t.Fatalf("ActiveSeatCount() = %d, want 2", got)
+	}
+
+	// Evicting attendee-8192 from active statuses marks it checkpointed SUSPENDED and frees b.views.
+	b.SetActiveStatuses([]actorstate.Status{
+		{Name: "attendee-4096", State: types.StateRunning, WorkerPod: "conf-workers-pod-1"},
+	})
+	if got := b.ActiveSeatCount(); got != 1 {
+		t.Fatalf("ActiveSeatCount() after suspend = %d, want 1", got)
+	}
+	v8192, ok := b.View("attendee-8192")
+	if !ok || v8192.State != types.StateSuspended || v8192.NeverStarted {
+		t.Fatalf("View(attendee-8192) = %+v (ok=%v), want checkpointed SUSPENDED", v8192, ok)
+	}
+
+	leased := map[string]bool{"attendee-12288": true}
+	actors, compact, running, suspended := b.TelemetrySnapshotWithLeases(total, func(id string) bool { return leased[id] }, []string{"attendee-12288"})
+	if len(compact) != total {
+		t.Fatalf("len(compact) = %d, want %d", len(compact), total)
+	}
+	if running != 1 || suspended != total-1 {
+		t.Errorf("running=%d suspended=%d, want 1 and %d", running, suspended, total-1)
+	}
+	if got := compact[0] - '@'; got != 6 {
+		t.Errorf("attendee-01 code = %d, want 6 (AwaitingApproval)", got)
+	}
+	if got := compact[4095] - '@'; got != 4 {
+		t.Errorf("attendee-4096 code = %d, want 4 (Running)", got)
+	}
+	if got := compact[8191] - '@'; got != 1 {
+		t.Errorf("attendee-8192 code = %d, want 1 (Checkpointed SUSPENDED)", got)
+	}
+	if got := compact[12287] - '@'; got != 16 {
+		t.Errorf("attendee-12288 code = %d, want 16 (NeverStarted + Leased)", got)
+	}
+	if _, ok := actors["attendee-4096"]; !ok {
+		t.Errorf("seated attendee-4096 missing from actors snapshot")
+	}
+	if _, ok := actors["attendee-12288"]; !ok {
+		t.Errorf("leased attendee-12288 missing from actors snapshot")
+	}
+
+	// TelemetrySnapshotOptions with includeCompact=false omits the 16.78M string while preserving exact counters.
+	_, compactOmitted, runOpt, suspOpt, activeCohortOpt, snapOpt, leasedOpt := b.TelemetrySnapshotOptions(
+		total, func(id string) bool { return leased[id] }, []string{"attendee-12288"}, false,
+	)
+	if compactOmitted != "" {
+		t.Errorf("compactOmitted len = %d, want 0", len(compactOmitted))
+	}
+	if runOpt != 1 || suspOpt != total-1 {
+		t.Errorf("TelemetrySnapshotOptions running=%d suspended=%d, want 1 and %d", runOpt, suspOpt, total-1)
+	}
+	// Active cohort: indices 1, 2, 16777215 (AwaitingApproval = 3) + attendee-4096 (Running = 1) = 4;
+	// Snapshotted: attendee-8192 (Checkpointed SUSPENDED = 1); Leased: attendee-12288 (= 1).
+	if activeCohortOpt != 4 || snapOpt != 1 || leasedOpt != 1 {
+		t.Errorf("TelemetrySnapshotOptions counters active=%d snap=%d leased=%d, want 4, 1, 1", activeCohortOpt, snapOpt, leasedOpt)
+	}
+
+	// Binary snapshot ("SWFL" 24-byte header + 16,777,216 raw bytes with bit 5 onPod and bit 4 leased).
+	bin := b.FleetBinarySnapshot(total, func(id string) bool { return leased[id] }, []string{"attendee-12288"})
+	if len(bin) != actorstate.FleetBinaryHeaderBytes+total {
+		t.Fatalf("len(bin) = %d, want %d", len(bin), actorstate.FleetBinaryHeaderBytes+total)
+	}
+	if string(bin[0:4]) != "SWFL" {
+		t.Fatalf("magic = %q, want SWFL", string(bin[0:4]))
+	}
+	if v := binary.LittleEndian.Uint32(bin[4:8]); v != 1 {
+		t.Errorf("version = %d, want 1", v)
+	}
+	if cnt := binary.LittleEndian.Uint32(bin[8:12]); cnt != total {
+		t.Errorf("actorCount = %d, want %d", cnt, total)
+	}
+	if ac := binary.LittleEndian.Uint32(bin[12:16]); ac != 4 {
+		t.Errorf("binary activeCohort = %d, want 4", ac)
+	}
+	if sc := binary.LittleEndian.Uint32(bin[16:20]); sc != 1 {
+		t.Errorf("binary snapshotted = %d, want 1", sc)
+	}
+	if lc := binary.LittleEndian.Uint32(bin[20:24]); lc != 1 {
+		t.Errorf("binary leased = %d, want 1", lc)
+	}
+	payload := bin[actorstate.FleetBinaryHeaderBytes:]
+	if got := payload[0]; got != 6 {
+		t.Errorf("payload[0] (attendee-01) = %d, want 6", got)
+	}
+	if got := payload[4095]; got != (4 | 32) {
+		t.Errorf("payload[4095] (seated attendee-4096) = %d, want %d (Running | onPod)", got, 4|32)
+	}
+	if got := payload[12287]; got != 16 {
+		t.Errorf("payload[12287] (leased attendee-12288) = %d, want 16", got)
+	}
+
+	// Fast ClearUnleasedActivityIndices preserves protected indices and 4096-stride slots while clearing unleased simulated activity.
+	b.SeedSimulatedActivityIndices([]int{4096}, types.ActivityThinking, types.SourceGemini)
+	b.ClearUnleasedActivityIndices(map[int]bool{2: true}, func(id string) bool { return id == "attendee-02" }, 4096)
+	binAfter := b.FleetBinarySnapshot(total, nil, nil)
+	payloadAfter := binAfter[actorstate.FleetBinaryHeaderBytes:]
+	if got := payloadAfter[0] & 15; got != 0 {
+		t.Errorf("attendee-01 after ClearUnleasedActivityIndices = %d, want 0 (cleared)", got)
+	}
+	if got := payloadAfter[1] & 15; got != 6 {
+		t.Errorf("protected attendee-02 after ClearUnleasedActivityIndices = %d, want 6 (preserved)", got)
+	}
+	if got := payloadAfter[4095] & 15; got != 4 {
+		t.Errorf("stride-protected seated attendee-4096 = %d, want 4", got)
 	}
 }

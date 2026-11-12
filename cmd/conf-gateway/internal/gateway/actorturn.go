@@ -16,6 +16,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,15 +26,41 @@ import (
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorproxy"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
-func (g *Gateway) canFallbackApprovalToActor(attendeeID string) bool {
+func (g *Gateway) canFallbackApprovalToActor(reqCtx context.Context, attendeeID string) bool {
 	if g.control == nil || g.board == nil {
 		return false
 	}
+	if g.proxy != nil && g.proxy.PendingApproval(attendeeID) != nil {
+		// Fast path: gateway already holds the pending approval in memory, so
+		// ClaimApprovalWithFallback will not use actor fallback anyway.
+		return false
+	}
 	v, ok := g.board.View(attendeeID)
-	return ok && !v.NeverStarted && !strings.Contains(v.SnapshotURI, "/tags/")
+	if ok && !v.NeverStarted && !strings.Contains(v.SnapshotURI, "/tags/") {
+		return true
+	}
+	if g.maxActors > actorstate.HyperFleetThreshold && (isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) || g.IsLeased(attendeeID)) {
+		if getter, hasGet := g.control.(actorstate.SingleActorGetter); hasGet {
+			parentCtx := reqCtx
+			if parentCtx == nil {
+				parentCtx = g.ctx
+			}
+			ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
+			defer cancel()
+			if s, err := getter.Get(ctx, attendeeID); err == nil {
+				uri := s.SnapshotURI
+				if s.InProgressSnapshotURI != "" {
+					uri = s.InProgressSnapshotURI
+				}
+				return uri != "" && !strings.Contains(uri, "/tags/")
+			}
+		}
+	}
+	return false
 }
 
 func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
@@ -71,10 +98,12 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 					}
 					actionID := fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
 					sampled = g.shouldRecordAction(attendeeID, actionID, true)
-					g.mu.Lock()
-					g.appendChatHistoryLocked(attendeeID, userMsg)
-					g.currentActionID[attendeeID] = actionID
-					g.mu.Unlock()
+					if !useMock || sampled || g.maxActors <= actorstate.HyperFleetThreshold {
+						g.mu.Lock()
+						g.appendChatHistoryLocked(attendeeID, userMsg)
+						g.currentActionID[attendeeID] = actionID
+						g.mu.Unlock()
+					}
 					if sampled {
 						g.RecordActionEntry(types.ActionLogEntry{
 							ID:         actionID,
@@ -88,7 +117,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if r.URL.Path == "/api/approve" {
-		apprReq, release, ok := g.proxy.ClaimApprovalWithFallback(w, r, attendeeID, g.canFallbackApprovalToActor(attendeeID))
+		apprReq, release, ok := g.proxy.ClaimApprovalWithFallback(w, r, attendeeID, g.canFallbackApprovalToActor(r.Context(), attendeeID))
 		if !ok {
 			return
 		}
@@ -123,7 +152,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/api/approve" {
 		g.setActivity(attendeeID, types.ActivityThinking)
 	}
-	if !useMock && (isReservedHumanSlotID(attendeeID, g.maxActors) || g.IsLeased(attendeeID)) {
+	if !useMock && (isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) || g.IsLeased(attendeeID)) {
 		g.LeaseAttendee(attendeeID)
 	}
 	g.beginTurn(attendeeID)
@@ -202,6 +231,10 @@ func (g *Gateway) mockTurnDelay(minD, maxD time.Duration) time.Duration {
 // onActorReply records an actor's answer to a turn: its activity, chat
 // history, pending approval, and the action feed entry.
 func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMessage) {
+	g.onActorReplyWithContext(g.ctx, attendeeID, status, msg)
+}
+
+func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID string, status int, msg *types.ChatMessage) {
 	var isWaitingForApproval bool
 	var chatMsg types.ChatMessage
 	hasChatMsg := msg != nil
@@ -213,16 +246,34 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 	}
 
 	if hasChatMsg && chatMsg.Source == types.SourceMock {
+		if reqCtx != nil && reqCtx.Err() != nil {
+			g.setActivity(attendeeID, types.ActivityIdle)
+			return
+		}
 		var hold time.Duration
 		if isWaitingForApproval {
 			hold = g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
 		} else {
 			hold = g.mockTurnDelay(g.mockExecMin, g.mockExecMax)
 		}
-		if hold > 0 && g.ctx != nil {
+		if hold > 0 {
+			var reqDone <-chan struct{}
+			if reqCtx != nil {
+				reqDone = reqCtx.Done()
+			}
+			var gwDone <-chan struct{}
+			if g.ctx != nil {
+				gwDone = g.ctx.Done()
+			}
+			timer := time.NewTimer(hold)
 			select {
-			case <-time.After(hold):
-			case <-g.ctx.Done():
+			case <-timer.C:
+			case <-reqDone:
+				timer.Stop()
+				g.setActivity(attendeeID, types.ActivityIdle)
+				return
+			case <-gwDone:
+				timer.Stop()
 			}
 		}
 	}
@@ -285,7 +336,7 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 
 		g.mu.Lock()
 		g.proxy.SetPending(attendeeID, chatMsg.Approval)
-		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
+		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") && (chatMsg.Source != types.SourceMock || sampled || g.maxActors <= actorstate.HyperFleetThreshold) {
 			history := g.chatHistories[attendeeID]
 			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
 				g.appendChatHistoryLocked(attendeeID, chatMsg)
@@ -314,7 +365,7 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 	} else if status == http.StatusOK {
 		g.mu.Lock()
 		g.proxy.ClearPending(attendeeID)
-		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
+		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") && (chatMsg.Source != types.SourceMock || sampled || g.maxActors <= actorstate.HyperFleetThreshold) {
 			history := g.chatHistories[attendeeID]
 			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
 				g.appendChatHistoryLocked(attendeeID, chatMsg)

@@ -54,6 +54,12 @@ type LeaseChecker interface {
 	IsReservedForHuman(attendeeID string, slotIndex int) bool
 }
 
+// HumanStrideProvider is optionally implemented by Target to report the
+// periodic human-reserved attendee slot stride (e.g. 16 on megaswarm, 4096 on hyperswarm).
+type HumanStrideProvider interface {
+	HumanSlotStride() int
+}
+
 // StopCleanup is optionally implemented by Target to reset simulated activity
 // on non-leased actors when the simulation stops.
 type StopCleanup interface {
@@ -70,6 +76,13 @@ type SeatLoadChecker interface {
 // actor's human-review state (AwaitingApproval) during massive oversubscription.
 type ApprovalSeeder interface {
 	SeedSimulatedApproval(attendeeID, prompt string) string
+}
+
+// BulkApprovalSeeder is optionally implemented by Target to bulk-seed
+// simulated AwaitingApproval state by 1-based actor indices at 16.78M scale
+// without per-actor string formatting or map growth.
+type BulkApprovalSeeder interface {
+	SeedSimulatedApprovalIndices(indices []int)
 }
 
 // ResetHandler is optionally implemented by Target so external data-generator
@@ -123,6 +136,24 @@ func WithResetSettleWindow(d time.Duration) SimulationOption {
 	}
 }
 
+// WithMaxConcurrentTurns sets the semaphore cap on concurrent simulated turns.
+func WithMaxConcurrentTurns(n int) SimulationOption {
+	return func(s *SimulationRunner) {
+		if n > 0 {
+			s.turnSem = make(chan struct{}, n)
+		}
+	}
+}
+
+// WithMaxTargetMPS overrides the maximum MPS configured on data-generator for >65k runs.
+func WithMaxTargetMPS(mps int) SimulationOption {
+	return func(s *SimulationRunner) {
+		if mps > 0 {
+			s.maxTargetMPS = mps
+		}
+	}
+}
+
 type slotPhase uint8
 
 const (
@@ -132,10 +163,12 @@ const (
 	phaseApproveInFlight
 )
 
+// slotState is intentionally pointer-free (16 bytes) so Go's GC marks a
+// 16,777,216-element slice in 0ms as a noscan span. Container approval IDs
+// are stored in the sparse containerApprovals map only while hasContainerApproval is true.
 type slotState struct {
+	readyAtUnixMs        int64
 	phase                slotPhase
-	readyAt              time.Time
-	approvalID           string
 	hasContainerApproval bool
 }
 
@@ -146,7 +179,7 @@ type SimulationRunner struct {
 	mu                sync.RWMutex
 	simCtx            context.Context
 	cancel            context.CancelFunc
-	wg                sync.WaitGroup
+	runWG             *sync.WaitGroup
 	running           bool
 	count             int
 	readingDelay      time.Duration
@@ -156,17 +189,19 @@ type SimulationRunner struct {
 	presenterKey      string
 	dgClient          *http.Client
 	turnSem           chan struct{}
+	maxTargetMPS      int
 	resetSettleWindow time.Duration
 
-	slotMu            sync.Mutex
-	slots             []slotState
-	readyQueue        []int
-	seededReadyQueue  []int
-	seededReadyCursor int
-	awaitingCount     int
-	onboardCursor     uint64
-	turnCursor        uint64
-	dispatchSeq       uint64
+	slotMu             sync.Mutex
+	slots              []slotState
+	containerApprovals map[int]string
+	readyQueue         []int
+	seededReadyQueue   []int
+	seededReadyCursor  int
+	awaitingCount      int
+	onboardCursor      uint64
+	turnCursor         uint64
+	dispatchSeq        uint64
 
 	resetMu          sync.Mutex
 	resetting        bool
@@ -200,6 +235,7 @@ func (s *SimulationRunner) initSlotsLocked(count int) {
 	s.slotMu.Lock()
 	defer s.slotMu.Unlock()
 	s.slots = make([]slotState, count+1)
+	s.containerApprovals = make(map[int]string)
 	s.readyQueue = nil
 	s.seededReadyQueue = nil
 	s.seededReadyCursor = 0
@@ -213,6 +249,7 @@ func (s *SimulationRunner) clearSlotsLocked() {
 	s.slotMu.Lock()
 	defer s.slotMu.Unlock()
 	s.slots = nil
+	s.containerApprovals = nil
 	s.readyQueue = nil
 	s.seededReadyQueue = nil
 	s.seededReadyCursor = 0
@@ -229,6 +266,9 @@ func (s *SimulationRunner) stopActiveRun(pauseOrchestrator bool) bool {
 		s.mu.Unlock()
 		return false
 	}
+	wasCount := s.count
+	wg := s.runWG
+	s.runWG = nil
 	s.running = false
 	s.count = 0
 	cancel := s.cancel
@@ -245,7 +285,23 @@ func (s *SimulationRunner) stopActiveRun(pauseOrchestrator bool) bool {
 			log.Printf("[simulation] warning: failed to pause external data-generator orchestrator: %v", err)
 		}
 	}
-	s.wg.Wait()
+	if wg != nil {
+		if wasCount > 65536 {
+			done := make(chan struct{})
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+			timer := time.NewTimer(1500 * time.Millisecond)
+			select {
+			case <-done:
+				timer.Stop()
+			case <-timer.C:
+			}
+		} else {
+			wg.Wait()
+		}
+	}
 	s.clearSlotsLocked()
 	if sc, ok := s.target.(StopCleanup); ok {
 		sc.ClearSimulatedActivity()
@@ -280,8 +336,10 @@ func (s *SimulationRunner) Start(count int) error {
 	s.initSlotsLocked(count)
 
 	s.mu.Lock()
+	runWG := &sync.WaitGroup{}
 	s.simCtx = ctx
 	s.cancel = cancel
+	s.runWG = runWG
 	s.running = true
 	s.count = count
 	rDelay := s.readingDelay
@@ -299,14 +357,14 @@ func (s *SimulationRunner) Start(count int) error {
 	if count <= 256 {
 		for i := 0; i < count; i++ {
 			attendeeID := fmt.Sprintf("attendee-%02d", i+1)
-			s.wg.Add(1)
-			go s.runAttendee(ctx, attendeeID, i, rDelay, lDelay)
+			runWG.Add(1)
+			go s.runAttendee(ctx, runWG, attendeeID, i, rDelay, lDelay)
 		}
 	} else {
 		numWorkers := min(count, 256)
 		for w := 0; w < numWorkers; w++ {
-			s.wg.Add(1)
-			go s.runStridedWorker(ctx, w, rDelay, lDelay)
+			runWG.Add(1)
+			go s.runStridedWorker(ctx, runWG, w, rDelay, lDelay)
 		}
 	}
 
@@ -375,10 +433,77 @@ func (s *SimulationRunner) isReserved(attendeeID string, slotIndex int) bool {
 	return false
 }
 
+func (s *SimulationRunner) humanStrideLocked(totalCount int) int {
+	if hp, ok := s.target.(HumanStrideProvider); ok {
+		if st := hp.HumanSlotStride(); st > 0 {
+			return st
+		}
+	}
+	if totalCount > 65536 {
+		return 4096
+	}
+	if totalCount > 256 {
+		return 16
+	}
+	return 0
+}
+
 func (s *SimulationRunner) onboardOversubscribedCohort(now time.Time) int {
 	seeder, ok := s.target.(ApprovalSeeder)
 	if !ok {
 		return 0
+	}
+	bulkSeeder, hasBulk := s.target.(BulkApprovalSeeder)
+	nowMs := now.UnixMilli()
+
+	s.slotMu.Lock()
+	totalCount := len(s.slots) - 1
+	if totalCount <= 256 {
+		s.slotMu.Unlock()
+		return 0
+	}
+	hStride := s.humanStrideLocked(totalCount)
+	nonReserved := totalCount
+	if hStride > 1 {
+		nonReserved = totalCount - (totalCount / hStride)
+	}
+	targetAwaiting := (nonReserved * 82) / 100
+	deficit := targetAwaiting - s.awaitingCount
+	if deficit <= 0 {
+		s.slotMu.Unlock()
+		return 0
+	}
+
+	if totalCount > 65536 && hasBulk {
+		batchLimit := min(65536, deficit)
+		stride := uint64(4099)
+		if uint64(totalCount)%stride == 0 {
+			stride = 1
+		}
+		maxProbes := min(totalCount, batchLimit*2)
+		indices := make([]int, 0, batchLimit)
+		for p := 0; p < maxProbes && len(indices) < batchLimit; p++ {
+			step := s.onboardCursor
+			s.onboardCursor++
+			idx := int((step*stride)%uint64(totalCount)) + 1
+			if hStride > 1 && idx%hStride == 0 {
+				continue
+			}
+			st := &s.slots[idx]
+			if st.phase != phaseIdle || nowMs < st.readyAtUnixMs {
+				continue
+			}
+			st.phase = phaseAwaitingApproval
+			st.hasContainerApproval = false
+			st.readyAtUnixMs = nowMs
+			s.awaitingCount++
+			indices = append(indices, idx)
+		}
+		s.slotMu.Unlock()
+		if len(indices) > 0 {
+			bulkSeeder.SeedSimulatedApprovalIndices(indices)
+		}
+		return len(indices)
 	}
 
 	type seedCandidate struct {
@@ -387,20 +512,6 @@ func (s *SimulationRunner) onboardOversubscribedCohort(now time.Time) int {
 		prompt     string
 	}
 	var candidates []seedCandidate
-
-	s.slotMu.Lock()
-	totalCount := len(s.slots) - 1
-	if totalCount <= 256 {
-		s.slotMu.Unlock()
-		return 0
-	}
-	nonReserved := (totalCount * 15) / 16
-	targetAwaiting := (nonReserved * 82) / 100
-	deficit := targetAwaiting - s.awaitingCount
-	if deficit <= 0 {
-		s.slotMu.Unlock()
-		return 0
-	}
 
 	batchLimit := min(64, deficit)
 	stride := uint64(4099)
@@ -412,11 +523,11 @@ func (s *SimulationRunner) onboardOversubscribedCohort(now time.Time) int {
 		step := s.onboardCursor
 		s.onboardCursor++
 		idx := int((step*stride)%uint64(totalCount)) + 1
-		if idx%16 == 0 {
+		if hStride > 1 && idx%hStride == 0 {
 			continue
 		}
 		st := &s.slots[idx]
-		if st.phase != phaseIdle || now.Before(st.readyAt) {
+		if st.phase != phaseIdle || nowMs < st.readyAtUnixMs {
 			continue
 		}
 		attendeeID := fmt.Sprintf("attendee-%02d", idx)
@@ -425,7 +536,7 @@ func (s *SimulationRunner) onboardOversubscribedCohort(now time.Time) int {
 		}
 		st.phase = phaseAwaitingApproval
 		st.hasContainerApproval = false
-		st.readyAt = now
+		st.readyAtUnixMs = nowMs
 		s.awaitingCount++
 		s.seededReadyQueue = append(s.seededReadyQueue, idx)
 		candidates = append(candidates, seedCandidate{
@@ -455,9 +566,7 @@ func (s *SimulationRunner) onboardOversubscribedCohort(now time.Time) int {
 		if res.idx >= 1 && res.idx < len(s.slots) {
 			st := &s.slots[res.idx]
 			if st.phase == phaseAwaitingApproval && !st.hasContainerApproval {
-				if res.approvalID != "" {
-					st.approvalID = res.approvalID
-				} else {
+				if res.approvalID == "" {
 					st.phase = phaseIdle
 					if s.awaitingCount > 0 {
 						s.awaitingCount--
@@ -471,6 +580,7 @@ func (s *SimulationRunner) onboardOversubscribedCohort(now time.Time) int {
 }
 
 func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount int) (int, slotPhase, string, bool) {
+	nowMs := now.UnixMilli()
 	scanLimit := min(len(s.readyQueue), 128)
 	for i := 0; i < scanLimit; i++ {
 		idx := s.readyQueue[i]
@@ -478,8 +588,9 @@ func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount 
 			continue
 		}
 		st := &s.slots[idx]
-		if st.phase == phaseAwaitingApproval && st.hasContainerApproval && !now.Before(st.readyAt) {
-			appID := st.approvalID
+		if st.phase == phaseAwaitingApproval && st.hasContainerApproval && nowMs >= st.readyAtUnixMs {
+			appID := s.containerApprovals[idx]
+			delete(s.containerApprovals, idx)
 			st.phase = phaseApproveInFlight
 			st.hasContainerApproval = false
 			if s.awaitingCount > 0 {
@@ -493,26 +604,38 @@ func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount 
 }
 
 func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int) (int, slotPhase, string, bool) {
+	nowMs := now.UnixMilli()
+	hStride := s.humanStrideLocked(totalCount)
 	stride := uint64(4099)
 	if uint64(totalCount)%stride == 0 {
 		stride = 1
 	}
 	probes := min(totalCount, 128)
-	if len(s.seededReadyQueue) == 0 || s.dispatchSeq%2 == 1 {
+	if totalCount > 65536 || len(s.seededReadyQueue) == 0 || s.dispatchSeq%2 == 1 {
 		for p := 0; p < probes; p++ {
 			step := s.turnCursor
 			s.turnCursor++
 			idx := int((step*stride)%uint64(totalCount)) + 1
-			if totalCount > 256 && idx%16 == 0 {
+			if hStride > 1 && idx%hStride == 0 {
 				continue
 			}
 			st := &s.slots[idx]
-			if st.phase != phaseIdle || now.Before(st.readyAt) {
+			isSeededCohort := totalCount > 65536 && st.phase == phaseAwaitingApproval && !st.hasContainerApproval
+			if (st.phase != phaseIdle && !isSeededCohort) || nowMs < st.readyAtUnixMs {
 				continue
 			}
 			attendeeID := fmt.Sprintf("attendee-%02d", idx)
 			if s.isReserved(attendeeID, idx) {
+				if isSeededCohort {
+					st.phase = phaseIdle
+					if s.awaitingCount > 0 {
+						s.awaitingCount--
+					}
+				}
 				continue
+			}
+			if isSeededCohort && s.awaitingCount > 0 {
+				s.awaitingCount--
 			}
 			st.phase = phaseChatInFlight
 			st.hasContainerApproval = false
@@ -539,14 +662,14 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 		attendeeID := fmt.Sprintf("attendee-%02d", idx)
 		if s.isReserved(attendeeID, idx) {
 			st.phase = phaseIdle
-			st.approvalID = ""
+			delete(s.containerApprovals, idx)
 			if s.awaitingCount > 0 {
 				s.awaitingCount--
 			}
 			continue
 		}
 		st.phase = phaseChatInFlight
-		st.approvalID = ""
+		delete(s.containerApprovals, idx)
 		if s.awaitingCount > 0 {
 			s.awaitingCount--
 		}
@@ -599,6 +722,10 @@ func (s *SimulationRunner) executeNextTurn(ctx context.Context, prompt string, r
 		return false, "", "", nil
 	}
 
+	return s.runClaimedTurn(ctx, slotIndex, phase, approvalID, prompt, reviewDelay, idleDelay)
+}
+
+func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, phase slotPhase, approvalID, prompt string, reviewDelay, idleDelay time.Duration) (bool, string, string, error) {
 	attendeeID := fmt.Sprintf("attendee-%02d", slotIndex)
 	token := s.target.MintToken(attendeeID)
 
@@ -607,9 +734,9 @@ func (s *SimulationRunner) executeNextTurn(ctx context.Context, prompt string, r
 		s.slotMu.Lock()
 		if slotIndex < len(s.slots) {
 			s.slots[slotIndex].phase = phaseIdle
-			s.slots[slotIndex].approvalID = ""
+			delete(s.containerApprovals, slotIndex)
 			s.slots[slotIndex].hasContainerApproval = false
-			s.slots[slotIndex].readyAt = time.Now().Add(idleDelay)
+			s.slots[slotIndex].readyAtUnixMs = time.Now().Add(idleDelay).UnixMilli()
 		}
 		s.slotMu.Unlock()
 		return true, attendeeID, "approve", err
@@ -628,28 +755,28 @@ func (s *SimulationRunner) executeNextTurn(ctx context.Context, prompt string, r
 				effReviewDelay = min(reviewDelay, time.Duration(4000+rand.Intn(4000))*time.Millisecond)
 			}
 			s.slots[slotIndex].phase = phaseAwaitingApproval
-			s.slots[slotIndex].approvalID = chatMsg.Approval.ApprovalID
+			s.containerApprovals[slotIndex] = chatMsg.Approval.ApprovalID
 			s.slots[slotIndex].hasContainerApproval = true
-			s.slots[slotIndex].readyAt = time.Now().Add(effReviewDelay)
+			s.slots[slotIndex].readyAtUnixMs = time.Now().Add(effReviewDelay).UnixMilli()
 			s.awaitingCount++
 			s.readyQueue = append(s.readyQueue, slotIndex)
 		} else {
 			s.slots[slotIndex].phase = phaseIdle
-			s.slots[slotIndex].approvalID = ""
+			delete(s.containerApprovals, slotIndex)
 			s.slots[slotIndex].hasContainerApproval = false
 			backoff := idleDelay
 			if err != nil {
 				backoff = min(idleDelay, 2*time.Second)
 			}
-			s.slots[slotIndex].readyAt = time.Now().Add(backoff)
+			s.slots[slotIndex].readyAtUnixMs = time.Now().Add(backoff).UnixMilli()
 		}
 	}
 	s.slotMu.Unlock()
 	return true, attendeeID, "chat", err
 }
 
-func (s *SimulationRunner) runStridedWorker(ctx context.Context, workerIdx int, rDelay, lDelay time.Duration) {
-	defer s.wg.Done()
+func (s *SimulationRunner) runStridedWorker(ctx context.Context, wg *sync.WaitGroup, workerIdx int, rDelay, lDelay time.Duration) {
+	defer wg.Done()
 
 	if workerIdx > 0 {
 		stagger := time.Duration((workerIdx%64)*40) * time.Millisecond
@@ -691,8 +818,8 @@ func (s *SimulationRunner) runStridedWorker(ctx context.Context, workerIdx int, 
 	}
 }
 
-func (s *SimulationRunner) runAttendee(ctx context.Context, attendeeID string, offset int, rDelay, lDelay time.Duration) {
-	defer s.wg.Done()
+func (s *SimulationRunner) runAttendee(ctx context.Context, wg *sync.WaitGroup, attendeeID string, offset int, rDelay, lDelay time.Duration) {
+	defer wg.Done()
 
 	if s.isReserved(attendeeID, offset+1) {
 		return

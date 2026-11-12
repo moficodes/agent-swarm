@@ -1412,6 +1412,56 @@ html, body {
   width: 100%;
 }
 
+.seat-grid-8x8 {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 1.5px;
+  width: 100%;
+}
+
+.workers-grid.hyper-node-grid {
+  gap: 0.28rem;
+  max-height: 238px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.workers-grid.hyper-node-grid .worker-card {
+  padding: 0.22rem 0.34rem 0.28rem;
+  border-radius: 6px;
+}
+
+.workers-grid.hyper-node-grid .worker-card-header {
+  margin-bottom: 0.16rem;
+  min-height: 0.85rem;
+}
+
+.workers-grid.hyper-node-grid .worker-title {
+  font-size: 0.58rem;
+}
+
+.workers-grid.hyper-node-grid .worker-seat-count {
+  font-size: 0.54rem;
+}
+
+.workers-grid.hyper-node-grid .node-corner-zoom-btn {
+  width: 14px;
+  height: 14px;
+}
+
+.workers-grid.hyper-node-grid .pod-actor-seat-card {
+  min-height: 2.9rem;
+  padding: 0.24rem 0.36rem;
+}
+
+.seat-grid-8x8 .seat-cell {
+  height: 0.34rem;
+  border-radius: 1.5px;
+  font-size: 0;
+  line-height: 0;
+  border-width: 1px;
+}
+
 .seat-cell {
   height: 0.92rem;
   border-radius: 3px;
@@ -1719,7 +1769,24 @@ html, body {
   overflow: hidden;
 }
 
+.fleet-webgl-canvas {
+  position: absolute;
+  inset: 0.45rem;
+  width: calc(100% - 0.9rem);
+  height: calc(100% - 0.9rem);
+  display: block;
+  border-radius: 6px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.fleet-webgl-canvas[hidden] {
+  display: none !important;
+}
+
 .fleet-canvas {
+  position: relative;
+  z-index: 2;
   width: 100%;
   height: 100%;
   display: block;

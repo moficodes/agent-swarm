@@ -1,0 +1,94 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sharded Kubernetes Indexed Job for provisioning millions of attendee actors
+# directly against api.ate-system.svc:443 from inside the cluster.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: conf-provision
+  namespace: ${NAMESPACE}
+  labels:
+    app: conf-provision
+spec:
+  completions: ${PROVISION_SHARDS}
+  parallelism: ${PROVISION_SHARDS}
+  completionMode: Indexed
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: conf-provision
+    spec:
+      serviceAccountName: conf-gateway
+      restartPolicy: OnFailure
+      tolerations:
+      - key: ate.dev/workloadType
+        operator: Equal
+        value: ate-system-infra
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: ate.dev/workloadType
+                operator: In
+                values:
+                - ate-system-infra
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: conf-provision
+        image: ko://github.com/agent-substrate/agent-swarm/cmd/conf-gateway/cmd/conf-provision
+        args:
+        - "--atespace=${NAMESPACE}"
+        - "--template=${TEMPLATE_NAME}"
+        - "--count=${ACTOR_COUNT}"
+        - "--shards=${PROVISION_SHARDS}"
+        - "--concurrency=${PROVISION_CONCURRENCY}"
+        - "--endpoint=api.ate-system.svc:443"
+        - "--ca-file=/var/run/ateapi-ca/router-ca.pem"
+        - "--skip-list=true"
+        resources:
+          requests:
+            cpu: 250m
+            memory: 128Mi
+          limits:
+            cpu: 2000m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: ateapi-ca
+          mountPath: /var/run/ateapi-ca
+          readOnly: true
+      volumes:
+      - name: ateapi-ca
+        projected:
+          sources:
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: router-ca.pem

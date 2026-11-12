@@ -30,8 +30,8 @@ import (
 
 const attendeeLeaseTTL = 30 * time.Minute
 
-func isReservedHumanSlotID(attendeeID string, maxActors int) bool {
-	if maxActors <= actorstate.CompactFleetThreshold {
+func isReservedHumanSlotID(attendeeID string, maxActors, stride int) bool {
+	if maxActors <= actorstate.CompactFleetThreshold || stride <= 1 {
 		return false
 	}
 	numStr, ok := strings.CutPrefix(attendeeID, "attendee-")
@@ -42,7 +42,39 @@ func isReservedHumanSlotID(attendeeID string, maxActors int) bool {
 	if err != nil {
 		return false
 	}
-	return idx >= 16 && idx <= maxActors && idx%16 == 0
+	return idx >= stride && idx <= maxActors && idx%stride == 0
+}
+
+// HumanSlotStride returns the periodic reserved human attendee slot stride
+// (e.g. 16 on megaswarm, 4096 on hyperswarm, or 0 on small swarms).
+func (g *Gateway) HumanSlotStride() int {
+	if g.humanSlotStride > 0 {
+		return g.humanSlotStride
+	}
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		return 4096
+	}
+	if g.maxActors > actorstate.CompactFleetThreshold {
+		return 16
+	}
+	return 0
+}
+
+// LeasedIDs returns a snapshot slice of currently leased attendee IDs.
+func (g *Gateway) LeasedIDs() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if len(g.leasedUntil) == 0 {
+		return nil
+	}
+	now := time.Now()
+	out := make([]string, 0, len(g.leasedUntil))
+	for id, until := range g.leasedUntil {
+		if now.Before(until) {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // LeaseAttendee marks an attendee slot as leased by a live QR-code user.
@@ -88,12 +120,33 @@ func (g *Gateway) leasedChecker() func(string) bool {
 	}
 }
 
+// simCleanupProtectedIndices builds the sparse 1-based index set of leased and
+// SSE-subscribed slots so hyper-mode ClearUnleasedActivityIndices never has to
+// format strings or acquire mutexes 16.78 million times.
+func (g *Gateway) simCleanupProtectedIndices() map[int]bool {
+	out := make(map[int]bool)
+	for _, id := range g.LeasedIDs() {
+		if idx, ok := actorstate.ParseAttendeeIndex(id, g.maxActors); ok {
+			out[idx] = true
+		}
+	}
+	if g.broker != nil {
+		for _, id := range g.broker.SubscribedAttendeeIDs() {
+			if idx, ok := actorstate.ParseAttendeeIndex(id, g.maxActors); ok {
+				out[idx] = true
+			}
+		}
+	}
+	return out
+}
+
 // simCleanupProtectedChecker returns a lock-free predicate reporting which
 // attendee slots must be preserved when ClearSimulatedActivity resets
 // simulated activity and pending approvals (leased human slots, reserved
-// every-16th human slots in 65k mode, and slots with active SSE subscribers).
+// periodic human slots, and slots with active SSE subscribers).
 func (g *Gateway) simCleanupProtectedChecker() func(string) bool {
 	maxActors := g.maxActors
+	stride := g.HumanSlotStride()
 	isLeased := g.leasedChecker()
 	if isLeased == nil && maxActors <= actorstate.CompactFleetThreshold && g.broker == nil {
 		return nil
@@ -102,7 +155,7 @@ func (g *Gateway) simCleanupProtectedChecker() func(string) bool {
 		if isLeased != nil && isLeased(id) {
 			return true
 		}
-		if isReservedHumanSlotID(id, maxActors) {
+		if isReservedHumanSlotID(id, maxActors, stride) {
 			return true
 		}
 		return g.SubscriberCount(id) > 0
@@ -111,14 +164,19 @@ func (g *Gateway) simCleanupProtectedChecker() func(string) bool {
 
 // IsReservedForHuman reports whether the background simulation should skip this slot.
 func (g *Gateway) IsReservedForHuman(attendeeID string, slotIndex int) bool {
-	if g.maxActors > actorstate.CompactFleetThreshold && slotIndex%16 == 0 {
+	stride := g.HumanSlotStride()
+	if g.maxActors > actorstate.CompactFleetThreshold && stride > 1 && slotIndex%stride == 0 {
 		return true
 	}
 	return g.IsLeased(attendeeID)
 }
 
-func (g *Gateway) selectEvery16thAttendeeSlot(maxActors int) string {
-	numBuckets := maxActors / 16
+func (g *Gateway) selectReservedAttendeeSlot(maxActors int) string {
+	stride := g.HumanSlotStride()
+	if stride <= 1 {
+		return g.selectAttendeeSlot(0, maxActors)
+	}
+	numBuckets := maxActors / stride
 	if numBuckets < 1 {
 		return g.selectAttendeeSlot(0, maxActors)
 	}
@@ -126,7 +184,7 @@ func (g *Gateway) selectEvery16thAttendeeSlot(maxActors int) string {
 	var firstAvailable string
 	for attempt := 0; attempt < numBuckets; attempt++ {
 		seq := atomic.AddUint64(&g.attendeeSeq, 1)
-		slotIndex := (int((seq-1)%uint64(numBuckets)) + 1) * 16
+		slotIndex := (int((seq-1)%uint64(numBuckets)) + 1) * stride
 		candidate := fmt.Sprintf("attendee-%02d", slotIndex)
 		if attempt == 0 {
 			firstCandidate = candidate
@@ -177,7 +235,7 @@ func (g *Gateway) handleSession(w http.ResponseWriter, r *http.Request) {
 			g.LeaseAttendee(attendeeID)
 		}
 	} else if maxActors > actorstate.CompactFleetThreshold {
-		attendeeID = g.selectEvery16thAttendeeSlot(maxActors)
+		attendeeID = g.selectReservedAttendeeSlot(maxActors)
 		g.LeaseAttendee(attendeeID)
 		g.forgetAttendee(attendeeID)
 	} else {

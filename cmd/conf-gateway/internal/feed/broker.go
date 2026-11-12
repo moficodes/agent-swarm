@@ -116,6 +116,23 @@ func (b *Broker) SubscriberCount(attendeeID string) int {
 	return len(b.subscribers[attendeeID])
 }
 
+// SubscribedAttendeeIDs returns the attendee IDs that currently have at least
+// one active SSE subscriber channel.
+func (b *Broker) SubscribedAttendeeIDs() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.subscribers) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(b.subscribers))
+	for id, subs := range b.subscribers {
+		if len(subs) > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // SubscribeActions creates and registers an action event channel for global action stream events.
 func (b *Broker) SubscribeActions() chan types.ActionLogEntry {
 	b.mu.Lock()

@@ -220,14 +220,23 @@ type StageTelemetry struct {
 	ActorCount int `json:"actor_count"`
 	// SeatsPerWorker is how many actors one worker pod hosts at once.
 	SeatsPerWorker int `json:"seats_per_worker"`
+	// HumanSlotStride is the reserved QR attendee stride (e.g. 16 on megaswarm,
+	// 4096 on hyperswarm). Zero or 1 means no periodic reserved stride.
+	HumanSlotStride int `json:"human_slot_stride,omitempty"`
 	// FleetCompact is a compact 1-byte-per-actor ASCII state string ('@' + code)
-	// emitted when ActorCount > 256 so the 65,536-dot stage canvas updates at 60fps
-	// without serializing 65,536 full ActorView JSON objects every 500ms.
+	// emitted when ActorCount > 256 so large-scale stage canvases update
+	// without serializing every full ActorView JSON object on every tick.
 	FleetCompact string `json:"fleet_compact,omitempty"`
 	// RunningActors is the total count of actors currently in RUNNING state.
 	RunningActors int `json:"running_actors,omitempty"`
 	// SuspendedActors is the total count of actors currently in SUSPENDED state.
 	SuspendedActors int `json:"suspended_actors,omitempty"`
+	// ActiveCohortActors is the count of actors in active/review states (codes 2..8).
+	ActiveCohortActors int `json:"active_cohort_actors,omitempty"`
+	// SnapshottedActors is the count of idle actors with a saved GCS memory snapshot (code 1).
+	SnapshottedActors int `json:"snapshotted_actors,omitempty"`
+	// LeasedActors is the count of actors holding an active human QR lease.
+	LeasedActors int `json:"leased_actors,omitempty"`
 }
 
 // WorkerPods is the worker pool's size and pod names as its autoscaler and Kubernetes API see them.
@@ -268,8 +277,8 @@ type ActorDetails struct {
 	Usage           ModelUsage       `json:"usage"`
 }
 
-// MaxSimulationAttendees is the upper bound on simulated virtual attendees (16^4 = 65,536).
-const MaxSimulationAttendees = 65536
+// MaxSimulationAttendees is the upper bound on simulated virtual attendees (64^4 = 16,777,216).
+const MaxSimulationAttendees = 16777216
 
 // SimulationRequest specifies actions to control the virtual attendee swarm.
 type SimulationRequest struct {

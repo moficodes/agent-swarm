@@ -46,6 +46,21 @@ spec:
       labels:
         app: data-generator-orchestrator
     spec:
+      tolerations:
+      - key: ate.dev/workloadType
+        operator: Equal
+        value: ate-system-infra
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: ate.dev/workloadType
+                operator: In
+                values:
+                - ate-system-infra
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -91,6 +106,21 @@ spec:
       labels:
         app: data-generator-worker
     spec:
+      tolerations:
+      - key: ate.dev/workloadType
+        operator: Equal
+        value: ate-system-infra
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: ate.dev/workloadType
+                operator: In
+                values:
+                - ate-system-infra
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -105,7 +135,7 @@ spec:
         - "-orchestrator-url=http://data-generator-orchestrator:8080"
         env:
         - name: WORKER_CONCURRENCY
-          value: "256"
+          value: "1024"
         resources:
           requests:
             cpu: 500m

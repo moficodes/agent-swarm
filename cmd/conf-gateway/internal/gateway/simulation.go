@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/simulation"
 	"github.com/agent-substrate/agent-swarm/internal/workload/engine"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
@@ -30,12 +31,15 @@ var simMockEngine = engine.NewMockEngine()
 // CanAcquireSimulatedSeat reports whether the worker pool has available seat
 // headroom for a simulated container turn. It reserves a small cushion for
 // live human attendees and in-flight checkpoint drains so simulated bursts can
-// pack pods to 13-16 seats/pod without triggering no-capacity errors.
+// pack pods without triggering no-capacity errors.
 func (g *Gateway) CanAcquireSimulatedSeat() bool {
 	if g.maxActors <= 256 {
 		return true
 	}
 	totalSeats := 4096
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		totalSeats = 262144
+	}
 	if p := g.workerPods.Load(); p != nil && p.Available && p.Current > 0 && g.seatsPerWorker > 0 {
 		totalSeats = p.Current * g.seatsPerWorker
 	}
@@ -52,6 +56,19 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 		return false
 	}
 	return true
+}
+
+// SeedSimulatedApprovalIndices bulk-marks simulated cohort slots as
+// AwaitingApproval in hyper mode without allocating 13.75M chat histories or
+// pending approval structs on the heap.
+func (g *Gateway) SeedSimulatedApprovalIndices(indices []int) {
+	if g.board == nil || len(indices) == 0 {
+		return
+	}
+	g.board.SeedSimulatedActivityIndices(indices, types.ActivityAwaitingApproval, types.SourceMock)
+	if g.control == nil {
+		g.board.SetUnavailable(localModeReason)
+	}
 }
 
 // SeedSimulatedApproval populates a checkpointed actor's human-in-the-loop
@@ -111,6 +128,16 @@ func WithSimulationDelays(readingDelay, loopDelay time.Duration) SimulationOptio
 // an external data-generator orchestrator and worker fleet.
 func WithDataGeneratorExecutor(orchestratorURL, callbackTurnURL, presenterKey string) SimulationOption {
 	return simulation.WithDataGenerator(orchestratorURL, callbackTurnURL, presenterKey)
+}
+
+// WithSimulationMaxConcurrentTurns sets the semaphore cap on concurrent simulated turns.
+func WithSimulationMaxConcurrentTurns(n int) SimulationOption {
+	return simulation.WithMaxConcurrentTurns(n)
+}
+
+// WithSimulationMaxTargetMPS overrides the peak target MPS configured on data-generator.
+func WithSimulationMaxTargetMPS(mps int) SimulationOption {
+	return simulation.WithMaxTargetMPS(mps)
 }
 
 // NewSimulationRunner constructs a SimulationRunner bound to the provided Gateway.

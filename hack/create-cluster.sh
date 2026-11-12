@@ -40,9 +40,9 @@ cc_validate_profile() {
   local p
   p="$(cc_profile)"
   case "${p}" in
-    swarm | megaswarm) return 0 ;;
+    swarm | megaswarm | hyperswarm) return 0 ;;
     *)
-      echo "error: unknown DEMO_CONF_PROFILE '${p}' (expected 'swarm' or 'megaswarm')" >&2
+      echo "error: unknown DEMO_CONF_PROFILE '${p}' (expected 'swarm', 'megaswarm', or 'hyperswarm')" >&2
       return 1
       ;;
   esac
@@ -51,6 +51,8 @@ cc_validate_profile() {
 cc_node_machine_type() {
   if [[ -n "${NODE_MACHINE_TYPE:-}" ]]; then
     echo "${NODE_MACHINE_TYPE}"
+  elif [[ "$(cc_profile)" == "hyperswarm" ]]; then
+    echo "n4-highmem-64"
   elif [[ "$(cc_profile)" == "megaswarm" ]]; then
     echo "c3-standard-8"
   else
@@ -58,9 +60,43 @@ cc_node_machine_type() {
   fi
 }
 
+cc_node_disk_type() {
+  if [[ -n "${NODE_DISK_TYPE:-}" ]]; then
+    echo "${NODE_DISK_TYPE}"
+    return
+  fi
+  local mt
+  mt="$(cc_node_machine_type)"
+  case "${mt}" in
+    n4-* | c4-* | c4a-* | c4d-*) echo "hyperdisk-balanced" ;;
+    *) echo "" ;;
+  esac
+}
+
+cc_node_disk_size() {
+  if [[ -n "${NODE_DISK_SIZE:-}" ]]; then
+    echo "${NODE_DISK_SIZE}"
+  elif [[ "$(cc_profile)" == "hyperswarm" ]]; then
+    echo "300"
+  else
+    echo ""
+  fi
+}
+
 cc_node_count() {
   if [[ -n "${NODE_COUNT:-}" ]]; then
     echo "${NODE_COUNT}"
+  elif [[ "$(cc_profile)" == "hyperswarm" ]]; then
+    if [[ -n "${NODE_LOCATIONS:-}" ]]; then
+      local -a zones
+      IFS=',' read -ra zones <<<"${NODE_LOCATIONS}"
+      local nz="${#zones[@]}"
+      if ((nz > 0 && 64 % nz == 0)); then
+        echo "$((64 / nz))"
+        return
+      fi
+    fi
+    echo "64"
   elif [[ "$(cc_profile)" == "megaswarm" ]]; then
     echo "16"
   else
@@ -114,7 +150,9 @@ cc_resolve_version() {
 # cc_create_args prints the `gcloud beta container clusters create` arguments
 # for VERSION, one per line.
 cc_create_args() {
-  local version="$1"
+  local version="$1" disk_type disk_size
+  disk_type="$(cc_node_disk_type)"
+  disk_size="$(cc_node_disk_size)"
   printf '%s\n' \
     "${CLUSTER_NAME}" \
     --project "${PROJECT_ID}" \
@@ -128,6 +166,16 @@ cc_create_args() {
     --subnetwork "${SUBNETWORK}" \
     --workload-pool "${PROJECT_ID}.svc.id.goog" \
     --managed-otel-scope COLLECTION_AND_INSTRUMENTATION_COMPONENTS
+  if [[ -n "${disk_type}" ]]; then
+    printf '%s\n' --disk-type "${disk_type}"
+  fi
+  if [[ -n "${disk_size}" ]]; then
+    printf '%s\n' --disk-size "${disk_size}"
+  fi
+  if [[ -n "${NODE_LOCATIONS:-}" ]]; then
+    printf '%s\n' --node-locations "${NODE_LOCATIONS}"
+  fi
+  printf '%s\n' --quiet
 }
 
 # cc_exclusion_args prints the `gcloud container clusters update` arguments
@@ -139,7 +187,8 @@ cc_exclusion_args() {
     --location "${CLUSTER_LOCATION}" \
     "--add-maintenance-exclusion-name=${CC_EXCLUSION}" \
     --add-maintenance-exclusion-scope=no_minor_or_node_upgrades \
-    --add-maintenance-exclusion-until-end-of-support
+    --add-maintenance-exclusion-until-end-of-support \
+    --quiet
 }
 
 # cc_lines_to_args reads stdin, one argument per line, into the array args
@@ -154,7 +203,61 @@ cc_lines_to_args() {
 
 cc_describe() {
   gcloud container clusters describe "${CLUSTER_NAME}" --project "${PROJECT_ID}" \
-    --location "${CLUSTER_LOCATION}" --format="$1"
+    --location "${CLUSTER_LOCATION}" --format="$1" --quiet
+}
+
+cc_pool_exists() {
+  gcloud container node-pools describe "$1" --cluster "${CLUSTER_NAME}" \
+    --project "${PROJECT_ID}" --location "${CLUSTER_LOCATION}" \
+    --format='value(name)' --quiet >/dev/null 2>&1
+}
+
+# cc_ensure_system_pools creates dedicated ate-postgres and ate-system-infra
+# node pools for the hyperswarm profile (matching ate-setup --cluster-size=size10
+# --cordon-system-infra-components) so the 64 worker nodes host only conf-workers.
+cc_ensure_system_pools() {
+  if [[ "$(cc_profile)" != "hyperswarm" || "${CC_SYSTEM_NODE_POOLS:-true}" != "true" ]]; then
+    return 0
+  fi
+  local pg_mt="${POSTGRES_MACHINE_TYPE:-c4-highmem-96}"
+  local pg_dt="${POSTGRES_DISK_TYPE:-hyperdisk-balanced}"
+  local pg_ds="${POSTGRES_DISK_SIZE:-200}"
+  local infra_mt="${INFRA_MACHINE_TYPE:-n4-standard-32}"
+  local infra_dt="${INFRA_DISK_TYPE:-hyperdisk-balanced}"
+  local infra_ds="${INFRA_DISK_SIZE:-200}"
+  local infra_count="${INFRA_NODE_COUNT:-3}"
+
+  if [[ "${CC_DRY_RUN}" == true ]] || ! cc_pool_exists ate-postgres; then
+    log_step "Ensuring dedicated PostgreSQL node pool ate-postgres (${pg_mt})..."
+    cc_run gcloud container node-pools create ate-postgres \
+      --cluster "${CLUSTER_NAME}" \
+      --project "${PROJECT_ID}" \
+      --location "${CLUSTER_LOCATION}" \
+      --node-locations "${CLUSTER_LOCATION}" \
+      --num-nodes 1 \
+      --machine-type "${pg_mt}" \
+      --disk-type "${pg_dt}" \
+      --disk-size "${pg_ds}" \
+      --node-labels "ate.dev/workloadType=ate-postgres" \
+      --node-taints "ate.dev/workloadType=ate-postgres:NoSchedule" \
+      --quiet
+  fi
+
+  if [[ "${CC_DRY_RUN}" == true ]] || ! cc_pool_exists ate-system-infra; then
+    log_step "Ensuring dedicated control-plane node pool ate-system-infra (${infra_count} x ${infra_mt})..."
+    cc_run gcloud container node-pools create ate-system-infra \
+      --cluster "${CLUSTER_NAME}" \
+      --project "${PROJECT_ID}" \
+      --location "${CLUSTER_LOCATION}" \
+      --node-locations "${CLUSTER_LOCATION}" \
+      --num-nodes "${infra_count}" \
+      --machine-type "${infra_mt}" \
+      --disk-type "${infra_dt}" \
+      --disk-size "${infra_ds}" \
+      --node-labels "ate.dev/workloadType=ate-system-infra" \
+      --node-taints "ate.dev/workloadType=ate-system-infra:NoSchedule" \
+      --quiet
+  fi
 }
 
 cc_create() {
@@ -171,6 +274,8 @@ cc_create() {
     cc_run gcloud beta container clusters create "${args[@]}"
   fi
 
+  cc_ensure_system_pools
+
   # gcloud cannot set a maintenance exclusion on create.
   if ! cc_describe 'value(maintenancePolicy.window.maintenanceExclusions)' 2>/dev/null | grep -qF "${CC_EXCLUSION}="; then
     log_step "Adding maintenance exclusion ${CC_EXCLUSION}..."
@@ -181,17 +286,23 @@ cc_create() {
   # get-credentials also makes the cluster the current kube context; put
   # the previous one back, since hack/deploy.sh takes KUBECTL_CONTEXT.
   previous="$(kubectl config current-context 2>/dev/null || true)"
-  cc_run gcloud container clusters get-credentials "${CLUSTER_NAME}" --project "${PROJECT_ID}" --location "${CLUSTER_LOCATION}"
+  cc_run gcloud container clusters get-credentials "${CLUSTER_NAME}" --project "${PROJECT_ID}" --location "${CLUSTER_LOCATION}" --quiet
   if [[ -n "${previous}" && "${previous}" != "${context}" ]]; then
     cc_run kubectl config use-context "${previous}" >/dev/null
   fi
 
   log_step "Cluster ready. Deploy with:"
-  if [[ "$(cc_profile)" == "megaswarm" ]]; then
-    echo "  KUBECTL_CONTEXT=${context} hack/deploy.sh up --profile=megaswarm"
-  else
-    echo "  KUBECTL_CONTEXT=${context} hack/deploy.sh up"
-  fi
+  case "$(cc_profile)" in
+    hyperswarm)
+      echo "  KUBECTL_CONTEXT=${context} hack/deploy.sh up --profile=hyperswarm"
+      ;;
+    megaswarm)
+      echo "  KUBECTL_CONTEXT=${context} hack/deploy.sh up --profile=megaswarm"
+      ;;
+    *)
+      echo "  KUBECTL_CONTEXT=${context} hack/deploy.sh up"
+      ;;
+  esac
 }
 
 cc_main() {
@@ -201,7 +312,7 @@ cc_main() {
       --profile=*) DEMO_CONF_PROFILE="${1#--profile=}" ;;
       --profile)
         if (($# < 2)); then
-          echo "error: --profile requires an argument (swarm or megaswarm)" >&2
+          echo "error: --profile requires an argument (swarm, megaswarm, or hyperswarm)" >&2
           cc_usage
           return 1
         fi
@@ -230,19 +341,22 @@ cc_main() {
 }
 
 cc_usage() {
-  echo "Usage: $0 [--profile=swarm|megaswarm] [--dry-run]"
+  echo "Usage: $0 [--profile=swarm|megaswarm|hyperswarm] [--dry-run]"
   echo "  Creates a GKE cluster for Substrate on the newest GKE_MINOR_VERSION release, with a"
   echo "  maintenance exclusion against node upgrades. On an existing cluster it adds the"
   echo "  exclusion if missing and leaves the version alone. --dry-run prints the gcloud"
   echo "  commands that change anything."
-  echo "  --profile=swarm|megaswarm select cluster size preset (default: DEMO_CONF_PROFILE=swarm):"
-  echo "                             swarm     : 2 x c3-standard-4 nodes"
-  echo "                             megaswarm : 16 x c3-standard-8 nodes"
+  echo "  --profile=swarm|megaswarm|hyperswarm select cluster size preset (default: DEMO_CONF_PROFILE=swarm):"
+  echo "                             swarm      : 2 x c3-standard-4 nodes"
+  echo "                             megaswarm  : 16 x c3-standard-8 nodes"
+  echo "                             hyperswarm : 64 x n4-highmem-64 worker nodes + size10 Postgres & infra pools"
   echo "  Required env: PROJECT_ID, CLUSTER_NAME"
-  echo "  Optional env: DEMO_CONF_PROFILE (default swarm; 'swarm' or 'megaswarm'),"
-  echo "                CLUSTER_LOCATION (default us-west1-c), NETWORK, SUBNETWORK (default default),"
-  echo "                NODE_MACHINE_TYPE (default c3-standard-4 for swarm, c3-standard-8 for megaswarm),"
-  echo "                NODE_COUNT (default 2 for swarm, 16 for megaswarm),"
+  echo "  Optional env: DEMO_CONF_PROFILE (default swarm; 'swarm', 'megaswarm', or 'hyperswarm'),"
+  echo "                CLUSTER_LOCATION (default us-west1-c), NODE_LOCATIONS (optional comma-separated zones),"
+  echo "                NETWORK, SUBNETWORK (default default),"
+  echo "                NODE_MACHINE_TYPE (default c3-standard-4 / c3-standard-8 / n4-highmem-64),"
+  echo "                NODE_COUNT (default 2 / 16 / 64 across NODE_LOCATIONS),"
+  echo "                NODE_DISK_TYPE, NODE_DISK_SIZE, CC_SYSTEM_NODE_POOLS (default true on hyperswarm),"
   echo "                GKE_RELEASE_CHANNEL (default rapid), GKE_MINOR_VERSION (default 1.37)"
   echo "  substrate-gke's .ate-dev-env.sh sets these names; source it or export them yourself."
 }

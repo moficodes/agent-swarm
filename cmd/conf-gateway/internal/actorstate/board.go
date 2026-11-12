@@ -15,6 +15,7 @@
 package actorstate
 
 import (
+	"encoding/binary"
 	"fmt"
 	"maps"
 	"slices"
@@ -24,12 +25,111 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
+// CompactFleetThreshold is the actor count above which TelemetrySnapshot emits
+// a 1-byte-per-actor FleetCompact string and prunes idle suspended actors from
+// the JSON Actors map.
+const CompactFleetThreshold = 256
+
+// HyperFleetThreshold is the actor count above which Board switches to
+// compact 1-byte-per-actor state storage (keeping full ActorView structs only
+// for active/seated actors) and active-worker polling instead of storing and
+// paging millions of idle ActorView structs.
+const HyperFleetThreshold = 65536
+
+const (
+	compactCheckpointed byte = 1 << 0
+	compactActShift          = 1
+	compactActMask      byte = 0x03 << compactActShift
+	compactMockSource   byte = 1 << 3
+	compactUnavailable  byte = 1 << 4
+)
+
+func encodeCompactActivity(a types.Activity) byte {
+	switch a {
+	case types.ActivityThinking:
+		return 1 << compactActShift
+	case types.ActivityAwaitingApproval:
+		return 2 << compactActShift
+	case types.ActivityExecuting:
+		return 3 << compactActShift
+	default:
+		return 0
+	}
+}
+
+func decodeCompactActivity(cb byte) types.Activity {
+	switch (cb & compactActMask) >> compactActShift {
+	case 1:
+		return types.ActivityThinking
+	case 2:
+		return types.ActivityAwaitingApproval
+	case 3:
+		return types.ActivityExecuting
+	default:
+		return types.ActivityIdle
+	}
+}
+
+func compactByteToBadgeCode(cb byte) byte {
+	if (cb & compactUnavailable) != 0 {
+		return 8
+	}
+	switch (cb & compactActMask) >> compactActShift {
+	case 3:
+		return 7 // Executing
+	case 2:
+		return 6 // AwaitingApproval
+	case 1:
+		return 5 // Thinking
+	default:
+		if (cb & compactCheckpointed) != 0 {
+			return 1 // Checkpointed SUSPENDED
+		}
+		return 0 // NeverStarted SUSPENDED
+	}
+}
+
+// ParseAttendeeIndex parses "attendee-<N>" into 1-based index N in [1..maxActors]
+// without heap allocations.
+func ParseAttendeeIndex(name string, maxActors int) (int, bool) {
+	const prefix = "attendee-"
+	if len(name) <= len(prefix) || !strings.HasPrefix(name, prefix) {
+		return 0, false
+	}
+	n := 0
+	for i := len(prefix); i < len(name); i++ {
+		ch := name[i]
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		n = n*10 + int(ch-'0')
+		if n > maxActors {
+			return 0, false
+		}
+	}
+	if n < 1 {
+		return 0, false
+	}
+	return n, true
+}
+
+func isSeatedView(v types.ActorView) bool {
+	return v.WorkerPod != "" ||
+		v.State == types.StateRunning ||
+		v.State == types.StateResuming ||
+		v.State == types.StateSuspending
+}
+
 // Board holds the latest view of every actor and publishes each change.
 type Board struct {
 	publish func(types.ActorView)
 
-	mu    sync.Mutex
-	views map[string]types.ActorView
+	mu              sync.Mutex
+	views           map[string]types.ActorView
+	activeSeatCount int
+	hyperCount      int
+	compact         []byte
+	unavailableMsg  string
 
 	// pubMu serializes publish calls in commit order. It is acquired while
 	// mu is still held, so the order in which updates commit their views is
@@ -43,7 +143,86 @@ type Board struct {
 // that orders publishes, and a concurrent update may hold the board lock
 // while it waits for that one.
 func NewBoard(publish func(types.ActorView)) *Board {
-	return &Board{publish: publish, views: map[string]types.ActorView{}}
+	return NewBoardWithCapacity(publish, 0)
+}
+
+// NewBoardWithCapacity returns a Board sized for maxActors. When maxActors
+// exceeds HyperFleetThreshold, idle actors are stored in a compact 1-byte
+// array (16 MiB for 16,777,216 actors) rather than a 16.78M-entry string map.
+func NewBoardWithCapacity(publish func(types.ActorView), maxActors int) *Board {
+	b := &Board{
+		publish: publish,
+		views:   map[string]types.ActorView{},
+	}
+	if maxActors > HyperFleetThreshold {
+		b.hyperCount = maxActors
+		b.compact = make([]byte, maxActors)
+	}
+	return b
+}
+
+// IsHyperMode reports whether this Board uses compact byte-array storage.
+func (b *Board) IsHyperMode() bool {
+	return b.hyperCount > 0
+}
+
+func (b *Board) hyperViewLocked(name string, idx int) types.ActorView {
+	if v, ok := b.views[name]; ok {
+		return v
+	}
+	cb := b.compact[idx-1]
+	state := types.StateSuspended
+	detail := ""
+	neverStarted := (cb & compactCheckpointed) == 0
+	if (cb & compactUnavailable) != 0 {
+		state = types.StateUnavailable
+		detail = b.unavailableMsg
+		neverStarted = false
+	}
+	var src types.ReplySource
+	if (cb & compactMockSource) != 0 {
+		src = types.SourceMock
+	}
+	return types.ActorView{
+		ActorID:      name,
+		State:        state,
+		StateDetail:  detail,
+		NeverStarted: neverStarted,
+		Activity:     decodeCompactActivity(cb),
+		Source:       src,
+	}
+}
+
+func (b *Board) syncCompactFromViewLocked(idx int, v types.ActorView) {
+	if idx < 1 || idx > len(b.compact) {
+		return
+	}
+	cb := b.compact[idx-1]
+	if !v.NeverStarted && v.State != types.StateUnknown && v.State != types.StateUnavailable {
+		cb |= compactCheckpointed
+	}
+	cb = (cb &^ compactActMask) | encodeCompactActivity(v.Activity)
+	if v.Source == types.SourceMock {
+		cb |= compactMockSource
+	} else if v.Source == "" {
+		cb &^= compactMockSource
+	}
+	if v.State == types.StateUnavailable {
+		cb |= compactUnavailable
+	} else {
+		cb &^= compactUnavailable
+	}
+	b.compact[idx-1] = cb
+}
+
+func (b *Board) shouldRetainInHyperMap(v types.ActorView) bool {
+	return v.WorkerPod != "" ||
+		v.State == types.StateRunning ||
+		v.State == types.StateResuming ||
+		v.State == types.StateSuspending ||
+		v.State == types.StateCrashed ||
+		v.VolumeShare != "" ||
+		(v.Source != "" && v.Source != types.SourceMock)
 }
 
 // update applies fn to each named view and publishes the ones that changed.
@@ -51,7 +230,37 @@ func (b *Board) update(names []string, fn func(*types.ActorView)) {
 	var changed []types.ActorView
 	b.mu.Lock()
 	for _, name := range names {
+		if b.hyperCount > 0 {
+			if idx, ok := ParseAttendeeIndex(name, b.hyperCount); ok {
+				old := b.hyperViewLocked(name, idx)
+				_, wasInMap := b.views[name]
+				wasSeated := wasInMap && isSeatedView(old)
+				v := old
+				fn(&v)
+				if v != old {
+					b.syncCompactFromViewLocked(idx, v)
+					nowSeated := isSeatedView(v)
+					if b.shouldRetainInHyperMap(v) {
+						b.views[name] = v
+						if !wasSeated && nowSeated {
+							b.activeSeatCount++
+						} else if wasSeated && !nowSeated {
+							b.activeSeatCount--
+						}
+					} else if wasInMap {
+						delete(b.views, name)
+						if wasSeated {
+							b.activeSeatCount--
+						}
+					}
+					changed = append(changed, v)
+				}
+				continue
+			}
+		}
+
 		old, ok := b.views[name]
+		wasSeated := ok && isSeatedView(old)
 		if !ok {
 			old = types.ActorView{ActorID: name, State: types.StateUnknown}
 		}
@@ -59,6 +268,12 @@ func (b *Board) update(names []string, fn func(*types.ActorView)) {
 		fn(&v)
 		if !ok || v != old {
 			b.views[name] = v
+			nowSeated := isSeatedView(v)
+			if !wasSeated && nowSeated {
+				b.activeSeatCount++
+			} else if wasSeated && !nowSeated {
+				b.activeSeatCount--
+			}
 			changed = append(changed, v)
 		}
 	}
@@ -79,6 +294,11 @@ func (b *Board) names() []string {
 // SetStatuses applies one ateapi listing. Known actors missing from it
 // become UNKNOWN.
 func (b *Board) SetStatuses(statuses []Status) {
+	if b.hyperCount > 0 {
+		b.SetActiveStatuses(statuses)
+		return
+	}
+
 	byName := make(map[string]Status, len(statuses))
 	for _, s := range statuses {
 		byName[s.Name] = s
@@ -117,6 +337,13 @@ func (b *Board) SetStatuses(statuses []Status) {
 			apply(name, Status{}, false)
 		}
 	}
+	activeSeats := 0
+	for _, v := range b.views {
+		if isSeatedView(v) {
+			activeSeats++
+		}
+	}
+	b.activeSeatCount = activeSeats
 	slices.SortFunc(changed, func(a, b types.ActorView) int {
 		return strings.Compare(a.ActorID, b.ActorID)
 	})
@@ -128,8 +355,130 @@ func (b *Board) SetStatuses(statuses []Status) {
 	b.pubMu.Unlock()
 }
 
+// SetActiveStatuses updates a hyper-mode Board from the list of currently
+// seated actors reported by ListWorkers + ListWorkerActorAssignments. Actors
+// previously seated that are no longer in statuses transition cleanly back to
+// checkpointed SUSPENDED in the compact array and are evicted from b.views.
+func (b *Board) SetActiveStatuses(statuses []Status) {
+	if b.hyperCount == 0 {
+		b.SetStatuses(statuses)
+		return
+	}
+
+	byName := make(map[string]Status, len(statuses))
+	for _, s := range statuses {
+		byName[s.Name] = s
+	}
+
+	var changed []types.ActorView
+	b.mu.Lock()
+	b.unavailableMsg = ""
+	for i := range b.compact {
+		b.compact[i] &^= compactUnavailable
+	}
+
+	for name, s := range byName {
+		idx, validIdx := ParseAttendeeIndex(name, b.hyperCount)
+		var old types.ActorView
+		existed := false
+		if cur, ok := b.views[name]; ok {
+			old = cur
+			existed = true
+		} else if validIdx {
+			old = b.hyperViewLocked(name, idx)
+			existed = true
+		} else {
+			old = types.ActorView{ActorID: name, State: types.StateUnknown}
+		}
+		v := old
+		v.State, v.StateDetail, v.WorkerPod = s.State, "", s.WorkerPod
+		if s.SnapshotURI != "" {
+			v.SnapshotURI = s.SnapshotURI
+		}
+		if s.InProgressSnapshotURI != "" {
+			v.SnapshotURI = s.InProgressSnapshotURI
+		}
+		if s.VolumeType != "" {
+			v.VolumeType, v.VolumeShare, v.VolumeURI = s.VolumeType, s.VolumeShare, s.VolumeURI
+		}
+		v.NeverStarted = false
+		if validIdx {
+			b.compact[idx-1] |= compactCheckpointed
+			b.syncCompactFromViewLocked(idx, v)
+		}
+		if !existed || v != old {
+			b.views[name] = v
+			changed = append(changed, v)
+		} else {
+			b.views[name] = v
+		}
+	}
+
+	for name, old := range b.views {
+		if _, stillActive := byName[name]; stillActive {
+			continue
+		}
+		v := old
+		v.State = types.StateSuspended
+		v.StateDetail = ""
+		v.WorkerPod = ""
+		v.NeverStarted = false
+		if idx, validIdx := ParseAttendeeIndex(name, b.hyperCount); validIdx {
+			b.compact[idx-1] |= compactCheckpointed
+			b.syncCompactFromViewLocked(idx, v)
+		}
+		if b.shouldRetainInHyperMap(v) {
+			b.views[name] = v
+		} else {
+			delete(b.views, name)
+		}
+		if v != old {
+			changed = append(changed, v)
+		}
+	}
+
+	activeSeats := 0
+	for _, v := range b.views {
+		if isSeatedView(v) {
+			activeSeats++
+		}
+	}
+	b.activeSeatCount = activeSeats
+	b.pubMu.Lock()
+	b.mu.Unlock()
+	for _, v := range changed {
+		b.publish(v)
+	}
+	b.pubMu.Unlock()
+}
+
 // SetUnavailable marks every known actor's state as unreadable.
 func (b *Board) SetUnavailable(reason string) {
+	if b.hyperCount > 0 {
+		b.mu.Lock()
+		b.unavailableMsg = reason
+		for i := range b.compact {
+			b.compact[i] |= compactUnavailable
+		}
+		var changed []types.ActorView
+		for name, old := range b.views {
+			v := old
+			v.State, v.StateDetail, v.WorkerPod, v.NeverStarted = types.StateUnavailable, reason, "", false
+			if v != old {
+				b.views[name] = v
+				changed = append(changed, v)
+			}
+		}
+		b.activeSeatCount = 0
+		b.pubMu.Lock()
+		b.mu.Unlock()
+		for _, v := range changed {
+			b.publish(v)
+		}
+		b.pubMu.Unlock()
+		return
+	}
+
 	b.update(b.names(), func(v *types.ActorView) {
 		v.State, v.StateDetail, v.WorkerPod, v.NeverStarted = types.StateUnavailable, reason, "", false
 	})
@@ -153,14 +502,102 @@ func (b *Board) SeedSimulatedActivity(actor string, a types.Activity, s types.Re
 	})
 }
 
+// SeedSimulatedActivityIndices bulk-updates simulated activity and reply source
+// by 1-based actor indices without string formatting or map growth in hyper mode.
+func (b *Board) SeedSimulatedActivityIndices(indices []int, a types.Activity, s types.ReplySource) {
+	if b.hyperCount == 0 {
+		for _, idx := range indices {
+			b.SeedSimulatedActivity(fmt.Sprintf("attendee-%02d", idx), a, s)
+		}
+		return
+	}
+	actBits := encodeCompactActivity(a)
+	var srcBit byte
+	if s == types.SourceMock {
+		srcBit = compactMockSource
+	}
+	b.mu.Lock()
+	for _, idx := range indices {
+		if idx < 1 || idx > len(b.compact) {
+			continue
+		}
+		cb := b.compact[idx-1]
+		cb = (cb &^ (compactActMask | compactMockSource)) | actBits | srcBit
+		b.compact[idx-1] = cb
+	}
+	b.mu.Unlock()
+}
+
 // Reset clears gateway-side activity and reply source on every actor.
 func (b *Board) Reset() {
+	if b.hyperCount > 0 {
+		b.mu.Lock()
+		for i := range b.compact {
+			b.compact[i] &^= (compactActMask | compactMockSource)
+		}
+		names := slices.Collect(maps.Keys(b.views))
+		b.mu.Unlock()
+		if len(names) > 0 {
+			b.update(names, func(v *types.ActorView) { v.Activity, v.Source = types.ActivityIdle, "" })
+		}
+		return
+	}
 	b.update(b.names(), func(v *types.ActorView) { v.Activity, v.Source = types.ActivityIdle, "" })
 }
 
 // ClearUnleasedActivity resets gateway-side activity to ActivityIdle on every
 // actor that is not currently leased by a live human attendee.
 func (b *Board) ClearUnleasedActivity(isLeased func(string) bool) {
+	b.ClearUnleasedActivityWithStride(isLeased, 0)
+}
+
+// ClearUnleasedActivityWithStride resets gateway-side activity to ActivityIdle
+// on every actor not protected by isLeased or humanStride.
+func (b *Board) ClearUnleasedActivityWithStride(isLeased func(string) bool, humanStride int) {
+	b.ClearUnleasedActivityIndices(nil, isLeased, humanStride)
+}
+
+// ClearUnleasedActivityIndices resets gateway-side activity to ActivityIdle on
+// every actor not in protectedIndices or humanStride, avoiding per-actor string
+// formatting and mutex callbacks across 16.78M hyper-mode entries.
+func (b *Board) ClearUnleasedActivityIndices(protectedIndices map[int]bool, isLeased func(string) bool, humanStride int) {
+	if b.hyperCount > 0 {
+		b.mu.Lock()
+		for i := range b.compact {
+			if (b.compact[i] & compactActMask) == 0 {
+				continue
+			}
+			idx := i + 1
+			if humanStride > 1 && idx%humanStride == 0 {
+				continue
+			}
+			if len(protectedIndices) > 0 && protectedIndices[idx] {
+				continue
+			}
+			if protectedIndices == nil && isLeased != nil && isLeased(fmt.Sprintf("attendee-%02d", idx)) {
+				continue
+			}
+			b.compact[i] &^= compactActMask
+		}
+		var targetNames []string
+		for name, v := range b.views {
+			if v.Activity == types.ActivityIdle || v.Activity == "" {
+				continue
+			}
+			if isLeased != nil && isLeased(name) {
+				continue
+			}
+			targetNames = append(targetNames, name)
+		}
+		b.mu.Unlock()
+		if len(targetNames) > 0 {
+			b.update(targetNames, func(v *types.ActorView) {
+				v.Activity = types.ActivityIdle
+			})
+		}
+		return
+	}
+
 	var targetNames []string
 	b.mu.Lock()
 	for name, v := range b.views {
@@ -184,11 +621,18 @@ func (b *Board) ClearUnleasedActivity(isLeased func(string) bool) {
 func (b *Board) View(actor string) (types.ActorView, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	v, ok := b.views[actor]
-	return v, ok
+	if v, ok := b.views[actor]; ok {
+		return v, true
+	}
+	if b.hyperCount > 0 {
+		if idx, ok := ParseAttendeeIndex(actor, b.hyperCount); ok {
+			return b.hyperViewLocked(actor, idx), true
+		}
+	}
+	return types.ActorView{}, false
 }
 
-// Views returns a copy of every view.
+// Views returns a copy of every tracked view (in hyper mode, only active/retained views).
 func (b *Board) Views() map[string]types.ActorView {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -200,19 +644,8 @@ func (b *Board) Views() map[string]types.ActorView {
 func (b *Board) ActiveSeatCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	count := 0
-	for _, v := range b.views {
-		if v.WorkerPod != "" || v.State == types.StateRunning || v.State == types.StateResuming || v.State == types.StateSuspending {
-			count++
-		}
-	}
-	return count
+	return b.activeSeatCount
 }
-
-// CompactFleetThreshold is the actor count above which TelemetrySnapshot emits
-// a 1-byte-per-actor FleetCompact string and prunes idle suspended actors from
-// the JSON Actors map.
-const CompactFleetThreshold = 256
 
 // EncodeBadgeCode maps an ActorView and lease status to a 5-bit compact code:
 // bits 0..3 = badge state (0..9), bit 4 (16) = leased by a live attendee.
@@ -254,10 +687,111 @@ func EncodeBadgeCode(v types.ActorView, leased bool) byte {
 	return code
 }
 
-// TelemetrySnapshot returns the actor map and compact fleet encoding for /api/telemetry.
+// TelemetrySnapshot returns the actor map and compact fleet encoding for /api/stage/telemetry.
 func (b *Board) TelemetrySnapshot(maxActors int, isLeased func(string) bool) (actors map[string]types.ActorView, compact string, runningCount, suspendedCount int) {
+	return b.TelemetrySnapshotWithLeases(maxActors, isLeased, nil)
+}
+
+// TelemetrySnapshotWithLeases is TelemetrySnapshot with an optional explicit
+// list of leased attendee IDs so hyper-mode snapshots avoid calling isLeased
+// 16.78 million times.
+func (b *Board) TelemetrySnapshotWithLeases(maxActors int, isLeased func(string) bool, leasedIDs []string) (actors map[string]types.ActorView, compact string, runningCount, suspendedCount int) {
+	actors, compact, runningCount, suspendedCount, _, _, _ = b.TelemetrySnapshotOptions(maxActors, isLeased, leasedIDs, true)
+	return actors, compact, runningCount, suspendedCount
+}
+
+// TelemetrySnapshotOptions returns the actor map, optional compact string, and
+// fleet summary counters. When includeCompact is false in hyper mode, it omits
+// allocating the 16.78M-byte ASCII string while still computing exact counters.
+func (b *Board) TelemetrySnapshotOptions(maxActors int, isLeased func(string) bool, leasedIDs []string, includeCompact bool) (actors map[string]types.ActorView, compact string, runningCount, suspendedCount, activeCohortCount, snapshottedCount, leasedCount int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if b.hyperCount > 0 && maxActors > HyperFleetThreshold {
+		n := min(maxActors, len(b.compact))
+		var buf []byte
+		if includeCompact {
+			buf = make([]byte, maxActors)
+		}
+		for i := 0; i < n; i++ {
+			code := compactByteToBadgeCode(b.compact[i])
+			if buf != nil {
+				buf[i] = '@' + code
+			}
+			if code == 1 {
+				snapshottedCount++
+			} else if code >= 2 && code <= 8 {
+				activeCohortCount++
+			}
+		}
+		if buf != nil {
+			for i := n; i < maxActors; i++ {
+				buf[i] = '@' + 9
+			}
+		}
+
+		nonSuspendedInViews := 0
+		actors = make(map[string]types.ActorView, len(b.views)+len(leasedIDs)+1)
+		for name, v := range b.views {
+			leased := isLeased != nil && isLeased(name)
+			if leased {
+				leasedCount++
+			}
+			v.Leased = leased
+			if v.State == types.StateRunning {
+				runningCount++
+			}
+			if v.State != types.StateSuspended {
+				nonSuspendedInViews++
+			}
+			if idx, ok := ParseAttendeeIndex(name, maxActors); ok {
+				var oldCode byte
+				if idx-1 < n {
+					oldCode = compactByteToBadgeCode(b.compact[idx-1])
+				}
+				newRaw := EncodeBadgeCode(v, leased)
+				newCode := newRaw & 15
+				if oldCode != newCode {
+					if oldCode == 1 {
+						snapshottedCount--
+					} else if oldCode >= 2 && oldCode <= 8 {
+						activeCohortCount--
+					}
+					if newCode == 1 {
+						snapshottedCount++
+					} else if newCode >= 2 && newCode <= 8 {
+						activeCohortCount++
+					}
+				}
+				if buf != nil {
+					buf[idx-1] = '@' + newRaw
+				}
+			}
+			if v.WorkerPod != "" || leased || v.State == types.StateCrashed {
+				actors[name] = v
+			}
+		}
+		for _, id := range leasedIDs {
+			if idx, ok := ParseAttendeeIndex(id, maxActors); ok {
+				if _, inMap := b.views[id]; !inMap {
+					leasedCount++
+					v := b.hyperViewLocked(id, idx)
+					v.Leased = true
+					if buf != nil {
+						buf[idx-1] = '@' + EncodeBadgeCode(v, true)
+					}
+					actors[id] = v
+				}
+			}
+		}
+		if (b.unavailableMsg == "") && maxActors >= nonSuspendedInViews {
+			suspendedCount = maxActors - nonSuspendedInViews
+		}
+		if buf != nil {
+			compact = string(buf)
+		}
+		return actors, compact, runningCount, suspendedCount, activeCohortCount, snapshottedCount, leasedCount
+	}
 
 	for _, v := range b.views {
 		switch v.State {
@@ -273,10 +807,17 @@ func (b *Board) TelemetrySnapshot(maxActors int, isLeased func(string) bool) (ac
 		for k, v := range b.views {
 			if isLeased != nil && isLeased(k) {
 				v.Leased = true
+				leasedCount++
+			}
+			code := EncodeBadgeCode(v, v.Leased) & 15
+			if code == 1 {
+				snapshottedCount++
+			} else if code >= 2 && code <= 8 {
+				activeCohortCount++
 			}
 			actors[k] = v
 		}
-		return actors, "", runningCount, suspendedCount
+		return actors, "", runningCount, suspendedCount, activeCohortCount, snapshottedCount, leasedCount
 	}
 
 	buf := make([]byte, maxActors)
@@ -288,8 +829,18 @@ func (b *Board) TelemetrySnapshot(maxActors int, isLeased func(string) bool) (ac
 			v = types.ActorView{ActorID: id, State: types.StateUnknown}
 		}
 		leased := isLeased != nil && isLeased(id)
+		if leased {
+			leasedCount++
+		}
 		v.Leased = leased
-		buf[i-1] = '@' + EncodeBadgeCode(v, leased)
+		raw := EncodeBadgeCode(v, leased)
+		code := raw & 15
+		if code == 1 {
+			snapshottedCount++
+		} else if code >= 2 && code <= 8 {
+			activeCohortCount++
+		}
+		buf[i-1] = '@' + raw
 
 		isActive := v.WorkerPod != "" ||
 			v.State == types.StateRunning ||
@@ -301,5 +852,116 @@ func (b *Board) TelemetrySnapshot(maxActors int, isLeased func(string) bool) (ac
 			actors[id] = v
 		}
 	}
-	return actors, string(buf), runningCount, suspendedCount
+	if includeCompact {
+		compact = string(buf)
+	}
+	return actors, compact, runningCount, suspendedCount, activeCohortCount, snapshottedCount, leasedCount
+}
+
+// FleetBinaryHeaderBytes is the fixed 24-byte header prefix of /api/stage/fleet.bin:
+// [0..3]  magic "SWFL"
+// [4..7]  version uint32 LE (= 1)
+// [8..11] actorCount uint32 LE
+// [12..15] activeCohortCount uint32 LE
+// [16..19] snapshottedCount uint32 LE
+// [20..23] leasedCount uint32 LE
+// followed by actorCount raw bytes (bits 0..3 = badge code 0..9, bit 4 = leased, bit 5 = seated on pod).
+const FleetBinaryHeaderBytes = 24
+
+// FleetBinarySnapshot encodes the entire fleet into a compact binary frame for
+// zero-JSON-allocation WebGL2 / ImageData rendering on /stage.
+func (b *Board) FleetBinarySnapshot(maxActors int, isLeased func(string) bool, leasedIDs []string) []byte {
+	if maxActors < 0 {
+		maxActors = 0
+	}
+	out := make([]byte, FleetBinaryHeaderBytes+maxActors)
+	copy(out[0:4], "SWFL")
+	binary.LittleEndian.PutUint32(out[4:8], 1)
+	binary.LittleEndian.PutUint32(out[8:12], uint32(maxActors)) //nolint:gosec
+
+	payload := out[FleetBinaryHeaderBytes:]
+	var activeCount, snapshottedCount, leasedCount uint32
+
+	b.mu.Lock()
+	if b.hyperCount > 0 && maxActors > HyperFleetThreshold {
+		n := min(maxActors, len(b.compact))
+		for i := 0; i < n; i++ {
+			code := compactByteToBadgeCode(b.compact[i])
+			payload[i] = code
+			if code == 1 {
+				snapshottedCount++
+			} else if code >= 2 && code <= 8 {
+				activeCount++
+			}
+		}
+		for i := n; i < maxActors; i++ {
+			payload[i] = 9
+		}
+		for name, v := range b.views {
+			idx, ok := ParseAttendeeIndex(name, maxActors)
+			if !ok {
+				continue
+			}
+			leased := isLeased != nil && isLeased(name)
+			if leased {
+				leasedCount++
+			}
+			oldCode := payload[idx-1] & 15
+			raw := EncodeBadgeCode(v, leased)
+			newCode := raw & 15
+			if oldCode != newCode {
+				if oldCode == 1 && snapshottedCount > 0 {
+					snapshottedCount--
+				} else if oldCode >= 2 && oldCode <= 8 && activeCount > 0 {
+					activeCount--
+				}
+				if newCode == 1 {
+					snapshottedCount++
+				} else if newCode >= 2 && newCode <= 8 {
+					activeCount++
+				}
+			}
+			if v.WorkerPod != "" || isSeatedView(v) {
+				raw |= 32
+			}
+			payload[idx-1] = raw
+		}
+		for _, id := range leasedIDs {
+			if idx, ok := ParseAttendeeIndex(id, maxActors); ok {
+				if _, inMap := b.views[id]; !inMap {
+					leasedCount++
+					payload[idx-1] |= 16
+				}
+			}
+		}
+	} else {
+		for i := 1; i <= maxActors; i++ {
+			id := fmt.Sprintf("attendee-%02d", i)
+			v, ok := b.views[id]
+			if !ok {
+				v = types.ActorView{ActorID: id, State: types.StateUnknown}
+			}
+			leased := isLeased != nil && isLeased(id)
+			if leased {
+				leasedCount++
+			}
+			raw := EncodeBadgeCode(v, leased)
+			code := raw & 15
+			if code == 1 {
+				snapshottedCount++
+			} else if code >= 2 && code <= 8 {
+				activeCount++
+			}
+			if v.WorkerPod != "" || isSeatedView(v) {
+				raw |= 32
+			}
+			payload[i-1] = raw
+		}
+	}
+	b.mu.Unlock()
+
+	binary.LittleEndian.PutUint32(out[12:16], activeCount)
+	binary.LittleEndian.PutUint32(out[16:20], snapshottedCount)
+	binary.LittleEndian.PutUint32(out[20:24], leasedCount)
+	return out
 }

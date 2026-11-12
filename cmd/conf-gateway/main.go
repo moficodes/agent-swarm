@@ -110,6 +110,10 @@ type Config struct {
 	ActorCount int
 	// ActorsPerWorker is how many actors one worker pod hosts at once.
 	ActorsPerWorker int
+	// HumanSlotStride is the periodic reserved QR attendee slot stride (0 = auto).
+	HumanSlotStride int
+	// MaxSimulationMPS overrides the peak target MPS on data-generator for >65k runs.
+	MaxSimulationMPS int
 	// AllowedGoogleDomains lists Google Workspace domains whose verified users
 	// may sign in to presenter pages (/stage and /feed). Empty disables Google Sign-In.
 	AllowedGoogleDomains []string
@@ -216,6 +220,8 @@ func LoadConfig() Config {
 		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-3.8-flash"),
 		ActorCount:            envPositiveInt("ACTOR_COUNT", 50),
 		ActorsPerWorker:       envPositiveInt("ACTORS_PER_WORKER", 1),
+		HumanSlotStride:       envNonNegativeInt("HUMAN_SLOT_STRIDE", 0),
+		MaxSimulationMPS:      envNonNegativeInt("SIMULATION_MAX_MPS", 0),
 		AllowedGoogleDomains:  auth.NormalizeDomains([]string{os.Getenv("ALLOWED_GOOGLE_DOMAINS")}),
 		GoogleClientID:        strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
 		FirebaseAPIKey:        strings.TrimSpace(os.Getenv("FIREBASE_API_KEY")),
@@ -448,6 +454,8 @@ func main() {
 		gateway.WithPollInterval(cfg.StatePollInterval),
 		gateway.WithMaxActors(cfg.ActorCount),
 		gateway.WithSeatsPerWorker(cfg.ActorsPerWorker),
+		gateway.WithHumanSlotStride(cfg.HumanSlotStride),
+		gateway.WithMaxSimulationMPS(cfg.MaxSimulationMPS),
 		gateway.WithSuspendAfter(cfg.SuspendAfter),
 		gateway.WithSuspendDrainTimeout(20 * time.Second),
 		gateway.WithHTTPClient(routerHTTPClient),

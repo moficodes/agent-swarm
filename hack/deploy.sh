@@ -49,9 +49,9 @@ conf_validate_profile() {
   local p
   p="$(conf_profile)"
   case "${p}" in
-    swarm | megaswarm) return 0 ;;
+    swarm | megaswarm | hyperswarm) return 0 ;;
     *)
-      echo "error: unknown DEMO_CONF_PROFILE '${p}' (expected 'swarm' or 'megaswarm')" >&2
+      echo "error: unknown DEMO_CONF_PROFILE '${p}' (expected 'swarm', 'megaswarm', or 'hyperswarm')" >&2
       return 1
       ;;
   esac
@@ -60,6 +60,8 @@ conf_validate_profile() {
 conf_actors() {
   if [[ -n "${DEMO_CONF_ACTORS:-}" ]]; then
     echo "${DEMO_CONF_ACTORS}"
+  elif [[ "$(conf_profile)" == "hyperswarm" ]]; then
+    echo "16777216"
   elif [[ "$(conf_profile)" == "megaswarm" ]]; then
     echo "65536"
   else
@@ -70,6 +72,8 @@ conf_actors() {
 conf_min_workers() {
   if [[ -n "${DEMO_CONF_MIN_WORKERS:-}" ]]; then
     echo "${DEMO_CONF_MIN_WORKERS}"
+  elif [[ "$(conf_profile)" == "hyperswarm" ]]; then
+    echo "4096"
   elif [[ "$(conf_profile)" == "megaswarm" ]]; then
     echo "256"
   else
@@ -80,6 +84,8 @@ conf_min_workers() {
 conf_max_workers() {
   if [[ -n "${DEMO_CONF_MAX_WORKERS:-}" ]]; then
     echo "${DEMO_CONF_MAX_WORKERS}"
+  elif [[ "$(conf_profile)" == "hyperswarm" ]]; then
+    echo "4096"
   elif [[ "$(conf_profile)" == "megaswarm" ]]; then
     echo "256"
   else
@@ -90,10 +96,28 @@ conf_max_workers() {
 conf_actors_per_worker() {
   if [[ -n "${DEMO_CONF_ACTORS_PER_WORKER:-}" ]]; then
     echo "${DEMO_CONF_ACTORS_PER_WORKER}"
+  elif [[ "$(conf_profile)" == "hyperswarm" ]]; then
+    echo "64"
   elif [[ "$(conf_profile)" == "megaswarm" ]]; then
     echo "16"
   else
     echo "4"
+  fi
+}
+
+conf_human_slot_stride() {
+  if [[ -n "${HUMAN_SLOT_STRIDE:-}" ]]; then
+    echo "${HUMAN_SLOT_STRIDE}"
+    return
+  fi
+  local actors
+  actors="$(conf_actors)"
+  if ((10#${actors:-50} > 65536)) || { [[ "$(conf_profile)" == "hyperswarm" ]] && ((10#${actors:-50} >= 4096)); }; then
+    echo "4096"
+  elif ((10#${actors:-50} > 256)); then
+    echo "16"
+  else
+    echo "0"
   fi
 }
 
@@ -243,9 +267,9 @@ conf_ateapi_preview_enabled() {
 # active. Setting DEMO_CONF_STORAGE_CLASS=none skips external volumes.
 conf_resolve_storage_class() {
   if [[ -z "${DEMO_CONF_STORAGE_CLASS:-}" ]]; then
-    if [[ "$(conf_profile)" == "megaswarm" ]]; then
+    if [[ "$(conf_profile)" == "megaswarm" || "$(conf_profile)" == "hyperswarm" ]]; then
       DEMO_CONF_STORAGE_CLASS="none"
-      log_step "Profile megaswarm defaults to DEMO_CONF_STORAGE_CLASS=none (GCS snapshots + /tmp/workspace)"
+      log_step "Profile $(conf_profile) defaults to DEMO_CONF_STORAGE_CLASS=none (GCS snapshots + /tmp/workspace)"
     elif run_kubectl get storageclass "${DEMO_CONF_DEFAULT_STORAGE_CLASS}" >/dev/null 2>&1 \
         && run_kubectl get csidriverconfigs.ate.dev filestore.csi.storage.gke.io >/dev/null 2>&1; then
       DEMO_CONF_STORAGE_CLASS="${DEMO_CONF_DEFAULT_STORAGE_CLASS}"
@@ -298,7 +322,12 @@ conf_router_flags_ok() {
   if [[ -n "${spiffe}" ]] && ! conf_router_allows_spiffe "${args_json}" "${spiffe}"; then
     missing+=("--ingress-allowed-spiffe-ids=${spiffe}")
   fi
-  if ((10#${actors:-50} > 1024)); then
+  if [[ "$(conf_profile)" == "hyperswarm" ]] || ((10#${actors:-50} > 65536)); then
+    v="$(conf_flag_value "${args_json}" --parked-request-max)"
+    if [[ ! "${v}" =~ ^[0-9]+$ ]] || ((10#${v} < 65536)); then
+      missing+=("--parked-request-max=65536")
+    fi
+  elif ((10#${actors:-50} > 1024)); then
     v="$(conf_flag_value "${args_json}" --parked-request-max)"
     if [[ ! "${v}" =~ ^[0-9]+$ ]] || ((10#${v} < 4096)); then
       missing+=("--parked-request-max=4096")
@@ -461,9 +490,13 @@ conf_iam_retry() {
 
 conf_ensure_gsa() {
   local gsa="conf-gateway@${PROJECT_ID}.iam.gserviceaccount.com" created=false
+  if [[ "${DEMO_CONF_SKIP_IAM:-false}" == "true" ]]; then
+    DEMO_CONF_GATEWAY_GSA="${gsa}"
+    return 0
+  fi
   if ! gcloud iam service-accounts describe "${gsa}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
     gcloud iam service-accounts create conf-gateway --project "${PROJECT_ID}" \
-      --display-name "Conference demo gateway (Vertex AI only)"
+      --display-name "Conference demo gateway (Agent Platform only)"
     created=true
   fi
   conf_iam_retry "${created}" gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
@@ -505,7 +538,21 @@ conf_render() {
   local default_exec_min=800
   local default_exec_max=1600
   local default_suspend_after="2s"
-  if ((10#${actors:-50} > 256)); then
+  local default_datagen_replicas=8
+  local default_gw_mem_limit="4Gi"
+  local default_provision_shards=32
+  local default_provision_conc=64
+  if [[ "$(conf_profile)" == "hyperswarm" ]] || ((10#${actors:-50} > 65536)); then
+    default_actor_cpu=20
+    default_actor_mem=134217728
+    default_think_min=9000
+    default_think_max=13000
+    default_exec_min=8000
+    default_exec_max=12000
+    default_suspend_after="3s"
+    default_datagen_replicas=32
+    default_gw_mem_limit="16Gi"
+  elif ((10#${actors:-50} > 256)); then
     default_actor_cpu=100
     default_actor_mem=134217728
     default_think_min=9000
@@ -519,7 +566,10 @@ conf_render() {
   local cpu_headroom=$((10#${actor_cpu} / 2))
   local worker_cpu_req="${DEMO_CONF_WORKER_CPU_REQUEST:-500m}"
   local worker_mem_req="${DEMO_CONF_WORKER_MEMORY_REQUEST:-$((10#${seats} * 512 + 256))Mi}"
-  if ((10#${actor_cpu} < 1000)); then
+  if { [[ "$(conf_profile)" == "hyperswarm" ]] || ((10#${actors:-50} > 65536)); } && ((10#${actor_cpu} < 1000)); then
+    worker_cpu_req="${DEMO_CONF_WORKER_CPU_REQUEST:-750m}"
+    worker_mem_req="${DEMO_CONF_WORKER_MEMORY_REQUEST:-4096Mi}"
+  elif ((10#${actor_cpu} < 1000)); then
     worker_cpu_req="${DEMO_CONF_WORKER_CPU_REQUEST:-300m}"
     worker_mem_req="${DEMO_CONF_WORKER_MEMORY_REQUEST:-1024Mi}"
   fi
@@ -553,6 +603,9 @@ conf_render() {
       -e "s|\${MIN_WORKERS}|${min_workers}|g" \
       -e "s|\${MAX_WORKERS}|${max_workers}|g" \
       -e "s|\${ACTORS_PER_WORKER}|${seats}|g" \
+      -e "s|\${HUMAN_SLOT_STRIDE}|$(conf_human_slot_stride)|g" \
+      -e "s|\${SIMULATION_MAX_MPS}|${SIMULATION_MAX_MPS:-0}|g" \
+      -e "s|\${GATEWAY_MEMORY_LIMIT}|${DEMO_CONF_GATEWAY_MEMORY_LIMIT:-${default_gw_mem_limit}}|g" \
       -e "s|\${ACTOR_CPU_MILLICORES}|${actor_cpu}|g" \
       -e "s|\${ACTOR_MEMORY_BYTES}|${actor_mem}|g" \
       -e "s|\${ALLOWED_GOOGLE_DOMAINS}|${ALLOWED_GOOGLE_DOMAINS:-}|g" \
@@ -566,7 +619,9 @@ conf_render() {
       -e "s|\${SIMULATION_TURN_URL}|${DEMO_CONF_SIMULATION_TURN_URL:-http://conf-gateway/api/simulation/turn}|g" \
       -e "s|\${DATAGEN_ORCHESTRATOR_IMAGE}|${DEMO_CONF_DATAGEN_ORCHESTRATOR_IMAGE:-placeholder}|g" \
       -e "s|\${DATAGEN_WORKER_IMAGE}|${DEMO_CONF_DATAGEN_WORKER_IMAGE:-placeholder}|g" \
-      -e "s|\${DATAGEN_WORKER_REPLICAS}|${DEMO_CONF_DATAGEN_WORKER_REPLICAS:-8}|g" \
+      -e "s|\${DATAGEN_WORKER_REPLICAS}|${DEMO_CONF_DATAGEN_WORKER_REPLICAS:-${default_datagen_replicas}}|g" \
+      -e "s|\${PROVISION_SHARDS}|${DEMO_CONF_PROVISION_SHARDS:-${default_provision_shards}}|g" \
+      -e "s|\${PROVISION_CONCURRENCY}|${DEMO_CONF_PROVISION_CONCURRENCY:-${default_provision_conc}}|g" \
       -e "s|\${WORKER_CPU_REQUEST}|${worker_cpu_req}|g" \
       -e "s|\${WORKER_CPU_LIMIT}|$((10#${seats} * 10#${actor_cpu} + cpu_headroom))m|g" \
       -e "s|\${WORKER_MEMORY_REQUEST}|${worker_mem_req}|g" \
@@ -783,6 +838,22 @@ conf_check_substrate() {
       exit 1
     fi
     log_step "Installing Substrate from ${SUBSTRATE_REPO}..."
+    local -a extra_ate_flags=()
+    local pool_conns_env=""
+    local pg_sc_env=""
+    if [[ -n "${ATE_IMAGE_REPO:-}" ]]; then
+      extra_ate_flags+=(--image-repo="${ATE_IMAGE_REPO}" --image-tag="${ATE_IMAGE_TAG:-${pin}}")
+    fi
+    if [[ "$(conf_profile)" == "hyperswarm" ]] \
+        && [[ -n "$(run_kubectl get nodes -l ate.dev/workloadType=ate-postgres -o name 2>/dev/null)" ]] \
+        && [[ -n "$(run_kubectl get nodes -l ate.dev/workloadType=ate-system-infra -o name 2>/dev/null)" ]]; then
+      extra_ate_flags+=(--cluster-size=size10 --cordon-system-infra-components)
+      pool_conns_env="24"
+      if run_kubectl get storageclass dynamic-rwo >/dev/null 2>&1; then
+        pg_sc_env="dynamic-rwo"
+      fi
+      log_step "Detected ate-postgres & ate-system-infra pools: enabling --cluster-size=size10 --cordon-system-infra-components (poolMaxConns=24, storageClass=${pg_sc_env:-default})"
+    fi
     (
       cd "${SUBSTRATE_REPO}"
       if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
@@ -793,12 +864,22 @@ conf_check_substrate() {
       else
         SNAPSHOT_LOCATION="${SNAPSHOT_LOCATION:-gs://${BUCKET_NAME}/snapshots/}" \
         SNAPSHOT_TRANSFER_GSA_NAME="${SNAPSHOT_TRANSFER_GSA_NAME:-ate-snapshot-transfer}" \
+        ATE_API_POSTGRES_POOL_MAX_CONNS="${ATE_API_POSTGRES_POOL_MAX_CONNS:-${pool_conns_env}}" \
+        ATE_API_POSTGRES_STORAGE_CLASS="${ATE_API_POSTGRES_STORAGE_CLASS:-${pg_sc_env}}" \
         go run ./cmd/ate-setup deploy ate-system \
           --sandbox-classes=gvisor \
           --credential-provider="${ATE_CREDENTIAL_PROVIDER:-{\"enabled\":false}}" \
-          --ingress-allowed-spiffe-ids="${ATE_INGRESS_ALLOWED_SPIFFE_IDS:-${DEMO_CONF_ROUTER_SPIFFE_ID}}"
+          --ingress-allowed-spiffe-ids="${ATE_INGRESS_ALLOWED_SPIFFE_IDS:-${DEMO_CONF_ROUTER_SPIFFE_ID}}" \
+          "${extra_ate_flags[@]}"
       fi
     )
+    if [[ "${#extra_ate_flags[@]}" -gt 0 ]]; then
+      log_step "Scaling ate-api-server and atenet-router to 16 replicas on ate-system-infra..."
+      run_kubectl_fatal scale deployment/ate-api-server -n ate-system --replicas="${ATE_API_SERVER_REPLICAS:-16}"
+      run_kubectl_fatal scale deployment/atenet-router -n ate-system --replicas="${ATE_ROUTER_REPLICAS:-16}"
+      run_kubectl_fatal rollout status deployment/ate-api-server -n ate-system --timeout=300s
+      run_kubectl_fatal rollout status deployment/atenet-router -n ate-system --timeout=300s
+    fi
   fi
   ver_out="$(run_kubectl exec -n ate-system deployment/ate-api-server -c ate-api-server -- /ko-app/ateapi --version 2>/dev/null || true)"
   labels="$(substrate_version_from_output "${ver_out}")"
@@ -935,7 +1016,7 @@ conf_deploy() {
     "${DEMO_CONF_MIN_WORKERS}" "${DEMO_CONF_MAX_WORKERS}")"
   conf_render manifests/workerpool.yaml.tmpl | ko resolve -f - | run_kubectl_fatal apply -f -
   log_step "Waiting for the ${ns}/${pool} worker pool rollout..."
-  wait_for_pool_rollout_fatal "${pool}" "${ns}"
+  wait_for_pool_rollout_fatal "${pool}" "${ns}" "${DEMO_CONF_WORKER_ROLLOUT_TIMEOUT:-900s}"
 
   apiservice_json="$(run_kubectl get apiservice v1beta1.external.metrics.k8s.io -o json --ignore-not-found)"
   apiservice_owner="$(conf_apiservice_owner "${apiservice_json}")"
@@ -996,7 +1077,12 @@ conf_deploy() {
   run_kubectl_fatal rollout status deployment/conf-gateway -n "${ns}" --timeout=180s
 
   log_step "Creating ${DEMO_CONF_ACTORS} attendee actors in ${ns}..."
-  if ((10#${DEMO_CONF_ACTORS} > 100)); then
+  if ((10#${DEMO_CONF_ACTORS} > 65536)) && [[ "${DEMO_CONF_IN_CLUSTER_PROVISION:-true}" == "true" ]]; then
+    run_kubectl delete job conf-provision -n "${ns}" --ignore-not-found
+    conf_render manifests/provision-job.yaml.tmpl | ko resolve -f - | run_kubectl_fatal apply -f -
+    log_step "Waiting for sharded in-cluster conf-provision Indexed Job to finish creating ${DEMO_CONF_ACTORS} actors..."
+    run_kubectl_fatal wait --for=condition=complete job/conf-provision -n "${ns}" --timeout="${DEMO_CONF_PROVISION_TIMEOUT:-7200s}"
+  elif ((10#${DEMO_CONF_ACTORS} > 100)); then
     go run ./cmd/conf-gateway/cmd/conf-provision \
       --atespace="${ns}" \
       --template="${tmpl}" \
@@ -1032,6 +1118,7 @@ conf_delete() {
   tmpl="$(conf_template_name)"
   log_step "Deleting the conference demo in ${ns}"
   log_target_context
+  run_kubectl delete job conf-provision -n "${ns}" --ignore-not-found
   run_kubectl delete -f <(conf_render manifests/datagen.yaml.tmpl) --ignore-not-found
   run_kubectl delete -f <(conf_render manifests/gateway.yaml.tmpl) --ignore-not-found
   if [[ -n "${DEMO_DOMAIN:-}" ]]; then
@@ -1079,7 +1166,7 @@ conf_main() {
       --profile=*) DEMO_CONF_PROFILE="${1#--profile=}" ;;
       --profile)
         if (($# < 2)); then
-          echo "error: --profile requires an argument (swarm or megaswarm)" >&2
+          echo "error: --profile requires an argument (swarm, megaswarm, or hyperswarm)" >&2
           action=help
           break
         fi
@@ -1100,15 +1187,16 @@ conf_main() {
     up) conf_deploy ;;
     down) conf_delete ;;
     *)
-      echo "Usage: $0 up|down [--profile=swarm|megaswarm] [--patch-router]"
+      echo "Usage: $0 up|down [--profile=swarm|megaswarm|hyperswarm] [--patch-router]"
       echo "  up                       deploy the demo onto a cluster running Substrate at the go.mod pin"
       echo "  down                     delete it (router flags and the gateway service account stay)"
-      echo "  --profile=swarm|megaswarm select deployment preset (default: DEMO_CONF_PROFILE=swarm):"
-      echo "                             swarm     : 50 actors, 2-5 workers, 4 seats/worker, 1 CPU / 512 MiB per actor, Filestore auto-detect"
-      echo "                             megaswarm : 65,536 actors (16^4), 256 workers, 16 seats/worker, 100m CPU / 128 MiB per actor, GCS + /tmp/workspace"
+      echo "  --profile=swarm|megaswarm|hyperswarm select deployment preset (default: DEMO_CONF_PROFILE=swarm):"
+      echo "                             swarm      : 50 actors, 2-5 workers, 4 seats/worker, 1 CPU / 512 MiB per actor, Filestore auto-detect"
+      echo "                             megaswarm  : 65,536 actors (16^4), 256 workers, 16 seats/worker, 100m CPU / 128 MiB per actor, GCS + /tmp/workspace"
+      echo "                             hyperswarm : 16,777,216 actors (64^4), 4,096 workers across 64 nodes, 64 seats/worker, 20m CPU / 128 MiB per actor"
       echo "  --patch-router           patch atenet-router's timeouts, max parked requests and grace period instead of failing"
       echo "  Required env: KO_DOCKER_REPO"
-      echo "  Optional env: DEMO_CONF_PROFILE (default swarm; 'swarm' or 'megaswarm'),"
+      echo "  Optional env: DEMO_CONF_PROFILE (default swarm; 'swarm', 'megaswarm', or 'hyperswarm'),"
       echo "                PROJECT_ID (enables Gemini on Agent Platform; unset runs mock replies), VERTEX_LOCATION,"
       echo "                DEMO_DOMAIN, DEMO_CONF_STATIC_IP_NAME, ALLOWED_GOOGLE_DOMAINS, GOOGLE_CLIENT_ID, FIREBASE_API_KEY, FIREBASE_PROJECT_ID,"
       echo "                DEMO_CONF_NAMESPACE (default ate-demo-conf; isolates namespace, atespace, worker pool and template),"

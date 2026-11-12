@@ -41,10 +41,15 @@
     workerPodsSeats: document.getElementById('worker-pods-seats'),
     fleetGrid: document.getElementById('fleet-grid'),
     fleetCanvasWrap: document.getElementById('fleet-canvas-wrap'),
+    fleetWebglCanvas: document.getElementById('fleet-webgl-canvas'),
     fleetCanvas: document.getElementById('fleet-canvas'),
     fleetSub: document.getElementById('fleet-sub'),
     fleetZoomToolbar: document.getElementById('fleet-zoom-toolbar'),
     fleetZoomPresets: document.querySelectorAll('.btn-fleet-zoom'),
+    btnZoomP1: document.getElementById('btn-zoom-p1'),
+    btnZoomP2: document.getElementById('btn-zoom-p2'),
+    btnZoomP3: document.getElementById('btn-zoom-p3'),
+    btnZoomP4: document.getElementById('btn-zoom-p4'),
     btnFleetZoomOut: document.getElementById('btn-fleet-zoom-out'),
     btnFleetZoomIn: document.getElementById('btn-fleet-zoom-in'),
     fleetZoomReadout: document.getElementById('fleet-zoom-readout'),
@@ -53,6 +58,7 @@
     fleetJumpInput: document.getElementById('fleet-jump-input'),
     btnFleetJump: document.getElementById('btn-fleet-jump'),
     fleetMinimapWrap: document.getElementById('fleet-minimap-wrap'),
+    minimapTitle: document.getElementById('minimap-title'),
     fleetMinimap: document.getElementById('fleet-minimap'),
     minimapCoords: document.getElementById('minimap-coords'),
     btnMinimapReset: document.getElementById('btn-minimap-reset'),
@@ -101,11 +107,19 @@
   let simTargetHigh = 50;
   let latestActorsMap = {};
   let latestFleetCompact = '';
+  let latestFleetBytes = null;
+  let fleetTextureDirty = false;
   let latestActorCount = 50;
   let latestSeatsPerWorker = 4;
+  let latestHumanSlotStride = 16;
   let latestSeatsTotal = 0;
   let latestRunningActors = 0;
   let latestSuspendedActors = 0;
+  let latestActiveCohortActors = 0;
+  let latestSnapshottedActors = 0;
+  let latestLeasedActors = 0;
+  let useBinaryFleetMode = false;
+  let rafRedrawPending = false;
   let podHoverDirectory = {};
   let seatedActorPodMap = {};
   let latestNodeGroups = [];
@@ -453,15 +467,72 @@
   // Telemetry Updates
   // -------------------------------------------------------------------------
   let isTelemetryFetching = false;
+  let telemetryTimerId = null;
   let currentAtespace = 'ate-demo-conf';
+
+  function parseFleetBinaryBuffer(ab) {
+    if (!ab || ab.byteLength < 24) return null;
+    const header = new Uint8Array(ab, 0, 4);
+    if (header[0] !== 0x53 || header[1] !== 0x57 || header[2] !== 0x46 || header[3] !== 0x4c) {
+      return null;
+    }
+    const dv = new DataView(ab, 0, 24);
+    const actorCount = dv.getUint32(8, true);
+    if (ab.byteLength < 24 + actorCount) return null;
+    return {
+      actorCount: actorCount,
+      activeCohort: dv.getUint32(12, true),
+      snapshotted: dv.getUint32(16, true),
+      leased: dv.getUint32(20, true),
+      bytes: new Uint8Array(ab, 24, actorCount)
+    };
+  }
+
   async function fetchTelemetry() {
     if (isTelemetryFetching) return;
     isTelemetryFetching = true;
     try {
-      const resp = await fetch('/api/stage/telemetry', { cache: 'no-store' });
-      if (!resp.ok) return;
-      const data = await resp.json();
-      updateDashboard(data);
+      if (useBinaryFleetMode) {
+        const [telResp, binResp] = await Promise.all([
+          fetch('/api/stage/telemetry?compact=0', { cache: 'no-store' }),
+          fetch('/api/stage/fleet.bin', { cache: 'no-store' })
+        ]);
+        if (!telResp.ok) return;
+        const data = await telResp.json();
+        if (binResp && binResp.ok) {
+          const ab = await binResp.arrayBuffer();
+          const parsedBin = parseFleetBinaryBuffer(ab);
+          if (parsedBin) {
+            latestFleetBytes = parsedBin.bytes;
+            latestActiveCohortActors = parsedBin.activeCohort;
+            latestSnapshottedActors = parsedBin.snapshotted;
+            latestLeasedActors = parsedBin.leased;
+            fleetTextureDirty = true;
+          }
+        }
+        updateDashboard(data);
+      } else {
+        const resp = await fetch('/api/stage/telemetry?compact=auto', { cache: 'no-store' });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data && data.actor_count > 65536) {
+          useBinaryFleetMode = true;
+          const binResp = await fetch('/api/stage/fleet.bin', { cache: 'no-store' }).catch(() => null);
+          if (binResp && binResp.ok) {
+            const ab = await binResp.arrayBuffer();
+            const parsedBin = parseFleetBinaryBuffer(ab);
+            if (parsedBin) {
+              latestFleetBytes = parsedBin.bytes;
+              latestActiveCohortActors = parsedBin.activeCohort;
+              latestSnapshottedActors = parsedBin.snapshotted;
+              latestLeasedActors = parsedBin.leased;
+              fleetTextureDirty = true;
+              data.fleet_compact = '';
+            }
+          }
+        }
+        updateDashboard(data);
+      }
       if (currentSpotlightActorId && el.spotlightDrawer && el.spotlightDrawer.classList.contains('open')) {
         refreshSpotlightDrawer(currentSpotlightActorId);
       }
@@ -470,7 +541,16 @@
       console.warn('Telemetry poll transient error:', err);
     } finally {
       isTelemetryFetching = false;
+      scheduleNextTelemetryPoll();
     }
+  }
+
+  function scheduleNextTelemetryPoll() {
+    if (telemetryTimerId !== null) {
+      clearTimeout(telemetryTimerId);
+    }
+    const delayMs = latestActorCount > 65536 ? 1200 : 500;
+    telemetryTimerId = setTimeout(fetchTelemetry, delayMs);
   }
 
   function updateDashboard(data) {
@@ -482,12 +562,34 @@
     const seats = data.seats_per_worker > 0 ? data.seats_per_worker : 4;
     const p = data.worker_pods || {};
     latestActorsMap = data.actors || {};
-    latestFleetCompact = data.fleet_compact || '';
+    if (data.fleet_compact) {
+      latestFleetCompact = data.fleet_compact;
+      latestFleetBytes = null;
+    }
     latestActorCount = data.actor_count || 0;
+    if (latestActorCount > 65536) {
+      useBinaryFleetMode = true;
+    }
     latestSeatsPerWorker = seats;
+    latestHumanSlotStride = data.human_slot_stride > 0
+      ? data.human_slot_stride
+      : (latestActorCount > 65536 ? 4096 : (latestActorCount > 256 ? 16 : 0));
+    if (el.fleetJumpInput && latestActorCount > 0) {
+      el.fleetJumpInput.max = String(latestActorCount);
+    }
     latestSeatsTotal = (p.available && p.current > 0) ? (p.current * seats) : 0;
     latestRunningActors = data.running_actors || 0;
     latestSuspendedActors = data.suspended_actors || 0;
+    if (typeof data.active_cohort_actors === 'number') {
+      latestActiveCohortActors = data.active_cohort_actors;
+    }
+    if (typeof data.snapshotted_actors === 'number') {
+      latestSnapshottedActors = data.snapshotted_actors;
+    }
+    if (typeof data.leased_actors === 'number') {
+      latestLeasedActors = data.leased_actors;
+    }
+    syncZoomPresetButtonsForScale();
 
     updateSimulationTargets(latestActorCount, latestSeatsTotal);
 
@@ -570,7 +672,7 @@
     el.parkingCount.textContent = parkedCount;
 
     // Compute progress gauge bar
-    const maxScale = latestSeatsTotal > 50 ? Math.min(4096, latestSeatsTotal) : 50;
+    const maxScale = latestSeatsTotal > 50 ? Math.min(latestActorCount > 65536 ? 65536 : 4096, latestSeatsTotal) : 50;
     const pct = Math.min(100, Math.max(0, Math.round((parkedCount / maxScale) * 100)));
     if (el.parkingProgressBar) {
       el.parkingProgressBar.style.width = pct + '%';
@@ -677,13 +779,34 @@
     return m ? parseInt(m[1], 10) : 0;
   }
 
+  function hasCompactFleetData() {
+    return (latestFleetBytes && latestFleetBytes.length > 256) ||
+      (latestFleetCompact && latestFleetCompact.length > 256);
+  }
+
+  function getCompactFleetLength() {
+    if (latestFleetBytes && latestFleetBytes.length > 0) return latestFleetBytes.length;
+    if (latestFleetCompact && latestFleetCompact.length > 0) return latestFleetCompact.length;
+    return 0;
+  }
+
+  function getFleetRawCode(idx0) {
+    if (latestFleetBytes && idx0 >= 0 && idx0 < latestFleetBytes.length) {
+      return latestFleetBytes[idx0];
+    }
+    if (latestFleetCompact && idx0 >= 0 && idx0 < latestFleetCompact.length) {
+      return latestFleetCompact.charCodeAt(idx0) - 64;
+    }
+    return 9;
+  }
+
   function isActorLeased(actorId, actorNum) {
     const live = actorId ? latestActorsMap[actorId] : null;
     if (live && live.leased) return true;
     const idx = actorNum || parseActorNumber(actorId);
-    if (idx >= 1 && latestFleetCompact && idx <= latestFleetCompact.length) {
-      const raw = latestFleetCompact.charCodeAt(idx - 1) - 64;
-      return (raw & 16) !== 0;
+    const len = getCompactFleetLength();
+    if (idx >= 1 && idx <= len) {
+      return (getFleetRawCode(idx - 1) & 16) !== 0;
     }
     return false;
   }
@@ -721,12 +844,14 @@
     const isBusy = actors.length > 0;
     const isHighlighted = topoHighlightPod && topoHighlightPod === podName;
     const nAttr = nodeName ? ` data-node="${escapeHTML(nodeName)}"` : '';
+    const is8x8 = seats > 16;
+    const gridCls = is8x8 ? 'seat-grid-8x8' : 'seat-grid-4x4';
     const cells = [];
     for (let i = 0; i < seats; i++) {
       const wa = actors[i];
       if (!wa) {
         cells.push(
-          `<div class="seat-cell empty" data-hover-kind="seat" data-pod="${escapeHTML(podName)}"${nAttr} data-seat="${i + 1}">·</div>`
+          `<div class="seat-cell empty" data-hover-kind="seat" data-pod="${escapeHTML(podName)}"${nAttr} data-seat="${i + 1}">${is8x8 ? '' : '·'}</div>`
         );
       } else {
         const b = actorBadgeForWorkerActor(wa);
@@ -734,7 +859,7 @@
         const numMatch = (wa.actor_id || '').match(/(\d+)$/);
         const shortNum = numMatch ? numMatch[1] : '•';
         cells.push(
-          `<div class="seat-cell ${cls}" data-hover-kind="seat" data-pod="${escapeHTML(podName)}"${nAttr} data-seat="${i + 1}" data-actor="${escapeHTML(wa.actor_id || '')}">${escapeHTML(shortNum.slice(-3))}</div>`
+          `<div class="seat-cell ${cls}" data-hover-kind="seat" data-pod="${escapeHTML(podName)}"${nAttr} data-seat="${i + 1}" data-actor="${escapeHTML(wa.actor_id || '')}">${is8x8 ? '' : escapeHTML(shortNum.slice(-3))}</div>`
         );
       }
     }
@@ -750,7 +875,7 @@
             <button type="button" class="node-corner-zoom-btn" data-zoom-pod="${escapeHTML(podName)}"${nAttr} title="Zoom into pod ${escapeHTML(podName)} (see all ${seats} actors)" aria-label="Zoom into pod ${escapeHTML(shortPod)}">${ZOOM_CORNER_ICON_SVG}</button>
           </div>
         </div>
-        <div class="seat-grid-4x4">${cells.join('')}</div>
+        <div class="${gridCls}">${cells.join('')}</div>
       </div>
     `;
   }
@@ -759,13 +884,16 @@
     const pods = nodeGroup.pods || [];
     const nodeName = nodeGroup.nodeName || ('node-' + String(nodeIdx + 1).padStart(2, '0'));
     const nodeLabel = nodeGroup.nodeLabel || ('node-' + String(nodeIdx + 1).padStart(2, '0'));
+    const podSlots = pods.length > 16 ? 64 : 16;
+    const is8x8 = podSlots > 16;
+    const gridCls = is8x8 ? 'seat-grid-8x8' : 'seat-grid-4x4';
     const totalNodeSeats = pods.length * seatsPerPod;
     let busyNodeSeats = 0;
     const cells = [];
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < podSlots; i++) {
       const w = pods[i];
       if (!w) {
-        cells.push('<div class="seat-cell empty">·</div>');
+        cells.push(`<div class="seat-cell empty">${is8x8 ? '' : '·'}</div>`);
         continue;
       }
       const actors = w.actors || [];
@@ -773,23 +901,23 @@
       const cls = dominantPodClass(actors);
       const firstActor = actors.length > 0 ? (actors[0].actor_id || '') : '';
       cells.push(
-        `<div class="seat-cell ${cls}" data-hover-kind="pod" data-pod="${escapeHTML(w.pod_name)}" data-node="${escapeHTML(nodeName)}" data-actor="${escapeHTML(firstActor)}">${actors.length}</div>`
+        `<div class="seat-cell ${cls}" data-hover-kind="pod" data-pod="${escapeHTML(w.pod_name)}" data-node="${escapeHTML(nodeName)}" data-actor="${escapeHTML(firstActor)}">${is8x8 ? '' : actors.length}</div>`
       );
     }
     const isBusy = busyNodeSeats > 0;
     return `
       <div class="card worker-card zoomable-card${isBusy ? ' active' : ''}" data-node-card="${escapeHTML(nodeName)}">
-        <div class="worker-card-header" data-zoom-node="${escapeHTML(nodeName)}" title="Click to zoom into GKE Node ${escapeHTML(nodeLabel)} (${escapeHTML(nodeName)}) and see all 16 pods with their slots">
+        <div class="worker-card-header" data-zoom-node="${escapeHTML(nodeName)}" title="Click to zoom into GKE Node ${escapeHTML(nodeLabel)} (${escapeHTML(nodeName)}) and see all ${pods.length} pods with their ${seatsPerPod} slots">
           <div class="worker-id">
             <span class="worker-dot${isBusy ? ' active' : ''}"></span>
             <span class="worker-title">${escapeHTML(nodeLabel)}</span>
           </div>
           <div class="worker-header-right">
             <span class="worker-seat-count${busyNodeSeats >= totalNodeSeats ? ' full' : ''}">${busyNodeSeats}/${totalNodeSeats}</span>
-            <button type="button" class="node-corner-zoom-btn" data-zoom-node="${escapeHTML(nodeName)}" title="Zoom into ${escapeHTML(nodeLabel)} (see all 16 pods &amp; their 16 slots)" aria-label="Zoom into ${escapeHTML(nodeLabel)}">${ZOOM_CORNER_ICON_SVG}</button>
+            <button type="button" class="node-corner-zoom-btn" data-zoom-node="${escapeHTML(nodeName)}" title="Zoom into ${escapeHTML(nodeLabel)} (see all ${pods.length} pods &amp; their ${seatsPerPod} slots)" aria-label="Zoom into ${escapeHTML(nodeLabel)}">${ZOOM_CORNER_ICON_SVG}</button>
           </div>
         </div>
-        <div class="seat-grid-4x4">${cells.join('')}</div>
+        <div class="${gridCls}">${cells.join('')}</div>
       </div>
     `;
   }
@@ -822,11 +950,13 @@
     const pillText = shortStatePillLabel(cls, b.label);
     const activityDetail = describeSeatActivity(wa, b);
     const actorNum = parseActorNumber(actorId);
-    const isQR = actorNum > 0 && (actorNum % 16 === 0);
+    const isQR = actorNum > 0 && latestHumanSlotStride > 1 && (actorNum % latestHumanSlotStride === 0);
     const leased = isActorLeased(actorId, actorNum);
+    const qrLabel = 'QR ' + latestHumanSlotStride + 'x';
     const qrBadge = leased
       ? '<span class="seat-card-qr leased" title="Active live QR attendee lease">LIVE</span>'
-      : (isQR ? '<span class="seat-card-qr" title="Multiple-of-16 QR-reservable attendee slot">QR 16x</span>' : '');
+      : (isQR ? '<span class="seat-card-qr" title="QR-reservable attendee slot">' + qrLabel + '</span>' : '');
+    const matrixShortLabel = latestActorCount >= 1000000 ? '16M ⌖' : '65k ⌖';
     return `
       <div class="pod-actor-seat-card ${cls}" data-hover-kind="seat" data-pod="${escapeHTML(podName)}" data-node="${escapeHTML(nodeName)}" data-seat="${seatIdx + 1}" data-actor="${escapeHTML(actorId)}">
         <div class="seat-card-top">
@@ -839,7 +969,7 @@
         </div>
         <div class="seat-card-bottom">
           <span class="seat-card-sub">${escapeHTML(activityDetail)}</span>
-          <button type="button" class="btn-locate-actor" data-locate-actor="${escapeHTML(actorId)}" title="Zoom to ${escapeHTML(formatActorName(actorId))} in the 65,536 fleet matrix">65k ⌖</button>
+          <button type="button" class="btn-locate-actor" data-locate-actor="${escapeHTML(actorId)}" title="Zoom to ${escapeHTML(formatActorName(actorId))} in the fleet matrix">${matrixShortLabel}</button>
         </div>
       </div>
     `;
@@ -852,9 +982,12 @@
       return;
     }
 
+    const nodeCount = latestNodeGroups.length || 16;
+    const podsPerNode = (latestNodeGroups[0] && latestNodeGroups[0].pods && latestNodeGroups[0].pods.length) || 16;
+
     if (!topoSelectedNode && !topoSelectedPod) {
       el.workerTopoNav.innerHTML = `
-        <span class="topo-hint-pill">16 Nodes × 16 Pods × 16 Seats · Click any node corner to zoom into its 16 pods</span>
+        <span class="topo-hint-pill">${nodeCount} Nodes × ${podsPerNode} Pods × ${seatsPerPod} Seats · Click any node corner to zoom into its ${podsPerNode} pods</span>
       `;
       return;
     }
@@ -865,7 +998,7 @@
       const totalNodeSeats = pods.length * seatsPerPod;
       const busyNodeSeats = pods.reduce((sum, p) => sum + ((p.actors || []).length), 0);
       el.workerTopoNav.innerHTML = `
-        <button type="button" class="topo-crumb-btn" data-topo-action="all-nodes">${BACK_ARROW_ICON_SVG}<span>All 16 Nodes</span></button>
+        <button type="button" class="topo-crumb-btn" data-topo-action="all-nodes">${BACK_ARROW_ICON_SVG}<span>All ${nodeCount} Nodes</span></button>
         <span class="topo-crumb-sep">▸</span>
         <span class="topo-crumb-active" title="GKE Node: ${escapeHTML(activeNode.nodeName)}">
           <span>${escapeHTML(activeNode.nodeLabel)}</span>
@@ -884,10 +1017,12 @@
       const podInfo = podHoverDirectory[topoSelectedPod];
       const podActors = (podInfo && podInfo.actors) ? podInfo.actors : [];
       const nodeForPod = activeNode || latestNodeGroups.find((g) => (g.pods || []).some((p) => p.pod_name === topoSelectedPod)) || null;
+      const nodePodsLen = (nodeForPod && nodeForPod.pods) ? nodeForPod.pods.length : podsPerNode;
       const nodeCrumb = (multiNodeMode && nodeForPod)
-        ? `<button type="button" class="topo-crumb-btn" data-topo-action="zoom-node" data-node="${escapeHTML(nodeForPod.nodeName)}">${escapeHTML(nodeForPod.nodeLabel)} (16 Pods)</button><span class="topo-crumb-sep">▸</span>`
+        ? `<button type="button" class="topo-crumb-btn" data-topo-action="zoom-node" data-node="${escapeHTML(nodeForPod.nodeName)}">${escapeHTML(nodeForPod.nodeLabel)} (${nodePodsLen} Pods)</button><span class="topo-crumb-sep">▸</span>`
         : '';
-      const rootLabel = multiNodeMode ? 'All 16 Nodes' : 'All Pods';
+      const rootLabel = multiNodeMode ? ('All ' + nodeCount + ' Nodes') : 'All Pods';
+      const matrixShortLabel = latestActorCount >= 1000000 ? '16M ⌖' : '65k ⌖';
       el.workerTopoNav.innerHTML = `
         <button type="button" class="topo-crumb-btn" data-topo-action="all-nodes">${BACK_ARROW_ICON_SVG}<span>${rootLabel}</span></button>
         <span class="topo-crumb-sep">▸</span>
@@ -900,7 +1035,7 @@
           <button type="button" class="topo-step-btn" data-topo-action="prev-pod" title="Previous Worker Pod" aria-label="Previous Worker Pod">‹</button>
           <button type="button" class="topo-step-btn" data-topo-action="next-pod" title="Next Worker Pod" aria-label="Next Worker Pod">›</button>
         </span>
-        <span class="topo-hint-pill">Click any actor seat for Spotlight · Click 65k ⌖ to zoom in fleet matrix</span>
+        <span class="topo-hint-pill">Click any actor seat for Spotlight · Click ${matrixShortLabel} to zoom in fleet matrix</span>
       `;
     }
   }
@@ -1068,14 +1203,15 @@
       }
       const nodeNames = Array.from(byNode.keys()).sort();
       const nodeGroups = nodeNames.map((nName) => ({ nodeName: nName, pods: byNode.get(nName) }));
+      const chunkSize = seats > 16 ? 64 : 16;
       while (unassigned.length > 0) {
-        const chunk = unassigned.splice(0, 16);
+        const chunk = unassigned.splice(0, chunkSize);
         nodeGroups.push({
           nodeName: 'node-' + String(nodeGroups.length + 1).padStart(2, '0'),
           pods: chunk
         });
       }
-      latestNodeGroups = nodeGroups.slice(0, 16).map((g, i) => ({
+      latestNodeGroups = nodeGroups.slice(0, 64).map((g, i) => ({
         nodeName: g.nodeName,
         nodeLabel: 'node-' + String(i + 1).padStart(2, '0'),
         nodeIndex: i,
@@ -1115,8 +1251,9 @@
 
       renderWorkerTopoNav(seats, true);
       el.workerList.classList.add('compact', 'node-matrix-grid');
+      el.workerList.classList.toggle('hyper-node-grid', latestNodeGroups.length > 16 || seats > 16);
 
-      // Level 2 Drill-Down: Single Pod -> 16 Actor Seat Cards (8x2 grid taking entire space)
+      // Level 2 Drill-Down: Single Pod -> Actor Seat Cards (8x8 for 64 seats, 8x2 for 16 seats)
       if (topoSelectedPod) {
         const ownerNode = latestNodeGroups.find((g) => g.pods.some((p) => p.pod_name === topoSelectedPod)) || null;
         const activePod = (ownerNode && ownerNode.pods.find((p) => p.pod_name === topoSelectedPod)) ||
@@ -1131,17 +1268,18 @@
         return;
       }
 
-      // Level 1 Drill-Down: Single Node -> 16 Pod Cards with their 4x4 actor slots (8x2 grid taking entire space)
+      // Level 1 Drill-Down: Single Node -> Pod Cards (64 pods in 8x8 on hyperswarm, 16 pods in 8x2 on megaswarm)
       if (topoSelectedNode) {
         const activeNode = latestNodeGroups.find((g) => g.nodeName === topoSelectedNode) || latestNodeGroups[0];
-        const nodePods = (activeNode && activeNode.pods) ? activeNode.pods.slice(0, 16) : [];
+        const maxPodsPerNode = seats > 16 ? 64 : 16;
+        const nodePods = (activeNode && activeNode.pods) ? activeNode.pods.slice(0, maxPodsPerNode) : [];
         const cols = Math.min(8, Math.max(4, Math.ceil(Math.max(1, nodePods.length) / 2)));
         el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
         el.workerList.innerHTML = nodePods.map((w) => render4x4SeatWorkerCardHTML(w, seats, activeNode.nodeName)).join('');
         return;
       }
 
-      // Level 0 Overview: All 16 Nodes (8x2 grid, each showing 4x4 pods)
+      // Level 0 Overview: All Nodes (64 nodes in 8x8 on hyperswarm, 16 nodes in 8x2 on megaswarm)
       const cols = Math.min(8, Math.max(4, Math.ceil(latestNodeGroups.length / 2)));
       el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
       el.workerList.innerHTML = latestNodeGroups.map((g, i) => renderNodeMatrixCardHTML(g, i, seats)).join('');
@@ -1243,14 +1381,84 @@
   ];
 
   let hoveredCanvasIndex = -1;
+  let webglState = null;
+  let webglFailed = false;
+  let fallbackImageData = null;
+  let minimapImageData = null;
+
+  const ABGR_PALETTE_DARK = new Uint32Array([
+    0xff3b291e, // 0: #1e293b
+    0xffc78402, // 1: #0284c7
+    0xffccff00, // 2: #00ffcc
+    0xffccff00, // 3: #00ffcc
+    0xff81b910, // 4: #10b981
+    0xff9948ec, // 5: #ec4899
+    0xfff755a8, // 6: #a855f7
+    0xff0b9ef5, // 7: #f59e0b
+    0xff4444ef, // 8: #ef4444
+    0xff554133  // 9: #334155
+  ]);
+
+  const ABGR_PALETTE_LIGHT = new Uint32Array([
+    0xfff0e8e2, // 0: #e2e8f0
+    0xfff8bd38, // 1: #38bdf8
+    0xffc78402, // 2: #0284c7
+    0xffc78402, // 3: #0284c7
+    0xff699605, // 4: #059669
+    0xff7727db, // 5: #db2777
+    0xffed3a7c, // 6: #7c3aed
+    0xff0677d9, // 7: #d97706
+    0xff2626dc, // 8: #dc2626
+    0xffe1d5cb  // 9: #cbd5e1
+  ]);
 
   function computeCanvasDims(total) {
     if (total === 65536) {
       return { cols: 512, rows: 128 };
     }
+    if (total === 16777216) {
+      // Exact 2^12 x 2^12 = 16,777,216 (1 texel = 1 actor), guaranteed <= MAX_TEXTURE_SIZE everywhere.
+      return { cols: 4096, rows: 4096 };
+    }
     const cols = Math.max(32, Math.ceil(Math.sqrt(total * 3.5)));
     const rows = Math.max(8, Math.ceil(total / cols));
     return { cols: cols, rows: rows };
+  }
+
+  function maxFleetZoom() {
+    return latestActorCount > 65536 ? 512 : 32;
+  }
+
+  let lastSyncedPresetHyper = null;
+  function syncZoomPresetButtonsForScale() {
+    const isHyper = latestActorCount > 65536;
+    if (lastSyncedPresetHyper === isHyper) return;
+    lastSyncedPresetHyper = isHyper;
+    if (el.minimapTitle) {
+      el.minimapTitle.textContent = isHyper ? '16.8M NAVIGATOR' : '65K NAVIGATOR';
+    }
+    if (isHyper) {
+      if (el.btnZoomP1) { el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (All 16,777,216 actors)'; }
+      if (el.btnZoomP2) { el.btnZoomP2.dataset.zoom = '16'; el.btnZoomP2.textContent = '16×'; el.btnZoomP2.title = '16× Sub-Fleet Sector (~65,536 actors)'; }
+      if (el.btnZoomP3) { el.btnZoomP3.dataset.zoom = '128'; el.btnZoomP3.textContent = '128×'; el.btnZoomP3.title = '128× Cohort Tiles (~1,024 actors with Pod & QR markers)'; }
+      if (el.btnZoomP4) { el.btnZoomP4.dataset.zoom = '256'; el.btnZoomP4.textContent = '256×'; el.btnZoomP4.title = '256× Inspector Mini-Cards (~256 actors with ID, State & Pod)'; }
+    } else {
+      if (el.btnZoomP1) { el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (All 65,536 actors)'; }
+      if (el.btnZoomP2) { el.btnZoomP2.dataset.zoom = '4'; el.btnZoomP2.textContent = '4×'; el.btnZoomP2.title = '4× Cohort Tiles (~4,096 actors)'; }
+      if (el.btnZoomP3) { el.btnZoomP3.dataset.zoom = '16'; el.btnZoomP3.textContent = '16×'; el.btnZoomP3.title = '16× Inspector Mini-Cards (~256 actors)'; }
+      if (el.btnZoomP4) { el.btnZoomP4.dataset.zoom = '32'; el.btnZoomP4.textContent = '32×'; el.btnZoomP4.title = '32× Detailed Actor Cards (~64 actors)'; }
+    }
+  }
+
+  function requestFleetRedraw() {
+    if (rafRedrawPending) return;
+    rafRedrawPending = true;
+    window.requestAnimationFrame(function() {
+      rafRedrawPending = false;
+      if (hasCompactFleetData()) {
+        renderFleetCanvas(latestFleetCompact, latestActorCount || getCompactFleetLength());
+      }
+    });
   }
 
   function clampFleetPan() {
@@ -1260,7 +1468,8 @@
       fleetPanY = 0;
       return;
     }
-    if (fleetZoom > 32) fleetZoom = 32;
+    const maxZ = maxFleetZoom();
+    if (fleetZoom > maxZ) fleetZoom = maxZ;
     const maxPan = Math.max(0, 1 - 1 / fleetZoom);
     fleetPanX = Math.max(0, Math.min(maxPan, fleetPanX));
     fleetPanY = Math.max(0, Math.min(maxPan, fleetPanY));
@@ -1280,7 +1489,7 @@
     if (el.fleetZoomPresets) {
       el.fleetZoomPresets.forEach((btn) => {
         const target = parseFloat(btn.dataset.zoom || '1');
-        const active = Math.abs(fleetZoom - target) < 0.15;
+        const active = Math.abs(fleetZoom - target) < Math.max(0.15, target * 0.06);
         btn.classList.toggle('active', active);
       });
     }
@@ -1294,7 +1503,7 @@
   }
 
   function setFleetZoom(newZoom, anchorUVX, anchorUVY) {
-    const clamped = Math.max(1, Math.min(32, newZoom));
+    const clamped = Math.max(1, Math.min(maxFleetZoom(), newZoom));
     const ux = typeof anchorUVX === 'number' ? Math.max(0, Math.min(1, anchorUVX)) : 0.5;
     const uy = typeof anchorUVY === 'number' ? Math.max(0, Math.min(1, anchorUVY)) : 0.5;
     const worldUVX = fleetPanX + ux / fleetZoom;
@@ -1304,13 +1513,13 @@
     fleetPanY = worldUVY - uy / fleetZoom;
     clampFleetPan();
     syncFleetZoomToolbarUI();
-    if (latestFleetCompact && latestFleetCompact.length > 256) {
-      renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+    if (hasCompactFleetData()) {
+      renderFleetCanvas(latestFleetCompact, latestActorCount || getCompactFleetLength());
     }
   }
 
   function focusActorOnFleetCanvas(actorIdOrIdx, targetZoom) {
-    const total = latestActorCount || (latestFleetCompact ? latestFleetCompact.length : 65536);
+    const total = latestActorCount || getCompactFleetLength() || 65536;
     const idx1 = typeof actorIdOrIdx === 'number' ? actorIdOrIdx : parseActorNumber(actorIdOrIdx);
     if (!idx1 || idx1 < 1 || idx1 > total) return;
     const dims = computeCanvasDims(total);
@@ -1319,7 +1528,9 @@
     const idx0 = idx1 - 1;
     const row = Math.floor(idx0 / canvasCols);
     const col = idx0 % canvasCols;
-    fleetZoom = Math.max(targetZoom || 16, fleetZoom >= 16 ? fleetZoom : 16);
+    const defaultCardZoom = total > 65536 ? 256 : 16;
+    const desiredZoom = targetZoom && targetZoom > 16 ? targetZoom : defaultCardZoom;
+    fleetZoom = Math.max(desiredZoom, fleetZoom >= desiredZoom ? fleetZoom : desiredZoom);
     fleetPanX = ((col + 0.5) / canvasCols) - 0.5 / fleetZoom;
     fleetPanY = ((row + 0.5) / canvasRows) - 0.5 / fleetZoom;
     clampFleetPan();
@@ -1329,12 +1540,292 @@
       el.fleetJumpInput.value = String(idx1);
     }
     syncFleetZoomToolbarUI();
-    if (latestFleetCompact && latestFleetCompact.length > 256) {
+    if (hasCompactFleetData()) {
       renderFleetCanvas(latestFleetCompact, total);
     }
   }
 
-  function renderFleetMinimap(compactStr, total, palette, isLight, startCol, endCol, startRow, endRow) {
+  function initFleetWebGL2() {
+    if (webglFailed || !el.fleetWebglCanvas) return null;
+    if (webglState) return webglState;
+    const gl = el.fleetWebglCanvas.getContext('webgl2', {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: false
+    });
+    if (!gl) {
+      webglFailed = true;
+      return null;
+    }
+
+    const vsSrc = `#version 300 es
+      out vec2 v_uv;
+      void main() {
+        vec2 pos = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+        v_uv = vec2((pos.x + 1.0) * 0.5, 1.0 - (pos.y + 1.0) * 0.5);
+        gl_Position = vec4(pos, 0.0, 1.0);
+      }
+    `;
+
+    const fsSrc = `#version 300 es
+      precision highp float;
+      precision highp int;
+      precision highp usampler2D;
+
+      in vec2 v_uv;
+      out vec4 fragColor;
+
+      uniform usampler2D u_tex;
+      uniform ivec2 u_grid;
+      uniform vec2 u_pan;
+      uniform float u_zoom;
+      uniform vec2 u_viewport;
+      uniform int u_isLight;
+      uniform int u_stride;
+
+      int codePriority(uint raw) {
+        if ((raw & 16u) != 0u) return 90;
+        uint c = raw & 15u;
+        if (c == 8u) return 85;
+        if (c == 7u) return 80;
+        if (c == 5u) return 75;
+        if (c == 2u || c == 3u) return 70;
+        if (c == 4u) return 65;
+        if (c == 6u) return 40;
+        if (c == 1u) return 20;
+        return 0;
+      }
+
+      vec3 paletteColor(uint c, bool light) {
+        if (!light) {
+          if (c == 0u) return vec3(0.118, 0.161, 0.231);
+          if (c == 1u) return vec3(0.008, 0.518, 0.780);
+          if (c == 2u || c == 3u) return vec3(0.000, 1.000, 0.800);
+          if (c == 4u) return vec3(0.063, 0.725, 0.506);
+          if (c == 5u) return vec3(0.925, 0.282, 0.600);
+          if (c == 6u) return vec3(0.659, 0.333, 0.969);
+          if (c == 7u) return vec3(0.961, 0.620, 0.043);
+          if (c == 8u) return vec3(0.937, 0.267, 0.267);
+          return vec3(0.200, 0.255, 0.333);
+        } else {
+          if (c == 0u) return vec3(0.886, 0.910, 0.941);
+          if (c == 1u) return vec3(0.220, 0.741, 0.973);
+          if (c == 2u || c == 3u) return vec3(0.008, 0.518, 0.780);
+          if (c == 4u) return vec3(0.020, 0.588, 0.412);
+          if (c == 5u) return vec3(0.859, 0.153, 0.467);
+          if (c == 6u) return vec3(0.486, 0.227, 0.929);
+          if (c == 7u) return vec3(0.851, 0.467, 0.024);
+          if (c == 8u) return vec3(0.863, 0.149, 0.149);
+          return vec3(0.796, 0.835, 0.882);
+        }
+      }
+
+      void main() {
+        bool light = (u_isLight != 0);
+        vec3 bg = light ? vec3(0.973, 0.980, 0.988) : vec3(0.047, 0.071, 0.125);
+        vec2 worldUV = u_pan + v_uv / u_zoom;
+        if (worldUV.x < 0.0 || worldUV.x >= 1.0 || worldUV.y < 0.0 || worldUV.y >= 1.0) {
+          fragColor = vec4(bg, 1.0);
+          return;
+        }
+
+        vec2 gridCoord = worldUV * vec2(u_grid);
+        vec2 cellPx = (u_viewport * u_zoom) / vec2(u_grid);
+
+        // Sub-pixel macro zoom: max-priority pool up to 4x4 texels covered by this screen pixel
+        // so active seated sandboxes and live QR leases always stand out crisply at 1x..4x!
+        if (cellPx.x < 1.05 || cellPx.y < 1.05) {
+          vec2 span = vec2(u_grid) / (u_viewport * u_zoom);
+          int stepsX = clamp(int(ceil(span.x)), 1, 4);
+          int stepsY = clamp(int(ceil(span.y)), 1, 4);
+          ivec2 baseCell = ivec2(floor(gridCoord));
+          uint bestRaw = 0u;
+          int bestPrio = -1;
+          for (int sy = 0; sy < 4; sy++) {
+            if (sy >= stepsY) break;
+            int ty = clamp(baseCell.y + int(float(sy) * span.y / float(stepsY)), 0, u_grid.y - 1);
+            for (int sx = 0; sx < 4; sx++) {
+              if (sx >= stepsX) break;
+              int tx = clamp(baseCell.x + int(float(sx) * span.x / float(stepsX)), 0, u_grid.x - 1);
+              uint r = texelFetch(u_tex, ivec2(tx, ty), 0).r;
+              int p = codePriority(r);
+              if (p > bestPrio) {
+                bestPrio = p;
+                bestRaw = r;
+              }
+            }
+          }
+          if ((bestRaw & 16u) != 0u) {
+            fragColor = vec4(0.984, 0.749, 0.141, 1.0);
+            return;
+          }
+          fragColor = vec4(paletteColor(bestRaw & 15u, light), 1.0);
+          return;
+        }
+
+        ivec2 cell = clamp(ivec2(floor(gridCoord)), ivec2(0), u_grid - ivec2(1));
+        vec2 frac = fract(gridCoord);
+        if (cellPx.x >= 3.2 && cellPx.y >= 3.2) {
+          vec2 gapFrac = clamp(vec2(1.1) / cellPx, vec2(0.04), vec2(0.14));
+          if (frac.x > (1.0 - gapFrac.x) || frac.y > (1.0 - gapFrac.y)) {
+            fragColor = vec4(bg, 1.0);
+            return;
+          }
+          frac = frac / (vec2(1.0) - gapFrac);
+        }
+
+        uint raw = texelFetch(u_tex, cell, 0).r;
+        uint code = raw & 15u;
+        bool leased = (raw & 16u) != 0u;
+        bool onPod = ((raw & 32u) != 0u) || code == 2u || code == 3u || code == 4u || code == 5u || code == 7u;
+        vec3 col = paletteColor(code, light);
+
+        if (cellPx.x >= 5.5 && cellPx.y >= 5.5) {
+          int idx1 = cell.y * u_grid.x + cell.x + 1;
+          if (u_stride > 1 && (idx1 % u_stride) == 0) {
+            if (frac.x > 0.68 && frac.y < 0.32) {
+              col = leased ? vec3(0.984, 0.749, 0.141) : (light ? vec3(0.059, 0.090, 0.165) : vec3(0.0, 1.0, 0.8));
+            }
+          }
+          if (onPod && frac.x > 0.33 && frac.x < 0.67 && frac.y > 0.33 && frac.y < 0.67) {
+            col = light ? vec3(0.059, 0.090, 0.165) : vec3(1.0, 1.0, 1.0);
+          }
+          if (leased && (frac.x < 0.12 || frac.x > 0.88 || frac.y < 0.12 || frac.y > 0.88)) {
+            col = vec3(0.984, 0.749, 0.141);
+          }
+        } else if (leased) {
+          col = vec3(0.984, 0.749, 0.141);
+        }
+
+        fragColor = vec4(col, 1.0);
+      }
+    `;
+
+    function compile(type, src) {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        console.warn('WebGL2 shader compile error:', gl.getShaderInfoLog(sh));
+        gl.deleteShader(sh);
+        return null;
+      }
+      return sh;
+    }
+
+    const vs = compile(gl.VERTEX_SHADER, vsSrc);
+    const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+    if (!vs || !fs) {
+      webglFailed = true;
+      return null;
+    }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.warn('WebGL2 program link error:', gl.getProgramInfoLog(prog));
+      webglFailed = true;
+      return null;
+    }
+
+    const vao = gl.createVertexArray();
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    webglState = {
+      gl: gl,
+      prog: prog,
+      vao: vao,
+      tex: tex,
+      texCols: 0,
+      texRows: 0,
+      uTex: gl.getUniformLocation(prog, 'u_tex'),
+      uGrid: gl.getUniformLocation(prog, 'u_grid'),
+      uPan: gl.getUniformLocation(prog, 'u_pan'),
+      uZoom: gl.getUniformLocation(prog, 'u_zoom'),
+      uViewport: gl.getUniformLocation(prog, 'u_viewport'),
+      uIsLight: gl.getUniformLocation(prog, 'u_isLight'),
+      uStride: gl.getUniformLocation(prog, 'u_stride')
+    };
+    return webglState;
+  }
+
+  function renderFleetWebGL2(targetW, targetH, cols, rows, isLight) {
+    if (!latestFleetBytes || latestFleetBytes.length < cols * rows) return false;
+    const st = initFleetWebGL2();
+    if (!st) return false;
+    const gl = st.gl;
+    if (el.fleetWebglCanvas.width !== targetW || el.fleetWebglCanvas.height !== targetH) {
+      el.fleetWebglCanvas.width = targetW;
+      el.fleetWebglCanvas.height = targetH;
+    }
+    el.fleetWebglCanvas.hidden = false;
+
+    gl.bindTexture(gl.TEXTURE_2D, st.tex);
+    if (st.texCols !== cols || st.texRows !== rows) {
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, cols, rows, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, latestFleetBytes.subarray(0, cols * rows));
+      st.texCols = cols;
+      st.texRows = rows;
+      fleetTextureDirty = false;
+    } else if (fleetTextureDirty) {
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RED_INTEGER, gl.UNSIGNED_BYTE, latestFleetBytes.subarray(0, cols * rows));
+      fleetTextureDirty = false;
+    }
+
+    gl.viewport(0, 0, targetW, targetH);
+    gl.useProgram(st.prog);
+    gl.bindVertexArray(st.vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, st.tex);
+    gl.uniform1i(st.uTex, 0);
+    gl.uniform2i(st.uGrid, cols, rows);
+    gl.uniform2f(st.uPan, fleetPanX, fleetPanY);
+    gl.uniform1f(st.uZoom, fleetZoom);
+    gl.uniform2f(st.uViewport, targetW, targetH);
+    gl.uniform1i(st.uIsLight, isLight ? 1 : 0);
+    gl.uniform1i(st.uStride, latestHumanSlotStride || 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    return true;
+  }
+
+  function renderFleetImageDataFallback(ctx, total, isLight, targetW, targetH) {
+    if (!fallbackImageData || fallbackImageData.width !== targetW || fallbackImageData.height !== targetH) {
+      fallbackImageData = ctx.createImageData(targetW, targetH);
+    }
+    const u32 = new Uint32Array(fallbackImageData.data.buffer);
+    const pal = isLight ? ABGR_PALETTE_LIGHT : ABGR_PALETTE_DARK;
+    const invZoom = 1 / fleetZoom;
+    for (let py = 0; py < targetH; py++) {
+      const worldV = fleetPanY + ((py + 0.5) / targetH) * invZoom;
+      const r = Math.min(canvasRows - 1, Math.max(0, Math.floor(worldV * canvasRows)));
+      const rowBase = r * canvasCols;
+      const outRow = py * targetW;
+      for (let px = 0; px < targetW; px++) {
+        const worldU = fleetPanX + ((px + 0.5) / targetW) * invZoom;
+        const c = Math.min(canvasCols - 1, Math.max(0, Math.floor(worldU * canvasCols)));
+        const idx = rowBase + c;
+        if (idx >= total) {
+          u32[outRow + px] = pal[0];
+          continue;
+        }
+        const raw = getFleetRawCode(idx);
+        u32[outRow + px] = (raw & 16) !== 0 ? 0xff24bffb : (pal[raw & 15] || pal[9]);
+      }
+    }
+    ctx.putImageData(fallbackImageData, 0, 0);
+  }
+
+  function renderFleetMinimap(total, isLight, startCol, endCol, startRow, endRow) {
     if (!el.fleetMinimapWrap || !el.fleetMinimap) return;
     if (fleetZoom <= 1.02) {
       el.fleetMinimapWrap.hidden = true;
@@ -1352,27 +1843,30 @@
     const mCtx = mCanvas.getContext('2d');
     if (!mCtx) return;
 
-    mCtx.fillStyle = isLight ? '#f1f5f9' : '#0a0e17';
-    mCtx.fillRect(0, 0, mw, mh);
-
-    // Sample 2x2 blocks from 512x128 -> 256x64 minimap pixels
-    const stepC = Math.max(1, Math.floor(canvasCols / mw));
-    const stepR = Math.max(1, Math.floor(canvasRows / mh));
+    if (!minimapImageData || minimapImageData.width !== mw || minimapImageData.height !== mh) {
+      minimapImageData = mCtx.createImageData(mw, mh);
+    }
+    const u32 = new Uint32Array(minimapImageData.data.buffer);
+    const pal = isLight ? ABGR_PALETTE_LIGHT : ABGR_PALETTE_DARK;
+    const bgCol = isLight ? 0xfff9f5f1 : 0xff170e0a;
+    const len = getCompactFleetLength();
     for (let mr = 0; mr < mh; mr++) {
-      const r = Math.min(canvasRows - 1, mr * stepR);
+      const r = Math.min(canvasRows - 1, Math.floor((mr * canvasRows) / mh));
       const rowOffset = r * canvasCols;
+      const outOffset = mr * mw;
       for (let mc = 0; mc < mw; mc++) {
-        const c = Math.min(canvasCols - 1, mc * stepC);
+        const c = Math.min(canvasCols - 1, Math.floor((mc * canvasCols) / mw));
         const idx = rowOffset + c;
-        if (idx >= total || idx >= compactStr.length) continue;
-        const code = (compactStr.charCodeAt(idx) - 64) & 15;
-        if (code === 0) continue;
-        mCtx.fillStyle = palette[code] || palette[9];
-        mCtx.fillRect(mc, mr, 1, 1);
+        if (idx >= total || idx >= len) {
+          u32[outOffset + mc] = bgCol;
+          continue;
+        }
+        const code = getFleetRawCode(idx) & 15;
+        u32[outOffset + mc] = code === 0 ? bgCol : (pal[code] || pal[9]);
       }
     }
+    mCtx.putImageData(minimapImageData, 0, 0);
 
-    // Draw current viewport box
     const vx = Math.floor(fleetPanX * mw);
     const vy = Math.floor(fleetPanY * mh);
     const vw = Math.max(4, Math.ceil((1 / fleetZoom) * mw));
@@ -1384,8 +1878,9 @@
     mCtx.fillRect(vx, vy, Math.min(mw - vx, vw), Math.min(mh - vy, vh));
   }
 
-  function renderFleetMagnifierLoupe(ctx, compactStr, total, palette, isLight, dpr, targetW, targetH) {
-    if (!fleetLoupeEnabled || fleetZoom >= 3.5) return;
+  function renderFleetMagnifierLoupe(ctx, total, palette, isLight, dpr, targetW, targetH) {
+    const loupeMaxZoom = total > 65536 ? 24 : 3.5;
+    if (!fleetLoupeEnabled || fleetZoom >= loupeMaxZoom) return;
     if (hoveredCanvasIndex < 1 || hoveredCanvasIndex > total) return;
     if (lastCanvasMouseX < 0 || lastCanvasMouseY < 0) return;
 
@@ -1397,7 +1892,6 @@
     const boxW = gridN * cellPx + pad * 2;
     const boxH = gridN * cellPx + pad * 2 + headerH;
 
-    // Position loupe to the left/top of cursor so it never collides with hover tooltip on bottom-right
     const cursorX = lastCanvasMouseX * dpr;
     const cursorY = lastCanvasMouseY * dpr;
     let lx = cursorX - boxW - Math.round(16 * dpr);
@@ -1416,7 +1910,6 @@
     ctx.fillRect(lx, ly, boxW, boxH);
     ctx.strokeRect(lx, ly, boxW, boxH);
 
-    // Header label
     ctx.font = '800 ' + Math.round(9 * dpr) + 'px "JetBrains Mono", monospace';
     ctx.fillStyle = isLight ? '#0369a1' : '#00ffcc';
     ctx.textBaseline = 'middle';
@@ -1426,6 +1919,7 @@
     const centerR = Math.floor(centerIdx0 / canvasCols);
     const centerC = centerIdx0 % canvasCols;
     const gridTop = ly + headerH;
+    const len = getCompactFleetLength();
 
     for (let dr = -radius; dr <= radius; dr++) {
       const r = centerR + dr;
@@ -1441,9 +1935,9 @@
           continue;
         }
         const idx0 = r * canvasCols + c;
-        if (idx0 >= total || idx0 >= compactStr.length) continue;
+        if (idx0 >= total || idx0 >= len) continue;
         const idx1 = idx0 + 1;
-        const raw = compactStr.charCodeAt(idx0) - 64;
+        const raw = getFleetRawCode(idx0);
         const code = raw & 15;
         const leased = (raw & 16) !== 0;
 
@@ -1451,13 +1945,13 @@
         ctx.fillRect(gx, gy, innerW, innerW);
 
         const actorId = 'attendee-' + String(idx1).padStart(2, '0');
-        const onPod = !!seatedActorPodMap[actorId] || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
+        const onPod = ((raw & 32) !== 0) || !!seatedActorPodMap[actorId] || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
         if (onPod) {
           const core = Math.max(2, Math.round(3.2 * dpr));
           ctx.fillStyle = isLight ? '#0f172a' : '#ffffff';
           ctx.fillRect(gx + Math.floor((innerW - core) / 2), gy + Math.floor((innerW - core) / 2), core, core);
         }
-        if (idx1 % 16 === 0) {
+        if (latestHumanSlotStride > 1 && idx1 % latestHumanSlotStride === 0) {
           const pip = Math.max(2, Math.round(2.5 * dpr));
           ctx.fillStyle = leased ? '#fbbf24' : (isLight ? '#0284c7' : '#00ffcc');
           ctx.fillRect(gx + innerW - pip, gy, pip, pip);
@@ -1473,8 +1967,9 @@
   }
 
   function renderFleetCanvas(compactStr, totalActors) {
-    if (!el.fleetCanvas || !compactStr) return;
-    const total = totalActors > 0 ? totalActors : compactStr.length;
+    if (!el.fleetCanvas || !hasCompactFleetData()) return;
+    const len = getCompactFleetLength();
+    const total = totalActors > 0 ? totalActors : len;
     const dims = computeCanvasDims(total);
     canvasCols = dims.cols;
     canvasRows = dims.rows;
@@ -1498,17 +1993,22 @@
 
     ctx.clearRect(0, 0, targetW, targetH);
 
-    // Fast O(N) pass for global counters shown in subtitle
-    let snapshottedCount = 0;
-    let activeCount = 0;
-    let leasedCount = 0;
-    const len = Math.min(total, compactStr.length);
-    for (let i = 0; i < len; i++) {
-      const raw = compactStr.charCodeAt(i) - 64;
-      const code = raw & 15;
-      if (code === 1) snapshottedCount++;
-      else if (code >= 2 && code <= 8) activeCount++;
-      if ((raw & 16) !== 0) leasedCount++;
+    // O(1) precomputed counters in binary hyper mode; fast pass only for <= 65,536 strings
+    let snapshottedCount = latestSnapshottedActors;
+    let activeCount = latestActiveCohortActors;
+    let leasedCount = latestLeasedActors;
+    if (!latestFleetBytes && compactStr) {
+      snapshottedCount = 0;
+      activeCount = 0;
+      leasedCount = 0;
+      const scanLen = Math.min(total, compactStr.length);
+      for (let i = 0; i < scanLen; i++) {
+        const raw = compactStr.charCodeAt(i) - 64;
+        const code = raw & 15;
+        if (code === 1) snapshottedCount++;
+        else if (code >= 2 && code <= 8) activeCount++;
+        if ((raw & 16) !== 0) leasedCount++;
+      }
     }
 
     const worldW = targetW * fleetZoom;
@@ -1532,132 +2032,138 @@
     const dotW = Math.max(1, cellW - gapX);
     const dotH = Math.max(1, cellH - gapY);
 
-    for (let r = startRow; r <= endRow; r++) {
-      const rowBase = r * canvasCols;
-      const y = r * cellH - offsetY;
-      for (let c = startCol; c <= endCol; c++) {
-        const i = rowBase + c;
-        if (i >= len) break;
-        const idx1 = i + 1;
-        const raw = compactStr.charCodeAt(i) - 64;
-        const code = raw & 15;
-        const leased = (raw & 16) !== 0;
-        const x = c * cellW - offsetX;
-        const color = palette[code] || palette[9];
+    let renderedViaGPUOrBlit = false;
+    if (!isCardTier && total > 65536) {
+      if (renderFleetWebGL2(targetW, targetH, canvasCols, canvasRows, isLight)) {
+        renderedViaGPUOrBlit = true;
+      } else {
+        if (el.fleetWebglCanvas) el.fleetWebglCanvas.hidden = true;
+        renderFleetImageDataFallback(ctx, total, isLight, targetW, targetH);
+        renderedViaGPUOrBlit = true;
+      }
+    } else if (el.fleetWebglCanvas) {
+      el.fleetWebglCanvas.hidden = true;
+    }
 
-        if (isCardTier) {
-          // Tier 3 (16x - 32x+): Inspector Mini-Cards with Actor #ID, State Label, Pod Name & QR Tag
-          const actorId = 'attendee-' + String(idx1).padStart(2, '0');
-          const seatInfo = seatedActorPodMap[actorId];
-          const liveView = latestActorsMap[actorId];
-          const podName = (seatInfo && seatInfo.podName) || (liveView && liveView.worker_pod) || '';
-          const sPod = (seatInfo && seatInfo.shortPod) || (podName ? shortPodName(podName) : '');
-          const onPod = !!podName || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
-          const isQRSlot = (idx1 % 16 === 0);
+    if (!renderedViaGPUOrBlit) {
+      for (let r = startRow; r <= endRow; r++) {
+        const rowBase = r * canvasCols;
+        const y = r * cellH - offsetY;
+        for (let c = startCol; c <= endCol; c++) {
+          const i = rowBase + c;
+          if (i >= len || i >= total) break;
+          const idx1 = i + 1;
+          const raw = getFleetRawCode(i);
+          const code = raw & 15;
+          const leased = (raw & 16) !== 0;
+          const x = c * cellW - offsetX;
+          const color = palette[code] || palette[9];
 
-          ctx.fillStyle = isLight
-            ? (code === 0 ? '#f1f5f9' : '#ffffff')
-            : (code === 0 ? '#0f172a' : '#131d31');
-          ctx.fillRect(x, y, dotW, dotH);
+          if (isCardTier) {
+            const actorId = 'attendee-' + String(idx1).padStart(2, '0');
+            const seatInfo = seatedActorPodMap[actorId];
+            const liveView = latestActorsMap[actorId];
+            const podName = (seatInfo && seatInfo.podName) || (liveView && liveView.worker_pod) || '';
+            const sPod = (seatInfo && seatInfo.shortPod) || (podName ? shortPodName(podName) : '');
+            const onPod = ((raw & 32) !== 0) || !!podName || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
+            const isQRSlot = latestHumanSlotStride > 1 && (idx1 % latestHumanSlotStride === 0);
 
-          // Colored top accent bar
-          const barH = Math.max(2.5 * dpr, Math.min(4.5 * dpr, dotH * 0.13));
-          ctx.fillStyle = color;
-          ctx.fillRect(x, y, dotW, barH);
+            ctx.fillStyle = isLight
+              ? (code === 0 ? '#f1f5f9' : '#ffffff')
+              : (code === 0 ? '#0f172a' : '#131d31');
+            ctx.fillRect(x, y, dotW, dotH);
 
-          // Card border
-          ctx.strokeStyle = leased ? '#fbbf24' : color;
-          ctx.lineWidth = (onPod || leased) ? Math.max(1.5, 1.6 * dpr) : Math.max(1, 1.0 * dpr);
-          ctx.strokeRect(x + 0.5, y + 0.5, dotW - 1, dotH - 1);
+            const barH = Math.max(2.5 * dpr, Math.min(4.5 * dpr, dotH * 0.13));
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, dotW, barH);
 
-          // Text labels inside card
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(x + 1, y + 1, Math.max(1, dotW - 2), Math.max(1, dotH - 2));
-          ctx.clip();
-          ctx.textBaseline = 'top';
+            ctx.strokeStyle = leased ? '#fbbf24' : color;
+            ctx.lineWidth = (onPod || leased) ? Math.max(1.5, 1.6 * dpr) : Math.max(1, 1.0 * dpr);
+            ctx.strokeRect(x + 0.5, y + 0.5, dotW - 1, dotH - 1);
 
-          const idFontPx = Math.round(Math.max(8, Math.min(12.5, cssCellW * 0.21)) * dpr);
-          ctx.font = '800 ' + idFontPx + 'px "JetBrains Mono", monospace';
-          ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
-          ctx.fillText('#' + idx1, x + 3.5 * dpr, y + barH + 2 * dpr);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(x + 1, y + 1, Math.max(1, dotW - 2), Math.max(1, dotH - 2));
+            ctx.clip();
+            ctx.textBaseline = 'top';
 
-          // Top-right QR / Live marker
-          if (leased || isQRSlot) {
-            const badgeColor = leased ? '#f59e0b' : (isLight ? '#0284c7' : '#00ffcc');
-            if (cssCellW >= 48) {
-              ctx.font = '800 ' + Math.round(7.5 * dpr) + 'px "JetBrains Mono", monospace';
-              ctx.fillStyle = badgeColor;
-              const bTxt = leased ? 'LIVE' : 'QR';
-              const tw = ctx.measureText(bTxt).width;
-              ctx.fillText(bTxt, x + dotW - tw - 3.5 * dpr, y + barH + 2.5 * dpr);
-            } else {
-              const pip = Math.max(3, Math.round(4 * dpr));
-              ctx.fillStyle = badgeColor;
-              ctx.fillRect(x + dotW - pip - 2 * dpr, y + barH + 2 * dpr, pip, pip);
+            const idFontPx = Math.round(Math.max(7.5, Math.min(12.5, cssCellW * 0.19)) * dpr);
+            ctx.font = '800 ' + idFontPx + 'px "JetBrains Mono", monospace';
+            ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
+            ctx.fillText('#' + idx1, x + 3.5 * dpr, y + barH + 2 * dpr);
+
+            if (leased || isQRSlot) {
+              const badgeColor = leased ? '#f59e0b' : (isLight ? '#0284c7' : '#00ffcc');
+              if (cssCellW >= 52) {
+                ctx.font = '800 ' + Math.round(7.5 * dpr) + 'px "JetBrains Mono", monospace';
+                ctx.fillStyle = badgeColor;
+                const bTxt = leased ? 'LIVE' : 'QR';
+                const tw = ctx.measureText(bTxt).width;
+                ctx.fillText(bTxt, x + dotW - tw - 3.5 * dpr, y + barH + 2.5 * dpr);
+              } else {
+                const pip = Math.max(3, Math.round(4 * dpr));
+                ctx.fillStyle = badgeColor;
+                ctx.fillRect(x + dotW - pip - 2 * dpr, y + barH + 2 * dpr, pip, pip);
+              }
             }
-          }
 
-          // Middle row: State / Activity label
-          const stateFontPx = Math.round(Math.max(7.2, Math.min(10.5, cssCellW * 0.17)) * dpr);
-          ctx.font = '800 ' + stateFontPx + 'px "JetBrains Mono", monospace';
-          ctx.fillStyle = color;
-          const stLabel = cssCellW >= 54 ? (STATE_FULL_LABELS[code] || 'ACTIVE') : (STATE_SHORT_LABELS[code] || 'ACT');
-          ctx.fillText(stLabel, x + 3.5 * dpr, y + barH + idFontPx + 4 * dpr);
+            const stateFontPx = Math.round(Math.max(7.2, Math.min(10.5, cssCellW * 0.17)) * dpr);
+            ctx.font = '800 ' + stateFontPx + 'px "JetBrains Mono", monospace';
+            ctx.fillStyle = color;
+            const stLabel = cssCellW >= 54 ? (STATE_FULL_LABELS[code] || 'ACTIVE') : (STATE_SHORT_LABELS[code] || 'ACT');
+            ctx.fillText(stLabel, x + 3.5 * dpr, y + barH + idFontPx + 4 * dpr);
 
-          // Bottom row: Assigned Worker Pod or GCS / QR status (when height permits)
-          if (cssCellH >= 34) {
-            const metaFontPx = Math.round(Math.max(6.5, Math.min(9.5, cssCellW * 0.15)) * dpr);
-            ctx.font = '700 ' + metaFontPx + 'px "JetBrains Mono", monospace';
-            const metaY = y + dotH - metaFontPx - 3 * dpr;
-            if (sPod) {
-              ctx.fillStyle = isLight ? '#0369a1' : '#38bdf8';
-              ctx.fillText(sPod, x + 3.5 * dpr, metaY);
-            } else if (code === 6 || code === 1) {
-              ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
-              ctx.fillText(cssCellW >= 52 ? 'gcs://snap' : 'GCS', x + 3.5 * dpr, metaY);
-            } else if (isQRSlot) {
-              ctx.fillStyle = isLight ? '#0284c7' : '#00ffcc';
-              ctx.fillText('QR 16x', x + 3.5 * dpr, metaY);
+            if (cssCellH >= 34) {
+              const metaFontPx = Math.round(Math.max(6.5, Math.min(9.5, cssCellW * 0.15)) * dpr);
+              ctx.font = '700 ' + metaFontPx + 'px "JetBrains Mono", monospace';
+              const metaY = y + dotH - metaFontPx - 3 * dpr;
+              if (sPod) {
+                ctx.fillStyle = isLight ? '#0369a1' : '#38bdf8';
+                ctx.fillText(sPod, x + 3.5 * dpr, metaY);
+              } else if (code === 6 || code === 1) {
+                ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+                ctx.fillText(cssCellW >= 52 ? 'gcs://snap' : 'GCS', x + 3.5 * dpr, metaY);
+              } else if (isQRSlot) {
+                ctx.fillStyle = isLight ? '#0284c7' : '#00ffcc';
+                ctx.fillText('QR ' + latestHumanSlotStride + 'x', x + 3.5 * dpr, metaY);
+              }
             }
-          }
-          ctx.restore();
-        } else if (isTileTier) {
-          // Tier 2 (4x - 12x): Tactical Cohort Tiles with Physical Pod Seat core & QR corner markers
-          ctx.fillStyle = color;
-          ctx.fillRect(x, y, dotW, dotH);
+            ctx.restore();
+          } else if (isTileTier) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, dotW, dotH);
 
-          const actorId = 'attendee-' + String(idx1).padStart(2, '0');
-          const onPod = !!seatedActorPodMap[actorId] || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
-          if (onPod) {
-            const core = Math.max(2 * dpr, Math.min(5 * dpr, Math.min(dotW, dotH) * 0.34));
-            ctx.fillStyle = isLight ? '#0f172a' : '#ffffff';
-            ctx.fillRect(x + (dotW - core) * 0.5, y + (dotH - core) * 0.5, core, core);
-          }
-          if (idx1 % 16 === 0) {
-            const pip = Math.max(2 * dpr, Math.min(4 * dpr, Math.min(dotW, dotH) * 0.28));
-            ctx.fillStyle = leased ? '#fbbf24' : (isLight ? '#0f172a' : '#00ffcc');
-            ctx.fillRect(x + dotW - pip, y, pip, pip);
-          }
-          if (leased) {
-            ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
-            ctx.lineWidth = Math.max(1.2, 1.4 * dpr);
-            ctx.strokeRect(x - 0.5, y - 0.5, dotW + 1, dotH + 1);
-          }
-        } else {
-          // Tier 1 (1x - 3x): High-density 65,536 Macro Heatmap
-          ctx.fillStyle = color;
-          ctx.fillRect(x, y, dotW, dotH);
-          if (leased) {
-            ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
-            ctx.lineWidth = Math.max(1, 1.2 * dpr);
-            ctx.strokeRect(x - 0.5, y - 0.5, dotW + 1, dotH + 1);
+            const actorId = 'attendee-' + String(idx1).padStart(2, '0');
+            const onPod = ((raw & 32) !== 0) || !!seatedActorPodMap[actorId] || code === 2 || code === 3 || code === 4 || code === 5 || code === 7;
+            if (onPod) {
+              const core = Math.max(2 * dpr, Math.min(5 * dpr, Math.min(dotW, dotH) * 0.34));
+              ctx.fillStyle = isLight ? '#0f172a' : '#ffffff';
+              ctx.fillRect(x + (dotW - core) * 0.5, y + (dotH - core) * 0.5, core, core);
+            }
+            if (latestHumanSlotStride > 1 && idx1 % latestHumanSlotStride === 0) {
+              const pip = Math.max(2 * dpr, Math.min(4 * dpr, Math.min(dotW, dotH) * 0.28));
+              ctx.fillStyle = leased ? '#fbbf24' : (isLight ? '#0f172a' : '#00ffcc');
+              ctx.fillRect(x + dotW - pip, y, pip, pip);
+            }
+            if (leased) {
+              ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
+              ctx.lineWidth = Math.max(1.2, 1.4 * dpr);
+              ctx.strokeRect(x - 0.5, y - 0.5, dotW + 1, dotH + 1);
+            }
+          } else {
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, dotW, dotH);
+            if (leased) {
+              ctx.strokeStyle = isLight ? '#0f172a' : '#ffffff';
+              ctx.lineWidth = Math.max(1, 1.2 * dpr);
+              ctx.strokeRect(x - 0.5, y - 0.5, dotW + 1, dotH + 1);
+            }
           }
         }
       }
     }
 
-    // Highlighted actor spotlight ring (from Quick Jump or "65k ⌖" button on a Pod seat)
+    // Highlighted actor spotlight ring
     if (highlightedActorIndex >= 1 && highlightedActorIndex <= total && Date.now() < highlightedActorUntil) {
       const hIdx0 = highlightedActorIndex - 1;
       const hr = Math.floor(hIdx0 / canvasCols);
@@ -1686,17 +2192,15 @@
       ctx.strokeRect(hx - 1, hy - 1, dotW + 2, dotH + 2);
     }
 
-    // Floating 10x Magnifier Loupe when hovering at low zoom
-    renderFleetMagnifierLoupe(ctx, compactStr, total, palette, isLight, dpr, targetW, targetH);
-
-    // Corner Mini-Map Navigator when zoomed in
-    renderFleetMinimap(compactStr, total, palette, isLight, startCol, endCol, startRow, endRow);
+    renderFleetMagnifierLoupe(ctx, total, palette, isLight, dpr, targetW, targetH);
+    renderFleetMinimap(total, isLight, startCol, endCol, startRow, endRow);
 
     if (el.fleetSub) {
       const visibleActors = (endCol - startCol + 1) * (endRow - startRow + 1);
+      const zoomPresetsHint = total > 65536 ? '16×/128×/256×' : '4×/16×/32×';
       const zoomNote = fleetZoom > 1.02
         ? (' · viewing ' + visibleActors.toLocaleString() + ' at ' + (fleetZoom < 10 ? fleetZoom.toFixed(1).replace(/\.0$/, '') : Math.round(fleetZoom)) + '× (drag to pan)')
-        : ' · scroll or click 4×/16×/32× to zoom';
+        : (total > 65536 ? (' · zoom ' + zoomPresetsHint) : (' · scroll or click ' + zoomPresetsHint + ' to zoom'));
       const leaseNote = leasedCount > 0 ? (' · ' + leasedCount + ' live QR lease' + (leasedCount === 1 ? '' : 's')) : '';
       el.fleetSub.textContent =
         total.toLocaleString() + ' actors (' + canvasCols + '×' + canvasRows + ') · ' +
@@ -1705,12 +2209,9 @@
     }
   }
 
-  // renderFleetGrid draws one badge per actor the gateway reports, in ID
-  // order, and drops badges for actors it no longer reports. When the gateway
-  // sends fleet_compact (>256 actors), it renders the high-density canvas matrix.
   function renderFleetGrid(actorsMap) {
     if (!el.fleetGrid) return;
-    if (latestFleetCompact && latestFleetCompact.length > 256) {
+    if (hasCompactFleetData()) {
       el.fleetGrid.hidden = true;
       if (el.fleetCanvasWrap) {
         el.fleetCanvasWrap.hidden = false;
@@ -1719,7 +2220,7 @@
         el.fleetZoomToolbar.hidden = false;
       }
       syncFleetZoomToolbarUI();
-      renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+      renderFleetCanvas(latestFleetCompact, latestActorCount || getCompactFleetLength());
       return;
     }
 
@@ -2578,14 +3079,12 @@
     lastCanvasMouseY = -1;
     if (hoveredCanvasIndex !== -1) {
       hoveredCanvasIndex = -1;
-      if (latestFleetCompact && latestFleetCompact.length > 256) {
-        renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
-      }
+      requestFleetRedraw();
     }
   }
 
   function actorIndexFromCanvasEvent(e) {
-    if (!el.fleetCanvas || !latestFleetCompact) return -1;
+    if (!el.fleetCanvas || !hasCompactFleetData()) return -1;
     const rect = el.fleetCanvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return -1;
     const relX = Math.max(0, Math.min(rect.width - 0.01, e.clientX - rect.left));
@@ -2600,7 +3099,7 @@
     const col = Math.floor(worldUVX * canvasCols);
     const row = Math.floor(worldUVY * canvasRows);
     const idx = row * canvasCols + col + 1;
-    const total = latestActorCount || latestFleetCompact.length;
+    const total = latestActorCount || getCompactFleetLength();
     if (idx < 1 || idx > total) return -1;
     return idx;
   }
@@ -2614,21 +3113,19 @@
     fleetPanX = uvX - 0.5 / fleetZoom;
     fleetPanY = uvY - 0.5 / fleetZoom;
     clampFleetPan();
-    if (latestFleetCompact && latestFleetCompact.length > 256) {
-      renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
-    }
+    requestFleetRedraw();
   }
 
   function triggerFleetJumpInput() {
     if (!el.fleetJumpInput) return;
     const raw = (el.fleetJumpInput.value || '').trim().replace(/^#/, '');
     const num = parseInt(raw, 10);
-    const total = latestActorCount || (latestFleetCompact ? latestFleetCompact.length : 65536);
+    const total = latestActorCount || getCompactFleetLength() || 65536;
     if (!num || num < 1 || num > total) {
       el.fleetJumpInput.focus();
       return;
     }
-    focusActorOnFleetCanvas(num, 16);
+    focusActorOnFleetCanvas(num, total > 65536 ? 256 : 16);
   }
 
   function initControls() {
@@ -2817,6 +3314,7 @@
         const nodeName = target.dataset.node || '';
         if (kind === 'pod' && podName) {
           const info = podHoverDirectory[podName] || { podName: podName, nodeName: nodeName, actors: [], seats: latestSeatsPerWorker };
+          const seatsCount = info.seats || latestSeatsPerWorker;
           const actors = info.actors || [];
           const cls = dominantPodClass(actors);
           const items = actors.map((wa) => {
@@ -2827,14 +3325,17 @@
           showHoverTooltip({
             cls: cls,
             title: podName,
-            tag: actors.length + '/' + info.seats + ' SEATS',
-            state: actors.length > 0 ? (actors.length + ' active actor' + (actors.length === 1 ? '' : 's') + ' on pod · Click to zoom into node') : 'All 16 actor seats idle · Click to zoom into node',
+            tag: actors.length + '/' + seatsCount + ' SEATS',
+            state: actors.length > 0 ? (actors.length + ' active actor' + (actors.length === 1 ? '' : 's') + ' on pod · Click to zoom into node') : ('All ' + seatsCount + ' actor seats idle · Click to zoom into node'),
             meta: 'GKE Node: ' + nodeDesc,
             items: items
           }, e.clientX, e.clientY);
         } else if (kind === 'seat') {
           const seatNum = target.dataset.seat || '1';
           const actorId = target.dataset.actor || '';
+          const podSeats = (podName && podHoverDirectory[podName] && podHoverDirectory[podName].seats)
+            ? podHoverDirectory[podName].seats
+            : latestSeatsPerWorker;
           const clickHint = topoSelectedPod
             ? ' · Click card for Actor Spotlight'
             : ' · Click to zoom into pod (' + shortPodName(podName) + ')';
@@ -2844,14 +3345,14 @@
             showHoverTooltip({
               cls: b.cls,
               title: formatActorName(actorId) + ' (' + actorId + ')',
-              tag: 'SEAT ' + seatNum + '/16',
+              tag: 'SEAT ' + seatNum + '/' + podSeats,
               state: (b.sub ? (b.label + ' · ' + b.sub) : b.label) + clickHint,
               meta: 'Worker Pod: ' + podName
             }, e.clientX, e.clientY);
           } else {
             showHoverTooltip({
               cls: 'never-started',
-              title: 'Seat ' + seatNum + ' of 16',
+              title: 'Seat ' + seatNum + ' of ' + podSeats,
               tag: 'IDLE',
               state: 'Available execution seat' + (topoSelectedPod ? '' : clickHint),
               meta: 'Worker Pod: ' + podName
@@ -2861,19 +3362,19 @@
       });
       el.workerList.addEventListener('mouseleave', hideHoverTooltip);
       el.workerList.addEventListener('click', function(e) {
-        // 1. "65k ⌖" button inside Level 2 Single Pod View: locate & zoom to actor in the 65k fleet matrix
+        // 1. "65k ⌖" / "16M ⌖" button inside Level 2 Single Pod View: locate & zoom to actor in the fleet matrix
         const locateBtn = e.target.closest('[data-locate-actor]');
         if (locateBtn) {
           e.stopPropagation();
           const actorId = locateBtn.dataset.locateActor;
           if (actorId) {
             switchViewMode('grid');
-            focusActorOnFleetCanvas(actorId, 16);
+            focusActorOnFleetCanvas(actorId, latestActorCount > 65536 ? 256 : 16);
           }
           return;
         }
 
-        // 2. Explicit Node corner zoom button or Node header click -> Level 1 (Single Node View: 16 pods with slots)
+        // 2. Explicit Node corner zoom button or Node header click -> Level 1 (Single Node View: pods with slots)
         const zoomNodeTrigger = e.target.closest('[data-zoom-node]');
         if (zoomNodeTrigger) {
           e.stopPropagation();
@@ -2881,7 +3382,7 @@
           return;
         }
 
-        // 3. Explicit Pod corner zoom button or Pod header click -> Level 2 (Single Pod View: 16 actors in pod)
+        // 3. Explicit Pod corner zoom button or Pod header click -> Level 2 (Single Pod View: actors in pod)
         const zoomPodTrigger = e.target.closest('[data-zoom-pod]');
         if (zoomPodTrigger) {
           e.stopPropagation();
@@ -2889,20 +3390,21 @@
           return;
         }
 
-        // 4. In Level 2 (Single Pod View), clicking an occupied actor seat card opens Spotlight & highlights in 65k grid
+        // 4. In Level 2 (Single Pod View), clicking an occupied actor seat card opens Spotlight & highlights in fleet matrix
         const podActorCard = e.target.closest('.pod-actor-seat-card');
         if (podActorCard) {
           const actorId = podActorCard.dataset.actor;
           if (actorId) {
-            focusActorOnFleetCanvas(actorId, Math.max(fleetZoom, 16));
+            const minCardZoom = latestActorCount > 65536 ? 256 : 16;
+            focusActorOnFleetCanvas(actorId, Math.max(fleetZoom, minCardZoom));
             openSpotlightDrawer(actorId);
           }
           return;
         }
 
-        // 5. Clicking a cell inside a 4x4 grid:
-        //    - If it's a pod cell inside Level 0 (All 16 Nodes), zoom into that Node (Level 1) so all 16 pods with their slots take the entire space!
-        //    - If it's a seat cell inside Level 1 (Single Node View), zoom into that Pod (Level 2) so all 16 actors in that pod take the entire space!
+        // 5. Clicking a cell inside a 4x4 or 8x8 grid:
+        //    - If it's a pod cell inside Level 0 (All Nodes), zoom into that Node (Level 1)
+        //    - If it's a seat cell inside Level 1 (Single Node View), zoom into that Pod (Level 2)
         const cell = e.target.closest('.seat-cell');
         if (cell) {
           const kind = cell.dataset.hoverKind;
@@ -2921,7 +3423,7 @@
       });
     }
 
-    // 65,536 Fleet Matrix Zoom Toolbar Controls
+    // Fleet Matrix Zoom Toolbar Controls (65,536 & 16,777,216 actors)
     if (el.fleetZoomPresets) {
       el.fleetZoomPresets.forEach((btn) => {
         btn.addEventListener('click', function() {
@@ -2932,13 +3434,27 @@
     }
     if (el.btnFleetZoomIn) {
       el.btnFleetZoomIn.addEventListener('click', function() {
-        const next = fleetZoom < 2 ? 2 : (fleetZoom < 4 ? 4 : (fleetZoom < 8 ? 8 : (fleetZoom < 16 ? 16 : 32)));
+        const steps = latestActorCount > 65536 ? [2, 4, 8, 16, 32, 64, 128, 256, 512] : [2, 4, 8, 16, 32];
+        let next = steps[steps.length - 1];
+        for (let i = 0; i < steps.length; i++) {
+          if (fleetZoom < steps[i] - 0.05) {
+            next = steps[i];
+            break;
+          }
+        }
         setFleetZoom(next, 0.5, 0.5);
       });
     }
     if (el.btnFleetZoomOut) {
       el.btnFleetZoomOut.addEventListener('click', function() {
-        const prev = fleetZoom > 16 ? 16 : (fleetZoom > 8 ? 8 : (fleetZoom > 4 ? 4 : (fleetZoom > 2 ? 2 : 1)));
+        const steps = latestActorCount > 65536 ? [1, 2, 4, 8, 16, 32, 64, 128, 256] : [1, 2, 4, 8, 16];
+        let prev = 1;
+        for (let i = steps.length - 1; i >= 0; i--) {
+          if (fleetZoom > steps[i] + 0.05) {
+            prev = steps[i];
+            break;
+          }
+        }
         setFleetZoom(prev, 0.5, 0.5);
       });
     }
@@ -2957,9 +3473,7 @@
       el.btnFleetLoupe.addEventListener('click', function() {
         fleetLoupeEnabled = !fleetLoupeEnabled;
         syncFleetZoomToolbarUI();
-        if (latestFleetCompact && latestFleetCompact.length > 256) {
-          renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
-        }
+        requestFleetRedraw();
       });
     }
     if (el.btnFleetJump) {
@@ -3000,9 +3514,7 @@
           fleetPanX = fleetDragStartPanX - (dx / rect.width) / fleetZoom;
           fleetPanY = fleetDragStartPanY - (dy / rect.height) / fleetZoom;
           clampFleetPan();
-          if (latestFleetCompact && latestFleetCompact.length > 256) {
-            renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
-          }
+          requestFleetRedraw();
         }
       }
     });
@@ -3016,17 +3528,27 @@
       }
     });
 
+    if (typeof MutationObserver !== 'undefined' && document.documentElement) {
+      const themeObserver = new MutationObserver(function() {
+        requestFleetRedraw();
+      });
+      themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-theme']
+      });
+    }
+
     if (el.fleetCanvas) {
       // Wheel / Trackpad Pinch Zoom centered on cursor
       el.fleetCanvas.addEventListener('wheel', function(e) {
-        if (!latestFleetCompact || latestFleetCompact.length <= 256) return;
+        if (!hasCompactFleetData()) return;
         e.preventDefault();
         const rect = el.fleetCanvas.getBoundingClientRect();
         if (!rect.width || !rect.height) return;
         const uvX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
         const uvY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
         const factor = e.deltaY < 0 ? 1.28 : (1 / 1.28);
-        const nextZoom = Math.max(1, Math.min(32, fleetZoom * factor));
+        const nextZoom = Math.max(1, Math.min(maxFleetZoom(), fleetZoom * factor));
         setFleetZoom(nextZoom, uvX, uvY);
       }, { passive: false });
 
@@ -3046,13 +3568,18 @@
 
       // Double-click to zoom in centered on clicked actor neighborhood
       el.fleetCanvas.addEventListener('dblclick', function(e) {
-        if (!latestFleetCompact || latestFleetCompact.length <= 256) return;
+        if (!hasCompactFleetData()) return;
         e.preventDefault();
         const rect = el.fleetCanvas.getBoundingClientRect();
         if (!rect.width || !rect.height) return;
         const uvX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
         const uvY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
-        const nextZoom = fleetZoom < 3.5 ? 4 : (fleetZoom < 14 ? 16 : (fleetZoom < 28 ? 32 : 1));
+        let nextZoom;
+        if (latestActorCount > 65536) {
+          nextZoom = fleetZoom < 12 ? 16 : (fleetZoom < 96 ? 128 : (fleetZoom < 220 ? 256 : 1));
+        } else {
+          nextZoom = fleetZoom < 3.5 ? 4 : (fleetZoom < 14 ? 16 : (fleetZoom < 28 ? 32 : 1));
+        }
         setFleetZoom(nextZoom, uvX, uvY);
       });
 
@@ -3066,26 +3593,31 @@
           hideHoverTooltip();
           return;
         }
-        const needsRedraw = (hoveredCanvasIndex !== idx) || (fleetLoupeEnabled && fleetZoom < 3.5);
+        const loupeMaxZoom = latestActorCount > 65536 ? 24 : 3.5;
+        const needsRedraw = (hoveredCanvasIndex !== idx) || (fleetLoupeEnabled && fleetZoom < loupeMaxZoom);
         hoveredCanvasIndex = idx;
         if (needsRedraw) {
-          renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
+          requestFleetRedraw();
         }
         const actorId = 'attendee-' + String(idx).padStart(2, '0');
-        const decoded = window.ActorView.decodeCompactBadge(latestFleetCompact.charCodeAt(idx - 1));
+        const rawByte = getFleetRawCode(idx - 1);
+        const decoded = window.ActorView.decodeCompactBadge(64 + (rawByte & 31));
         const liveView = latestActorsMap[actorId];
         const seatInfo = seatedActorPodMap[actorId];
         const b = liveView ? window.ActorView.badge(liveView) : decoded;
         const leased = (liveView && liveView.leased) || decoded.leased;
-        const isReservable = (idx % 16 === 0);
-        const tag = leased ? 'LIVE QR LEASE' : (isReservable ? 'QR SLOT (16x)' : ('#' + idx));
+        const onPodFlag = (rawByte & 32) !== 0;
+        const isReservable = latestHumanSlotStride > 1 && (idx % latestHumanSlotStride === 0);
+        const tag = leased ? 'LIVE QR LEASE' : (isReservable ? ('QR SLOT (' + latestHumanSlotStride + 'x)') : ('#' + idx));
         const podName = (seatInfo && seatInfo.podName) || (liveView && liveView.worker_pod) || '';
         const nodeLabel = (seatInfo && seatInfo.nodeLabel) ? (' (' + seatInfo.nodeLabel + ')') : '';
         const podMeta = podName
-          ? ('Seated on Pod: ' + podName + nodeLabel + (seatInfo ? (' · Seat ' + seatInfo.seatIndex + '/16') : ''))
-          : (decoded.code === 6 || decoded.code === 1
-              ? 'Checkpointed in GCS · 0 pod RAM consumed while idle'
-              : (isReservable ? 'Reserved for live QR scan · click to inspect' : 'Click to open Actor Spotlight · Double-click or scroll to zoom'));
+          ? ('Seated on Pod: ' + podName + nodeLabel + (seatInfo ? (' · Seat ' + seatInfo.seatIndex + '/' + latestSeatsPerWorker) : ''))
+          : (onPodFlag
+              ? 'Seated on active worker pod · Click to open Actor Spotlight'
+              : (decoded.code === 6 || decoded.code === 1
+                  ? 'Checkpointed in GCS · 0 pod RAM consumed while idle'
+                  : (isReservable ? 'Reserved for live QR scan · click to inspect' : 'Click to open Actor Spotlight · Double-click or scroll to zoom')));
         showHoverTooltip({
           cls: b.cls,
           title: formatActorName(actorId) + ' (' + actorId + ')',
@@ -3106,11 +3638,7 @@
           openSpotlightDrawer(actorId);
         }
       });
-      window.addEventListener('resize', function() {
-        if (latestFleetCompact && latestFleetCompact.length > 256) {
-          renderFleetCanvas(latestFleetCompact, latestActorCount || latestFleetCompact.length);
-        }
-      });
+      window.addEventListener('resize', requestFleetRedraw);
     }
   }
 
@@ -3131,7 +3659,6 @@
     fetchTelemetry();
     connectStageStream();
     fetchStreamFeedHistory();
-    setInterval(fetchTelemetry, 500);
     setInterval(fetchSimulationStatus, 2000);
   });
 })();

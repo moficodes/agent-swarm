@@ -93,6 +93,35 @@ func (c attendeeControl) List(ctx context.Context) ([]actorstate.Status, error) 
 	return filtered, nil
 }
 
+func (c attendeeControl) ListActiveSeats(ctx context.Context) ([]actorstate.Status, error) {
+	sl, ok := c.ActorControl.(actorstate.ActiveSeatLister)
+	if !ok {
+		return c.List(ctx)
+	}
+	statuses, err := sl.ListActiveSeats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]actorstate.Status, 0, len(statuses))
+	for _, s := range statuses {
+		if auth.ValidAttendeeID(s.Name, c.maxActors) {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered, nil
+}
+
+func (c attendeeControl) Get(ctx context.Context, name string) (actorstate.Status, error) {
+	if !auth.ValidAttendeeID(name, c.maxActors) {
+		return actorstate.Status{}, fmt.Errorf("invalid attendee actor %q", name)
+	}
+	getter, ok := c.ActorControl.(actorstate.SingleActorGetter)
+	if !ok {
+		return actorstate.Status{}, fmt.Errorf("GetActor unsupported")
+	}
+	return getter.Get(ctx, name)
+}
+
 // WithPollInterval sets how often actor state is read from ateapi.
 func WithPollInterval(d time.Duration) Option {
 	return func(g *Gateway) {
@@ -187,6 +216,26 @@ func WithSeatsPerWorker(n int) Option {
 	return func(g *Gateway) {
 		if n > 0 {
 			g.seatsPerWorker = n
+		}
+	}
+}
+
+// WithHumanSlotStride sets the periodic human-reserved QR slot stride (e.g. 16
+// on megaswarm, 4096 on hyperswarm). Zero derives the stride from maxActors.
+func WithHumanSlotStride(stride int) Option {
+	return func(g *Gateway) {
+		if stride > 0 {
+			g.humanSlotStride = stride
+		}
+	}
+}
+
+// WithMaxSimulationMPS overrides the maximum target MPS configured on
+// data-generator when running hyperswarm simulations (>65,536 actors).
+func WithMaxSimulationMPS(mps int) Option {
+	return func(g *Gateway) {
+		if mps > 0 {
+			g.maxSimulationMPS = mps
 		}
 	}
 }
@@ -287,6 +336,8 @@ type Gateway struct {
 	staticFS            fs.FS
 	maxActors           int
 	seatsPerWorker      int
+	humanSlotStride     int
+	maxSimulationMPS    int
 	broker              *feed.Broker
 	actions             *feed.Log
 
@@ -399,6 +450,17 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		opt(gw)
 	}
 
+	if gw.humanSlotStride <= 0 {
+		if gw.maxActors > actorstate.HyperFleetThreshold {
+			gw.humanSlotStride = 4096
+		} else if gw.maxActors > actorstate.CompactFleetThreshold {
+			gw.humanSlotStride = 16
+		}
+	}
+	if gw.maxActors > actorstate.HyperFleetThreshold && cap(gw.suspendSem) < 4096 {
+		gw.suspendSem = make(chan struct{}, 4096)
+	}
+
 	if gw.secret == "" {
 		gw.secret = randomHex(32)
 	}
@@ -413,6 +475,12 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		var simOpts []SimulationOption
 		if gw.dataGeneratorURL != "" {
 			simOpts = append(simOpts, WithDataGeneratorExecutor(gw.dataGeneratorURL, gw.simulationTurnURL, gw.presenterKey))
+		}
+		if gw.maxActors > actorstate.HyperFleetThreshold {
+			simOpts = append(simOpts, WithSimulationMaxConcurrentTurns(65536))
+			if gw.maxSimulationMPS > 0 {
+				simOpts = append(simOpts, WithSimulationMaxTargetMPS(gw.maxSimulationMPS))
+			}
 		}
 		gw.simController = NewSimulationRunner(gw, simOpts...)
 	}
@@ -431,14 +499,15 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		transport = gw.httpClient.Transport
 	}
 	gw.proxy = actorproxy.New(targetURL, gw.atespace, []byte(gw.secret), transport, gw.model, actorproxy.Hooks{
-		OnActorError: func(attendeeID string) { gw.setActivity(attendeeID, types.ActivityIdle) },
-		OnReply:      gw.onActorReply,
-		OnError:      gw.onProxyError,
+		OnActorError:       func(attendeeID string) { gw.setActivity(attendeeID, types.ActivityIdle) },
+		OnReply:            gw.onActorReply,
+		OnReplyWithContext: gw.onActorReplyWithContext,
+		OnError:            gw.onProxyError,
 	})
 
 	gw.routes()
 
-	gw.board = actorstate.NewBoard(gw.publishView)
+	gw.board = actorstate.NewBoardWithCapacity(gw.publishView, gw.maxActors)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	suspendCtx, suspendCancel := context.WithCancel(context.Background())
@@ -487,7 +556,7 @@ func (g *Gateway) StopSimulation() {
 func (g *Gateway) ClearSimulatedActivity() {
 	isProtected := g.simCleanupProtectedChecker()
 	if g.board != nil {
-		g.board.ClearUnleasedActivity(isProtected)
+		g.board.ClearUnleasedActivityIndices(g.simCleanupProtectedIndices(), isProtected, g.HumanSlotStride())
 	}
 	if g.proxy != nil {
 		g.proxy.ClearUnleasedPending(isProtected)
@@ -598,6 +667,7 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/actor/", g.requirePresenter(g.handleActorDetails))
 	g.mux.HandleFunc("/api/actor", g.requirePresenter(g.handleActorDetails))
 	g.mux.HandleFunc("/api/stage/telemetry", g.requirePresenter(g.handleTelemetry))
+	g.mux.HandleFunc("/api/stage/fleet.bin", g.requirePresenter(g.handleFleetBinary))
 	g.mux.HandleFunc("/api/reset", g.requirePresenter(g.handleReset))
 	g.mux.HandleFunc("/api/simulation", g.requirePresenter(web.JSONPOST(g.handleSimulation)))
 	g.mux.HandleFunc("/api/simulation/turn", g.requirePresenter(web.JSONPOST(g.handleSimulationTurn)))

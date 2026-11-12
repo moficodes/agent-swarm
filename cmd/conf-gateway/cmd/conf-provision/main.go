@@ -13,7 +13,8 @@
 // limitations under the License.
 
 // Command conf-provision creates attendee-01..attendee-N actors in parallel
-// over a single persistent gRPC connection to ate-api-server.
+// over persistent gRPC connections to ate-api-server, supporting both single
+// local runs and sharded Kubernetes Indexed Jobs for 16,777,216-actor fleets.
 package main
 
 import (
@@ -26,6 +27,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -43,6 +46,8 @@ var forwardRe = regexp.MustCompile(`Forwarding from (127\.0\.0\.1:\d+)`)
 
 func buildK8sClient(kubeContext string) (kubernetes.Interface, error) {
 	if cfg, err := rest.InClusterConfig(); err == nil && kubeContext == "" {
+		cfg.QPS = 100
+		cfg.Burst = 200
 		return kubernetes.NewForConfig(cfg)
 	}
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -113,15 +118,55 @@ func startPortForward(ctx context.Context, kubectlBin, kubeContext string) (stri
 	}
 }
 
+func resolveRange(count, startFlag, endFlag, shards int) (int, int, error) {
+	if count < 1 {
+		return 0, 0, fmt.Errorf("count must be >= 1, got %d", count)
+	}
+	if shards > 0 {
+		idxStr := strings.TrimSpace(os.Getenv("JOB_COMPLETION_INDEX"))
+		if idxStr == "" {
+			return 0, 0, fmt.Errorf("-shards=%d requires JOB_COMPLETION_INDEX environment variable", shards)
+		}
+		shardIdx, err := strconv.Atoi(idxStr)
+		if err != nil || shardIdx < 0 || shardIdx >= shards {
+			return 0, 0, fmt.Errorf("invalid JOB_COMPLETION_INDEX %q for shards=%d", idxStr, shards)
+		}
+		chunk := (count + shards - 1) / shards
+		s := shardIdx*chunk + 1
+		e := min(count, (shardIdx+1)*chunk)
+		return s, e, nil
+	}
+	s := max(1, startFlag)
+	e := count
+	if endFlag > 0 && endFlag < e {
+		e = endFlag
+	}
+	return s, e, nil
+}
+
 func main() {
 	atespace := flag.String("atespace", "ate-demo-conf", "Target Atespace")
 	template := flag.String("template", "conf-agent-v1", "ActorTemplate name")
 	count := flag.Int("count", 50, "Total number of attendee actors to ensure")
+	startFlag := flag.Int("start", 1, "1-based starting actor index (ignored when -shards > 0)")
+	endFlag := flag.Int("end", 0, "1-based inclusive ending actor index (0 = -count; ignored when -shards > 0)")
+	shards := flag.Int("shards", 0, "Total Indexed Job shards; reads JOB_COMPLETION_INDEX when > 0")
+	skipList := flag.Bool("skip-list", false, "Skip upfront ListActors scan and rely on idempotent AlreadyExists")
 	concurrency := flag.Int("concurrency", 64, "Number of concurrent gRPC CreateActor workers")
 	endpoint := flag.String("endpoint", "", "Optional ateapi gRPC endpoint (starts kubectl port-forward if empty)")
+	caFile := flag.String("ca-file", "", "Optional PEM CA bundle for ateapi TLS")
 	kubeContext := flag.String("context", os.Getenv("KUBECTL_CONTEXT"), "Optional kubeconfig context")
 	kubectlBin := flag.String("kubectl", "kubectl", "kubectl binary for port-forwarding")
 	flag.Parse()
+
+	rangeStart, rangeEnd, err := resolveRange(*count, *startFlag, *endFlag, *shards)
+	if err != nil {
+		log.Fatalf("resolving actor range: %v", err)
+	}
+	if rangeStart > rangeEnd {
+		log.Printf("Shard has empty actor range [%d..%d]; nothing to do.", rangeStart, rangeEnd)
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -141,58 +186,79 @@ func main() {
 		targetEndpoint = addr
 	}
 
-	ctrl, err := actorstate.NewGRPCControl(k8sClient, targetEndpoint, *atespace, "")
+	ctrl, err := actorstate.NewGRPCControl(k8sClient, targetEndpoint, *atespace, *caFile)
 	if err != nil {
 		log.Fatalf("creating gRPC control client: %v", err)
 	}
 	defer ctrl.Close()
 
 	start := time.Now()
-	existing, err := ctrl.List(ctx)
-	if err != nil {
-		log.Fatalf("listing existing actors in %s: %v", *atespace, err)
-	}
-	seen := make(map[string]bool, len(existing))
-	for _, s := range existing {
-		seen[s.Name] = true
-	}
+	totalInRange := rangeEnd - rangeStart + 1
+	useSkipList := *skipList || *count > actorstate.HyperFleetThreshold || *shards > 0
 
-	var missing []string
-	for i := 1; i <= *count; i++ {
-		name := fmt.Sprintf("attendee-%02d", i)
-		if !seen[name] {
-			missing = append(missing, name)
+	var seen map[string]bool
+	if !useSkipList {
+		existing, err := ctrl.List(ctx)
+		if err != nil {
+			log.Fatalf("listing existing actors in %s: %v", *atespace, err)
 		}
+		seen = make(map[string]bool, len(existing))
+		for _, s := range existing {
+			seen[s.Name] = true
+		}
+		missingCount := 0
+		for i := rangeStart; i <= rangeEnd; i++ {
+			if !seen[fmt.Sprintf("attendee-%02d", i)] {
+				missingCount++
+			}
+		}
+		if missingCount == 0 {
+			log.Printf("All %d actors in range [%d..%d] already exist in %s (checked in %s)",
+				totalInRange, rangeStart, rangeEnd, *atespace, time.Since(start).Round(time.Millisecond))
+			return
+		}
+		totalInRange = missingCount
 	}
 
-	if len(missing) == 0 {
-		log.Printf("All %d actors already exist in %s (checked in %s)", *count, *atespace, time.Since(start).Round(time.Millisecond))
-		return
-	}
+	log.Printf("Provisioning %d actors in range [%d..%d] (of %d total) in %s with concurrency %d (skip-list=%v)...",
+		totalInRange, rangeStart, rangeEnd, *count, *atespace, *concurrency, useSkipList)
 
-	log.Printf("Provisioning %d missing actors (of %d total) in %s with concurrency %d...", len(missing), *count, *atespace, *concurrency)
+	jobs := make(chan int, min(4096, totalInRange))
+	go func() {
+		defer close(jobs)
+		for i := rangeStart; i <= rangeEnd; i++ {
+			if seen != nil && seen[fmt.Sprintf("attendee-%02d", i)] {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- i:
+			}
+		}
+	}()
 
-	jobs := make(chan string, len(missing))
-	for _, name := range missing {
-		jobs <- name
-	}
-	close(jobs)
-
-	var created atomic.Int64
+	var ensured atomic.Int64
 	var failed atomic.Int64
 	var wg sync.WaitGroup
-	workers := min(*concurrency, len(missing))
+	workers := max(1, min(*concurrency, totalInRange))
+	logEvery := int64(2000)
+	if totalInRange > 100000 {
+		logEvery = 25000
+	}
+
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for name := range jobs {
+			for idx := range jobs {
 				if ctx.Err() != nil {
 					return
 				}
+				name := fmt.Sprintf("attendee-%02d", idx)
 				var lastErr error
-				for attempt := 0; attempt < 4; attempt++ {
-					callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				for attempt := 0; attempt < 6; attempt++ {
+					callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 					err := ctrl.CreateActor(callCtx, name, *template)
 					cancel()
 					if err == nil || status.Code(err) == codes.AlreadyExists {
@@ -200,16 +266,19 @@ func main() {
 						break
 					}
 					lastErr = err
-					time.Sleep(time.Duration(attempt+1) * 150 * time.Millisecond)
+					time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 				}
 				if lastErr != nil {
 					failed.Add(1)
 					log.Printf("failed to create %s: %v", name, lastErr)
 					continue
 				}
-				n := created.Add(1)
-				if n%2000 == 0 || int(n) == len(missing) {
-					log.Printf("  created %d / %d missing actors (%s elapsed)", n, len(missing), time.Since(start).Round(time.Millisecond))
+				n := ensured.Add(1)
+				if n%logEvery == 0 || int(n) == totalInRange {
+					elapsed := time.Since(start)
+					rate := float64(n) / max(elapsed.Seconds(), 0.001)
+					log.Printf("  ensured %d / %d actors in range [%d..%d] (%.0f actors/s, %s elapsed)",
+						n, totalInRange, rangeStart, rangeEnd, rate, elapsed.Round(time.Millisecond))
 				}
 			}
 		}()
@@ -217,7 +286,8 @@ func main() {
 	wg.Wait()
 
 	if f := failed.Load(); f > 0 {
-		log.Fatalf("provisioning finished with %d failures out of %d missing actors", f, len(missing))
+		log.Fatalf("provisioning finished with %d failures out of %d actors in range [%d..%d]", f, totalInRange, rangeStart, rangeEnd)
 	}
-	log.Printf("Successfully provisioned %d actors in %s (%d total in %s)", created.Load(), time.Since(start).Round(time.Millisecond), *count, *atespace)
+	log.Printf("Successfully ensured %d actors in range [%d..%d] in %s (%s)",
+		ensured.Load(), rangeStart, rangeEnd, time.Since(start).Round(time.Millisecond), *atespace)
 }

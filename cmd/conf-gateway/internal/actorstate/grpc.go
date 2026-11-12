@@ -41,7 +41,7 @@ const (
 	ateSignerName      = "servicedns.podcert.ate.dev/identity"
 	canaryLabelKey     = "podcert.ate.dev/canarying"
 	canaryLabelLive    = "live"
-	controlConnPoolLen = 4
+	controlConnPoolLen = 16
 )
 
 // GRPCControl implements ActorControl directly over gRPC to ate-api-server,
@@ -312,6 +312,164 @@ func (g *GRPCControl) List(ctx context.Context) ([]Status, error) {
 		if pageToken == "" {
 			break
 		}
+	}
+	return out, nil
+}
+
+// Get fetches one actor's current status over gRPC via GetActor.
+func (g *GRPCControl) Get(ctx context.Context, name string) (Status, error) {
+	if !actorName.MatchString(name) {
+		return Status{}, fmt.Errorf("invalid actor name %q", name)
+	}
+	client, err := g.getClient(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	a, err := client.GetActor(ctx, &ateapi.GetActorRequest{
+		Actor: &ateapi.ObjectRef{
+			Atespace: g.atespace,
+			Name:     name,
+		},
+	})
+	if err != nil {
+		return Status{}, err
+	}
+	return ActorProtoToStatus(a), nil
+}
+
+// ListActiveSeats lists only actors currently assigned to worker pods in the
+// target atespace by querying ListWorkers (~5 pages at 4,096 pods) and fanning
+// out ListWorkerActorAssignments across occupied workers. This avoids paging
+// 16,777,216 idle suspended actors on every poll tick.
+func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
+	listClient, err := g.getListClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	type occupiedWorker struct {
+		name string
+		pod  string
+	}
+	var occupied []occupiedWorker
+	var pageToken string
+	for {
+		resp, err := listClient.ListWorkers(ctx, &ateapi.ListWorkersRequest{
+			Options: &ateapi.ListOptions{
+				PageSize:  1000,
+				PageToken: pageToken,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("ListWorkers: %w", err)
+		}
+		for _, w := range resp.GetWorkers() {
+			if w.GetWorkerNamespace() != g.atespace {
+				continue
+			}
+			alloc := w.GetStatus().GetAllocated()
+			if alloc.GetActors() <= 0 && alloc.GetCpuMillicores() <= 0 && alloc.GetMemoryBytes() <= 0 {
+				continue
+			}
+			occupied = append(occupied, occupiedWorker{
+				name: w.GetMetadata().GetName(),
+				pod:  w.GetWorkerPod(),
+			})
+		}
+		pageToken = resp.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+	}
+
+	if len(occupied) == 0 {
+		return nil, nil
+	}
+
+	// Ensure the shared client pool is warm before fanning out worker queries.
+	if _, err := g.getClient(ctx); err != nil {
+		return nil, err
+	}
+
+	workerCh := make(chan occupiedWorker, len(occupied))
+	for _, ow := range occupied {
+		workerCh <- ow
+	}
+	close(workerCh)
+
+	concurrency := min(len(occupied), 32)
+	var (
+		resMu    sync.Mutex
+		out      []Status
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ow := range workerCh {
+				c, cErr := g.getClient(ctx)
+				if cErr != nil {
+					resMu.Lock()
+					if firstErr == nil {
+						firstErr = cErr
+					}
+					resMu.Unlock()
+					return
+				}
+				var tok string
+				var local []Status
+				for {
+					aResp, aErr := c.ListWorkerActorAssignments(ctx, &ateapi.ListWorkerActorAssignmentsRequest{
+						Worker: &ateapi.ObjectRef{Name: ow.name},
+						Options: &ateapi.ListOptions{
+							PageSize:  1000,
+							PageToken: tok,
+						},
+					})
+					if aErr != nil {
+						// A worker pod terminating mid-poll returns NotFound; skip it cleanly.
+						if strings.Contains(aErr.Error(), "NotFound") {
+							break
+						}
+						resMu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("ListWorkerActorAssignments(%s): %w", ow.name, aErr)
+						}
+						resMu.Unlock()
+						return
+					}
+					for _, asgn := range aResp.GetActorAssignments() {
+						if asgn.GetActor().GetAtespace() != g.atespace {
+							continue
+						}
+						actorID := asgn.GetActor().GetName()
+						if actorID == "" {
+							continue
+						}
+						local = append(local, Status{
+							Name:      actorID,
+							State:     types.StateRunning,
+							WorkerPod: ow.pod,
+						})
+					}
+					tok = aResp.GetNextPageToken()
+					if tok == "" {
+						break
+					}
+				}
+				if len(local) > 0 {
+					resMu.Lock()
+					out = append(out, local...)
+					resMu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return out, nil
 }
