@@ -431,15 +431,17 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	execStart := time.Now()
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	exec := runResult(s.executor.Execute(ctx, pending.Language, pending.Code))
 	cancel()
 
-	if targetDur := randomDurationRange(s.mockExecMin, s.mockExecMax); targetDur > 0 {
-		if rem := targetDur - time.Since(execStart); rem > 0 {
-			select {
-			case <-r.Context().Done():
-			case <-time.After(rem):
+	if req.Mock || s.forceMock || s.gemini == nil {
+		if targetDur := randomDurationRange(s.mockExecMin, s.mockExecMax); targetDur > 0 {
+			if rem := targetDur - time.Since(execStart); rem > 0 {
+				select {
+				case <-r.Context().Done():
+				case <-time.After(rem):
+				}
 			}
 		}
 	}

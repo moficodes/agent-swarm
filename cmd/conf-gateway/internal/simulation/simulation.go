@@ -927,6 +927,7 @@ func (s *SimulationRunner) sendApprove(ctx context.Context, attendeeID, token, a
 	appReq := types.ApprovalResponse{
 		ApprovalID: approvalID,
 		Decision:   types.DecisionApprove,
+		Mock:       true,
 	}
 	bodyBytes, err := json.Marshal(appReq)
 	if err != nil {

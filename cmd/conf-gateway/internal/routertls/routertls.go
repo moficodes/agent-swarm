@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 )
 
 // NewHTTPClient returns an *http.Client configured for mTLS to atenet-router
@@ -53,10 +54,17 @@ func NewHTTPClient(caFile, credBundle string) (*http.Client, error) {
 		base = &http.Transport{}
 	}
 	tr := base.Clone()
-	tr.ForceAttemptHTTP2 = true
+	// Keep ForceAttemptHTTP2 disabled when talking to the ClusterIP Service VIP
+	// (atenet-router.ate-system.svc:443): HTTP/1.1 keep-alive pools spread across
+	// all router pods via kube-proxy and prevent mass simulated stream cancellations
+	// from wedging or head-of-line blocking a shared HTTP/2 connection.
+	tr.ForceAttemptHTTP2 = false
 	tr.MaxIdleConns = 4096
 	tr.MaxIdleConnsPerHost = 4096
 	tr.MaxConnsPerHost = 0
+	tr.IdleConnTimeout = 60 * time.Second
+	tr.TLSHandshakeTimeout = 10 * time.Second
+	tr.ResponseHeaderTimeout = 90 * time.Second
 	tr.TLSClientConfig = &tls.Config{
 		MinVersion: getMinTLSVersion(),
 		// Chain and hostname verification run in VerifyConnection against the

@@ -739,6 +739,13 @@ for want in "cpuMillicores: 20" "memoryBytes: 134217728"; do
     fail=1
   fi
 done
+hyper_human_tmpl="$(DEMO_CONF_PROFILE=hyperswarm conf_render_human_template manifests/actortemplate.yaml.tmpl)"
+for want in "name: conf-agent-human" "cpuMillicores: 500" "memoryBytes: 536870912"; do
+  if ! grep -qF -- "${want}" <<<"${hyper_human_tmpl}"; then
+    echo "FAIL: hyperswarm human actortemplate manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
 if DEMO_CONF_PROFILE=hyperswarm conf_router_flags_ok '["--parked-request-budget=90s","--route-timeout=5m","--parked-request-max=4096","--ingress-allowed-spiffe-ids='"${DEMO_CONF_ROUTER_SPIFFE_ID}"'"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}" >/dev/null; then
   echo "FAIL: hyperswarm conf_router_flags_ok did not require --parked-request-max=65536" >&2
   fail=1
@@ -760,7 +767,8 @@ for pair in 'ACTOR_COUNT:65536' 'ACTORS_PER_WORKER:16' 'SUSPEND_AFTER:3s' 'MOCK_
     fail=1
   fi
 done
-if ! DEMO_CONF_PROFILE=megaswarm DEMO_CONF_ACTORS=4096 conf_render manifests/gateway.yaml.tmpl | grep -A1 'name: ACTOR_COUNT' | grep -qF 'value: "4096"'; then
+mega_override_gw="$(DEMO_CONF_PROFILE=megaswarm DEMO_CONF_ACTORS=4096 conf_render manifests/gateway.yaml.tmpl)"
+if ! grep -A1 'name: ACTOR_COUNT' <<<"${mega_override_gw}" | grep -qF 'value: "4096"'; then
   echo "FAIL: DEMO_CONF_ACTORS did not override DEMO_CONF_PROFILE=megaswarm" >&2
   fail=1
 fi

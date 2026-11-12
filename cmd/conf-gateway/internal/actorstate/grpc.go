@@ -510,6 +510,24 @@ func (g *GRPCControl) Revert(ctx context.Context, name string) error {
 	return err
 }
 
+// DeleteActor deletes one actor over gRPC.
+func (g *GRPCControl) DeleteActor(ctx context.Context, name string) error {
+	if !actorName.MatchString(name) {
+		return fmt.Errorf("invalid actor name %q", name)
+	}
+	client, err := g.getClient(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = client.DeleteActor(ctx, &ateapi.DeleteActorRequest{
+		Actor: &ateapi.ObjectRef{
+			Atespace: g.atespace,
+			Name:     name,
+		},
+	})
+	return err
+}
+
 // CreateActor creates one actor from the given template over gRPC.
 func (g *GRPCControl) CreateActor(ctx context.Context, name, template string) error {
 	if !actorName.MatchString(name) {

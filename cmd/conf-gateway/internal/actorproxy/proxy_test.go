@@ -309,3 +309,60 @@ func TestProxy_RouterInFlight(t *testing.T) {
 		t.Fatalf("final RouterInFlight() = %d, want 0", got)
 	}
 }
+
+func TestProxy_IsolatesHumanTransportFromMockSaturation(t *testing.T) {
+	mockEntered := make(chan struct{})
+	releaseMock := make(chan struct{})
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("ate-target-actor") == "space/attendee-01" {
+			close(mockEntered)
+			<-releaseMock
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "m1", Content: "ok"})
+	}))
+	defer router.Close()
+	u, _ := url.Parse(router.URL)
+
+	// Constrain the base transport to MaxConnsPerHost: 1 so a single simulated
+	// mock turn saturates the mock pool. A real human turn must still succeed
+	// immediately over its own isolated transport pool.
+	baseTr := http.DefaultTransport.(*http.Transport).Clone()
+	baseTr.MaxConnsPerHost = 1
+
+	p := New(u, "space", []byte("secret"), baseTr, nil, Hooks{})
+
+	mockDone := make(chan struct{})
+	go func() {
+		defer close(mockDone)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"sim","mock":true}`))
+		p.ServeHTTP(rec, WithMock(WithAttendee(req, "attendee-01"), true))
+	}()
+	<-mockEntered
+
+	if got := p.SimRouterInFlight(); got != 1 {
+		t.Fatalf("SimRouterInFlight() = %d, want 1 while mock turn is parked", got)
+	}
+
+	humanDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"human"}`))
+		p.ServeHTTP(rec, WithMock(WithAttendee(req, "attendee-4096"), false))
+		humanDone <- rec.Code
+	}()
+
+	select {
+	case code := <-humanDone:
+		if code != http.StatusOK {
+			t.Fatalf("human turn status = %d, want 200", code)
+		}
+	case <-mockDone:
+		t.Fatal("mock turn finished unexpectedly")
+	}
+
+	close(releaseMock)
+	<-mockDone
+}

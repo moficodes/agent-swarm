@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/agent-swarm/internal/workload/geminitest"
 	"github.com/agent-substrate/agent-swarm/internal/workload/server"
@@ -207,5 +208,29 @@ func TestApprove_SuccessfulRunIsUnchanged(t *testing.T) {
 	}
 	if msg.Execution == nil || msg.Execution.Corrected || msg.Execution.Stdout != "fixed\n" || !strings.HasPrefix(msg.Content, "Execution completed in ") {
 		t.Errorf("reply = %+v, want the run's output", msg)
+	}
+}
+
+func TestApprove_HumanTurnSkipsMockExecDelay(t *testing.T) {
+	fake := geminitest.New(t, geminitest.ApprovalResponse("run it", fixedScript, "python"))
+	s := server.NewWorkloadServer(
+		server.WithWorkspaceDir(t.TempDir()),
+		server.WithGeminiConfig(geminiConfig),
+		server.WithMockDelays(0, 0, 3*time.Second, 3*time.Second),
+	)
+	proposal := postChat(t, s.Handler(), fake.URL, "k.mac", "do the thing")
+	if proposal.Approval == nil {
+		t.Fatalf("chat reply carried no approval: %+v", proposal)
+	}
+
+	// Non-mock human approval must NOT sleep the 3s mockExecMin delay.
+	t0 := time.Now()
+	msg := approveDriven(t, s.Handler(), fake.URL, proposal.Approval.ApprovalID)
+	elapsed := time.Since(t0)
+	if msg.Execution == nil || msg.Execution.ExitCode != 0 {
+		t.Fatalf("Execution = %+v, want exit 0", msg.Execution)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("human approval wall time = %v, want < 2s (slept simulated mockExecMin)", elapsed)
 	}
 }

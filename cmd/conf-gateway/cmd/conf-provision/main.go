@@ -147,6 +147,9 @@ func resolveRange(count, startFlag, endFlag, shards int) (int, int, error) {
 func main() {
 	atespace := flag.String("atespace", "ate-demo-conf", "Target Atespace")
 	template := flag.String("template", "conf-agent-v1", "ActorTemplate name")
+	humanTemplate := flag.String("human-template", "", "Optional ActorTemplate name for periodic human slots (idx % human-stride == 0)")
+	humanStride := flag.Int("human-stride", 0, "Periodic human slot stride (0 = disabled)")
+	recreateHuman := flag.Bool("recreate-human", false, "Delete and recreate only periodic human slots using -human-template")
 	count := flag.Int("count", 50, "Total number of attendee actors to ensure")
 	startFlag := flag.Int("start", 1, "1-based starting actor index (ignored when -shards > 0)")
 	endFlag := flag.Int("end", 0, "1-based inclusive ending actor index (0 = -count; ignored when -shards > 0)")
@@ -193,6 +196,80 @@ func main() {
 	defer ctrl.Close()
 
 	start := time.Now()
+	trimmedHumanTemplate := strings.TrimSpace(*humanTemplate)
+	if *recreateHuman {
+		if trimmedHumanTemplate == "" || *humanStride <= 1 {
+			log.Fatalf("-recreate-human requires -human-template and -human-stride > 1")
+		}
+		var humanIndices []int
+		for i := rangeStart; i <= rangeEnd; i++ {
+			if i%*humanStride == 0 {
+				humanIndices = append(humanIndices, i)
+			}
+		}
+		if len(humanIndices) == 0 {
+			log.Printf("No human slots (stride=%d) in range [%d..%d]; nothing to do.", *humanStride, rangeStart, rangeEnd)
+			return
+		}
+		log.Printf("Recreating %d human slots (stride=%d) in %s using template %s...",
+			len(humanIndices), *humanStride, *atespace, trimmedHumanTemplate)
+		jobs := make(chan int, len(humanIndices))
+		for _, idx := range humanIndices {
+			jobs <- idx
+		}
+		close(jobs)
+
+		var recreated atomic.Int64
+		var failed atomic.Int64
+		var wg sync.WaitGroup
+		workers := max(1, min(*concurrency, len(humanIndices)))
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for idx := range jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					name := fmt.Sprintf("attendee-%02d", idx)
+					var lastErr error
+					for attempt := 0; attempt < 6; attempt++ {
+						delCtx, delCancel := context.WithTimeout(ctx, 25*time.Second)
+						delErr := ctrl.DeleteActor(delCtx, name)
+						delCancel()
+						if delErr != nil && status.Code(delErr) != codes.NotFound {
+							lastErr = fmt.Errorf("delete: %w", delErr)
+							time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+							continue
+						}
+						crCtx, crCancel := context.WithTimeout(ctx, 25*time.Second)
+						crErr := ctrl.CreateActor(crCtx, name, trimmedHumanTemplate)
+						crCancel()
+						if crErr == nil || status.Code(crErr) == codes.AlreadyExists {
+							lastErr = nil
+							break
+						}
+						lastErr = fmt.Errorf("create: %w", crErr)
+						time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+					}
+					if lastErr != nil {
+						failed.Add(1)
+						log.Printf("failed to recreate %s: %v", name, lastErr)
+						continue
+					}
+					recreated.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		if f := failed.Load(); f > 0 {
+			log.Fatalf("recreate-human finished with %d failures out of %d slots", f, len(humanIndices))
+		}
+		log.Printf("Successfully recreated %d human slots on template %s in %s",
+			recreated.Load(), trimmedHumanTemplate, time.Since(start).Round(time.Millisecond))
+		return
+	}
+
 	totalInRange := rangeEnd - rangeStart + 1
 	useSkipList := *skipList || *count > actorstate.HyperFleetThreshold || *shards > 0
 
@@ -256,10 +333,14 @@ func main() {
 					return
 				}
 				name := fmt.Sprintf("attendee-%02d", idx)
+				targetTmpl := *template
+				if trimmedHumanTemplate != "" && *humanStride > 1 && idx%*humanStride == 0 {
+					targetTmpl = trimmedHumanTemplate
+				}
 				var lastErr error
 				for attempt := 0; attempt < 6; attempt++ {
 					callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-					err := ctrl.CreateActor(callCtx, name, *template)
+					err := ctrl.CreateActor(callCtx, name, targetTmpl)
 					cancel()
 					if err == nil || status.Code(err) == codes.AlreadyExists {
 						lastErr = nil

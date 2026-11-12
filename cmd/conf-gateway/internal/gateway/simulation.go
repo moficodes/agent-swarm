@@ -46,6 +46,14 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 	reserve := max(400, totalSeats/9)
 	maxSimSeats := max(1, totalSeats-reserve)
 
+	maxSimRouterInFlight := 512
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		maxSimRouterInFlight = 1536
+	}
+	if g.proxy != nil && g.proxy.SimRouterInFlight() >= maxSimRouterInFlight {
+		return false
+	}
+
 	g.mu.RLock()
 	localCommitted := len(g.turnsInFlight) + len(g.suspendTimers) + len(g.suspendsInFlight)
 	g.mu.RUnlock()

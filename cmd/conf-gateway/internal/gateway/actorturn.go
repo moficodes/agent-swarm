@@ -122,6 +122,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer release()
+		useMock = apprReq.Mock
 		g.mu.RLock()
 		actionID := g.currentActionID[attendeeID]
 		g.mu.RUnlock()

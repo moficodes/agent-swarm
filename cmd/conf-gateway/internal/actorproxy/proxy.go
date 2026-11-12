@@ -89,14 +89,15 @@ type ModelCaller interface {
 
 // Proxy forwards attendee requests to atenet-router.
 type Proxy struct {
-	rp             *httputil.ReverseProxy
-	hooks          Hooks
-	model          ModelCaller
-	target         *url.URL
-	atespace       string
-	secret         []byte
-	client         *http.Client
-	routerInFlight atomic.Int64
+	rp                *httputil.ReverseProxy
+	hooks             Hooks
+	model             ModelCaller
+	target            *url.URL
+	atespace          string
+	secret            []byte
+	client            *http.Client
+	routerInFlight    atomic.Int64
+	simRouterInFlight atomic.Int64
 	*approvals
 }
 
@@ -108,13 +109,33 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 // request URL unchanged. A nil transport uses http.DefaultTransport. A nil
 // model answers every model call with 503.
 func New(target *url.URL, atespace string, secret []byte, transport http.RoundTripper, model ModelCaller, hooks Hooks) *Proxy {
+	baseTransport := transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+	// Isolate live human attendee traffic (and postResult / ClearHistory calls)
+	// onto a dedicated transport pool so simulated load bursts can never starve
+	// or head-of-line block real /chat attendees.
+	humanTransport := baseTransport
+	if httpTr, ok := baseTransport.(*http.Transport); ok {
+		cloned := httpTr.Clone()
+		cloned.MaxConnsPerHost = 0
+		if cloned.MaxIdleConns < 256 {
+			cloned.MaxIdleConns = 256
+		}
+		if cloned.MaxIdleConnsPerHost < 256 {
+			cloned.MaxIdleConnsPerHost = 256
+		}
+		humanTransport = cloned
+	}
+
 	p := &Proxy{
 		hooks:     hooks,
 		model:     model,
 		target:    target,
 		atespace:  atespace,
 		secret:    secret,
-		client:    &http.Client{Transport: transport},
+		client:    &http.Client{Transport: humanTransport},
 		approvals: newApprovals(),
 	}
 	p.rp = &httputil.ReverseProxy{
@@ -146,14 +167,15 @@ func New(target *url.URL, atespace string, secret []byte, transport http.RoundTr
 			http.Error(w, fmt.Sprintf("Bad Gateway: %v", err), http.StatusBadGateway)
 		},
 	}
-	baseTransport := transport
-	if baseTransport == nil {
-		baseTransport = http.DefaultTransport
-	}
 	p.rp.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		p.routerInFlight.Add(1)
 		defer p.routerInFlight.Add(-1)
-		return baseTransport.RoundTrip(req)
+		if mockOf(req) {
+			p.simRouterInFlight.Add(1)
+			defer p.simRouterInFlight.Add(-1)
+			return baseTransport.RoundTrip(req)
+		}
+		return humanTransport.RoundTrip(req)
 	})
 	return p
 }
@@ -164,6 +186,12 @@ func New(target *url.URL, atespace string, secret []byte, transport http.RoundTr
 // model calls and follow-up model-result posts to already-awake actors.
 func (p *Proxy) RouterInFlight() int {
 	return int(max(0, p.routerInFlight.Load()))
+}
+
+// SimRouterInFlight returns the number of simulated (mock) HTTP requests from
+// this proxy currently awaiting an initial response from atenet-router.
+func (p *Proxy) SimRouterInFlight() int {
+	return int(max(0, p.simRouterInFlight.Load()))
 }
 
 // ClearHistory asks the attendee's actor, through the router, to drop its

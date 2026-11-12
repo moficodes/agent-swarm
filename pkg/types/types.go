@@ -159,6 +159,7 @@ type ApprovalResponse struct {
 	Decision   DecisionType `json:"decision"`
 	Code       string       `json:"code,omitempty"`
 	Language   string       `json:"language,omitempty"`
+	Mock       bool         `json:"mock,omitempty"`
 }
 
 // Validate checks whether the approval response is well-formed.

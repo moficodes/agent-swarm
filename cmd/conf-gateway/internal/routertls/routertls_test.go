@@ -213,3 +213,29 @@ func writeCredBundle(t *testing.T, path string, ca *x509.Certificate, caKey *ecd
 		t.Fatal(err)
 	}
 }
+
+func TestNewHTTPClient_DisablesHTTP2ForServiceLoadBalancing(t *testing.T) {
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "router-ca.pem")
+	credFile := filepath.Join(dir, "credential-bundle.pem")
+
+	serverCACert, _ := mustSelfSignedCA(t, "servicedns-ca")
+	clientCACert, clientCAKey := mustSelfSignedCA(t, "podidentity-ca")
+	writeTrustBundle(t, caFile, serverCACert)
+	writeCredBundle(t, credFile, clientCACert, clientCAKey, "spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway")
+
+	client, err := NewHTTPClient(caFile, credFile)
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", client.Transport)
+	}
+	if tr.ForceAttemptHTTP2 {
+		t.Fatal("ForceAttemptHTTP2 = true, want false so ClusterIP router connections spread across HTTP/1.1 sockets instead of wedging on a shared HTTP/2 connection")
+	}
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Fatal("ResponseHeaderTimeout <= 0, want a bounded header timeout")
+	}
+}
