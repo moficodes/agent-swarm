@@ -205,6 +205,15 @@ func (g *Gateway) drainUnleasedHeldSeats(isProtected func(string) bool) {
 		return
 	}
 	baseDelay := max(g.suspendAfter, 500*time.Millisecond)
+	buckets := 32
+	stepMs := 400
+	if len(g.suspendTimers) > 8192 {
+		// Pace hyper-mode Stop Simulation drains to ~20 SuspendActor RPCs/sec so
+		// checkpoint uploads stay comfortably below GCP's project-wide 100 QPS STS
+		// token-exchange limit.
+		buckets = max(256, len(g.suspendTimers)/5)
+		stepMs = 250
+	}
 	step := 0
 	for attendee, oldTimer := range g.suspendTimers {
 		if isProtected != nil && isProtected(attendee) {
@@ -217,7 +226,7 @@ func (g *Gateway) drainUnleasedHeldSeats(isProtected func(string) bool) {
 			g.wg.Done()
 		}
 		seq := g.turnSeq[attendee]
-		stagger := baseDelay + time.Duration((step%32)*400)*time.Millisecond
+		stagger := baseDelay + time.Duration((step%buckets)*stepMs)*time.Millisecond
 		step++
 		g.wg.Add(1)
 		var nt *time.Timer
@@ -271,15 +280,14 @@ func (g *Gateway) scheduleSuspendRetry(attendee string) {
 	g.suspendTimers[attendee] = t
 }
 
-// reconcileStuckSuspending re-drives Substrate's idempotent SuspendActor
+// reconcileStuckSuspendingWithViews re-drives Substrate's idempotent SuspendActor
 // workflow for any actor reported in StateSuspending for at least
 // stuckSuspendingAfter while this gateway has no turn or suspend in flight for
 // it (for example after an interrupted caller left ateapi mid-suspend).
-func (g *Gateway) reconcileStuckSuspending(now time.Time) {
+func (g *Gateway) reconcileStuckSuspendingWithViews(now time.Time, views map[string]types.ActorView) {
 	if g.control == nil || g.stuckSuspendingAfter <= 0 {
 		return
 	}
-	views := g.board.Views()
 	var toRecover []string
 
 	g.mu.Lock()
@@ -332,22 +340,41 @@ func (g *Gateway) isBusyLocked(attendee string) bool {
 	return false
 }
 
-// reconcileStuckRunning suspends any actor reported in StateRunning for at
-// least max(stuckRunningAfter, suspendAfter) while this gateway has no turn,
-// auto-suspend timer, history clear, or suspend in flight for it (for example
-// after a client or previous gateway pod disconnected mid-ResumeActor and
-// ate-api-server finished waking the actor after the caller was gone).
-func (g *Gateway) reconcileStuckRunning(now time.Time) {
+// reconcileStuckRunningWithViews suspends any actor reported in StateRunning
+// for at least max(stuckRunningAfter, suspendAfter) while this gateway has no
+// turn, auto-suspend timer, history clear, or suspend in flight for it (for
+// example after a client or previous gateway pod disconnected mid-ResumeActor
+// and ate-api-server finished waking the actor after the caller was gone).
+func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string]types.ActorView) {
 	if g.control == nil || g.stuckRunningAfter <= 0 {
 		return
 	}
-	views := g.board.Views()
 	type idleTarget struct {
 		name string
 		seq  uint64
 	}
-	var toSuspend []idleTarget
+	var candidates []string
+	g.mu.RLock()
+	if g.closed {
+		g.mu.RUnlock()
+		return
+	}
+	if sc, ok := g.simController.(*SimulationRunner); ok && sc.IsAdoptingWarmSeats(now) {
+		g.mu.RUnlock()
+		return
+	}
+	for name, v := range views {
+		if v.State == types.StateRunning && !g.isBusyLocked(name) {
+			candidates = append(candidates, name)
+		}
+	}
+	hasTracked := len(g.runningIdleSince) > 0
+	g.mu.RUnlock()
+	if len(candidates) == 0 && !hasTracked {
+		return
+	}
 
+	var toSuspend []idleTarget
 	g.mu.Lock()
 	if g.closed {
 		g.mu.Unlock()
@@ -359,8 +386,9 @@ func (g *Gateway) reconcileStuckRunning(now time.Time) {
 		}
 	}
 	threshold := max(g.stuckRunningAfter, g.suspendAfter)
-	for name, v := range views {
-		if v.State != types.StateRunning || g.isBusyLocked(name) {
+	for _, name := range candidates {
+		v, ok := views[name]
+		if !ok || v.State != types.StateRunning || g.isBusyLocked(name) {
 			continue
 		}
 		since, seen := g.runningIdleSince[name]
@@ -370,6 +398,9 @@ func (g *Gateway) reconcileStuckRunning(now time.Time) {
 		}
 		if now.Sub(since) < threshold {
 			continue
+		}
+		if g.maxActors > 262144 && len(toSuspend) >= 256 {
+			break
 		}
 		g.runningIdleSince[name] = now
 		g.suspendWG.Add(1)

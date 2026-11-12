@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -757,4 +758,54 @@ func (s *suspendHookControl) Suspend(ctx context.Context, name string) error {
 		s.onSuspend()
 	}
 	return s.hyperActiveControl.Suspend(ctx, name)
+}
+
+func TestTelemetry_HyperWorkerActorNumsFastPath(t *testing.T) {
+	baseCtrl := newFakeControl()
+	statuses := make([]actorstate.Status, 0, 9000)
+	for i := 1; i <= 9000; i++ {
+		name := "attendee-" + strconv.Itoa(i)
+		if i < 10 {
+			name = "attendee-0" + strconv.Itoa(i)
+		}
+		pod := "conf-workers-" + strconv.Itoa(i%150)
+		statuses = append(statuses, actorstate.Status{
+			Name:      name,
+			State:     types.StateRunning,
+			WorkerPod: pod,
+		})
+	}
+	baseCtrl.set(statuses...)
+	ctrl := &hyperActiveControl{fakeControl: baseCtrl}
+
+	gw := newTestGateway(t, "http://127.0.0.1:0",
+		gateway.WithMaxActors(100000),
+		gateway.WithSeatsPerWorker(64),
+		gateway.WithActorControl(ctrl),
+		gateway.WithPollInterval(10*time.Millisecond),
+	)
+
+	var totalNums int
+	for range 40 {
+		rec := httptest.NewRecorder()
+		gw.Handler().ServeHTTP(rec, presenterRequest(gw, httptest.NewRequest(http.MethodGet, "/api/stage/telemetry?compact=0", nil)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("telemetry?compact=0 status = %d", rec.Code)
+		}
+		var tel types.StageTelemetry
+		if err := json.Unmarshal(rec.Body.Bytes(), &tel); err != nil {
+			t.Fatalf("decode telemetry: %v", err)
+		}
+		totalNums = 0
+		for _, w := range tel.Workers {
+			totalNums += len(w.ActorNums)
+		}
+		if totalNums == 9000 && tel.RunningActors == 9000 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if totalNums != 9000 {
+		t.Fatalf("total WorkerStatus.ActorNums = %d, want 9000", totalNums)
+	}
 }

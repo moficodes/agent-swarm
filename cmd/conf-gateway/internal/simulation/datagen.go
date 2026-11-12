@@ -137,7 +137,7 @@ func targetMPSForCount(count int, maxOverride int) int {
 		if maxOverride > 0 {
 			return maxOverride
 		}
-		return 3600
+		return 6400
 	}
 }
 
@@ -292,7 +292,7 @@ func (s *SimulationRunner) StartReset(crashed, active []string) (bool, error) {
 		return false, fmt.Errorf("cannot start reset: gateway is closed: %w", baseCtx.Err())
 	}
 
-	s.stopActiveRun(false)
+	s.stopActiveRun(false, true)
 
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -506,7 +506,7 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		now := time.Now()
 		dispatched := 0
-		const hyperBatchFanout = 2
+		const hyperBatchFanout = 8
 	fanoutLoop:
 		for range hyperBatchFanout {
 			if s.turnSem != nil {

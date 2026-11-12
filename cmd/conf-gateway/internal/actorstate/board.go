@@ -1097,3 +1097,146 @@ func (b *Board) FleetBinarySnapshot(maxActors int, isLeased func(string) bool, l
 	binary.LittleEndian.PutUint32(out[20:24], leasedCount)
 	return out
 }
+
+// HyperWorkerTelemetrySnapshot builds compact per-pod 1-based actor number
+// slices and summary counters for /api/stage/telemetry?compact=0 in hyper mode
+// when >8,192 seats are occupied, avoiding a 262k-entry ActorView map copy and
+// 262k string sort on every poll tick. If any seated actor has a non-numeric ID,
+// ok is false and callers fall back to TelemetrySnapshotOptions.
+func (b *Board) HyperWorkerTelemetrySnapshot(maxActors, seatsPerWorker int, isLeased func(string) bool, leasedIDs []string) (
+	podActorNums map[string][]int,
+	compactActors map[string]types.ActorView,
+	runningCount, suspendedCount, activeCohortCount, snapshottedCount, leasedCount int,
+	ok bool,
+) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.hyperCount == 0 || maxActors <= HyperFleetThreshold {
+		return nil, nil, 0, 0, 0, 0, 0, false
+	}
+
+	n := min(maxActors, len(b.compact))
+	for i := 0; i < n; i++ {
+		code := compactByteToBadgeCode(b.compact[i])
+		if code == 1 {
+			snapshottedCount++
+		} else if code >= 2 && code <= 8 {
+			activeCohortCount++
+		}
+	}
+
+	capPerPod := max(8, seatsPerWorker)
+	packedByPod := make(map[string][]uint32, 4096)
+	compactActors = make(map[string]types.ActorView, len(leasedIDs)+8)
+	nonSuspendedInViews := 0
+
+	seatPrio := func(s types.SubstrateState) uint32 {
+		switch s {
+		case types.StateRunning:
+			return 0
+		case types.StateResuming:
+			return 1
+		case types.StateSuspending:
+			return 2
+		default:
+			return 3
+		}
+	}
+
+	for name, v := range b.views {
+		leased := isLeased != nil && isLeased(name)
+		if leased {
+			leasedCount++
+		}
+		v.Leased = leased
+		if v.State == types.StateRunning {
+			runningCount++
+		}
+		if v.State != types.StateSuspended {
+			nonSuspendedInViews++
+		}
+
+		idx, validIdx := ParseAttendeeIndex(name, maxActors)
+		if validIdx {
+			var oldCode byte
+			if idx-1 < n {
+				oldCode = compactByteToBadgeCode(b.compact[idx-1])
+			}
+			newCode := EncodeBadgeCode(v, leased) & 15
+			if oldCode != newCode {
+				if oldCode == 1 {
+					snapshottedCount--
+				} else if oldCode >= 2 && oldCode <= 8 {
+					activeCohortCount--
+				}
+				if newCode == 1 {
+					snapshottedCount++
+				} else if newCode >= 2 && newCode <= 8 {
+					activeCohortCount++
+				}
+			}
+		} else if v.WorkerPod != "" {
+			return nil, nil, 0, 0, 0, 0, 0, false
+		}
+
+		if v.WorkerPod != "" && validIdx {
+			sl := packedByPod[v.WorkerPod]
+			if sl == nil {
+				sl = make([]uint32, 0, capPerPod)
+			}
+			packedByPod[v.WorkerPod] = append(sl, (seatPrio(v.State)<<25)|uint32(idx))
+		}
+		if leased || v.State == types.StateCrashed || name == "attendee-01" {
+			compactActors[name] = v
+		}
+	}
+
+	for _, id := range leasedIDs {
+		if idx, validIdx := ParseAttendeeIndex(id, maxActors); validIdx {
+			if _, inMap := b.views[id]; !inMap {
+				leasedCount++
+				v := b.hyperViewLocked(id, idx)
+				v.Leased = true
+				compactActors[id] = v
+			}
+		}
+	}
+	if _, hasFirst := compactActors["attendee-01"]; !hasFirst {
+		compactActors["attendee-01"] = b.hyperViewLocked("attendee-01", 1)
+	}
+	if b.unavailableMsg == "" && maxActors >= nonSuspendedInViews {
+		suspendedCount = maxActors - nonSuspendedInViews
+	}
+
+	podActorNums = make(map[string][]int, len(packedByPod))
+	for pod, packed := range packedByPod {
+		slices.Sort(packed)
+		if seatsPerWorker > 0 && len(packed) > seatsPerWorker {
+			packed = packed[:seatsPerWorker]
+		}
+		nums := make([]int, len(packed))
+		for i, pv := range packed {
+			nums[i] = int(pv & 0x1FFFFFF)
+		}
+		podActorNums[pod] = nums
+	}
+
+	return podActorNums, compactActors, runningCount, suspendedCount, activeCohortCount, snapshottedCount, leasedCount, true
+}
+
+// IsCheckpointedIndex reports whether the 1-based actor index in hyper mode
+// already has an actor-specific checkpoint (as opposed to an untouched
+// golden-snapshot NeverStarted actor), allowing SimulationRunner to pace
+// STS-backed checkpoint restores well under project STS token-exchange quotas.
+func (b *Board) IsCheckpointedIndex(idx int) bool {
+	if idx <= 0 {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.hyperCount == 0 || idx > len(b.compact) {
+		return false
+	}
+	return (b.compact[idx-1] & compactCheckpointed) != 0
+}

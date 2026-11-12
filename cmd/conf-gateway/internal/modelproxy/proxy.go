@@ -144,6 +144,32 @@ func validUpstream(raw string) error {
 // Enabled reports whether the proxy makes calls.
 func (p *Proxy) Enabled() bool { return p.cfg.Project != "" }
 
+// WarmCredentials asynchronously fetches and caches an initial OAuth2 access
+// token on startup, retrying across transient GKE Metadata Server / STS rate
+// limits so live attendee /api/chat calls do not hit cold-token 429s.
+func (p *Proxy) WarmCredentials(ctx context.Context) {
+	if !p.Enabled() || p.cfg.TokenSource == nil {
+		return
+	}
+	go func() {
+		for attempt := 0; attempt < 40; attempt++ {
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err := p.cfg.TokenSource.Token(); err == nil {
+				return
+			}
+			t := time.NewTimer(1500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+	}()
+}
+
 // Call makes one actor's model call and returns Vertex AI's answer, or the
 // proxy's own refusal as an error status.
 func (p *Proxy) Call(ctx context.Context, actor string, call types.ModelCall) types.ModelResult {
@@ -167,6 +193,18 @@ func (p *Proxy) call(ctx context.Context, actor string, call types.ModelCall) (i
 	defer p.release(actor)
 
 	tok, err := p.cfg.TokenSource.Token()
+	if err != nil && strings.HasPrefix(p.cfg.Upstream, "https://") {
+		for retry := 0; retry < 5 && err != nil; retry++ {
+			t := time.NewTimer(450 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return errorBody(http.StatusBadGateway, "gateway credentials unavailable")
+			case <-t.C:
+			}
+			tok, err = p.cfg.TokenSource.Token()
+		}
+	}
 	if err != nil {
 		return errorBody(http.StatusBadGateway, "gateway credentials unavailable")
 	}

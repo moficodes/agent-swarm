@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/pkg/types"
@@ -66,6 +67,19 @@ type StopCleanup interface {
 	ClearSimulatedActivity()
 }
 
+// StopKeepSeatsCleanup is optionally implemented by Target to reset simulated
+// activity without scheduling SuspendActor drains across warm worker seats.
+type StopKeepSeatsCleanup interface {
+	ClearSimulatedActivityKeepSeats()
+}
+
+// CheckpointedSlotChecker is optionally implemented by Target so hyper-mode
+// simulations can pace STS-backed checkpoint restores well below GCP project
+// STS token-exchange rate limits while waking golden-snapshot actors freely.
+type CheckpointedSlotChecker interface {
+	IsCheckpointedSlot(slotIndex int) bool
+}
+
 // SeatLoadChecker is optionally implemented by Target to apply backpressure
 // when physical worker pod seats are near saturation.
 type SeatLoadChecker interface {
@@ -77,6 +91,13 @@ type SeatLoadChecker interface {
 // turns without holding an open HTTP request in atenet-router.
 type SeatHolder interface {
 	HoldSeat(attendeeID string, d time.Duration)
+}
+
+// RunningSlotSeeder is optionally implemented by Target so hyper-mode
+// simulations can adopt already-RUNNING worker seats immediately on Start
+// (for example across a gateway rollout) instead of cold-waking from scratch.
+type RunningSlotSeeder interface {
+	RunningSimulatedIndices() []int
 }
 
 // ApprovalSeeder is optionally implemented by Target to seed a checkpointed
@@ -176,6 +197,7 @@ type slotPhase uint8
 const (
 	phaseIdle slotPhase = iota
 	phaseChatInFlight
+	phaseAdoptedChatInFlight
 	phaseAwaitingApproval
 	phaseApproveInFlight
 )
@@ -232,18 +254,23 @@ type SimulationRunner struct {
 	presenterKey      string
 	dgClient          *http.Client
 	turnSem           chan struct{}
+	coldWakeSem       chan struct{}
 	maxTargetMPS      int
 	resetSettleWindow time.Duration
 
-	slotMu             sync.Mutex
-	slots              []slotState
-	containerApprovals map[int]string
-	readyQueue         []int
-	recentIdle         []int
-	recentHead         int
-	recentCount        int
-	turnCursor         uint64
-	dispatchSeq        uint64
+	slotMu               sync.Mutex
+	slots                []slotState
+	containerApprovals   map[int]string
+	readyQueue           []int
+	warmAdoptQueue       []int
+	warmAdoptHead        int
+	warmAdoptUntilUnixMs atomic.Int64
+	lastCheckpointWakeMs int64
+	recentIdle           []int
+	recentHead           int
+	recentCount          int
+	turnCursor           uint64
+	dispatchSeq          uint64
 
 	resetMu          sync.Mutex
 	resetting        bool
@@ -274,15 +301,38 @@ func NewRunner(t Target, opts ...SimulationOption) *SimulationRunner {
 }
 
 func (s *SimulationRunner) initSlotsLocked(count int) {
+	var adopted []int
+	if count > 65536 {
+		if seeder, ok := s.target.(RunningSlotSeeder); ok {
+			adopted = seeder.RunningSimulatedIndices()
+		}
+	}
 	s.slotMu.Lock()
 	defer s.slotMu.Unlock()
 	s.slots = make([]slotState, count+1)
 	s.containerApprovals = make(map[int]string)
 	s.readyQueue = nil
+	s.warmAdoptQueue = adopted
+	s.warmAdoptHead = 0
+	if len(adopted) > 0 {
+		s.warmAdoptUntilUnixMs.Store(time.Now().Add(45 * time.Second).UnixMilli())
+	} else {
+		s.warmAdoptUntilUnixMs.Store(0)
+	}
+	if count > 65536 {
+		s.coldWakeSem = make(chan struct{}, 3072)
+	} else {
+		s.coldWakeSem = nil
+	}
 	s.recentIdle = make([]int, recentIdleCap)
 	s.recentHead = 0
 	s.recentCount = 0
-	s.turnCursor = 0
+	s.lastCheckpointWakeMs = 0
+	if count > 65536 {
+		s.turnCursor = uint64(rand.Intn(count))
+	} else {
+		s.turnCursor = 0
+	}
 	s.dispatchSeq = 0
 }
 
@@ -292,11 +342,24 @@ func (s *SimulationRunner) clearSlotsLocked() {
 	s.slots = nil
 	s.containerApprovals = nil
 	s.readyQueue = nil
+	s.warmAdoptQueue = nil
+	s.warmAdoptHead = 0
+	s.warmAdoptUntilUnixMs.Store(0)
+	s.lastCheckpointWakeMs = 0
+	s.coldWakeSem = nil
 	s.recentIdle = nil
 	s.recentHead = 0
 	s.recentCount = 0
 	s.turnCursor = 0
 	s.dispatchSeq = 0
+}
+
+// IsAdoptingWarmSeats reports lock-free whether an active hyper-mode simulation
+// is within its initial warm-seat adoption window, preventing orphaned-RUNNING
+// reconciliation from suspending seats before their session loops start.
+func (s *SimulationRunner) IsAdoptingWarmSeats(now time.Time) bool {
+	until := s.warmAdoptUntilUnixMs.Load()
+	return until > 0 && now.UnixMilli() < until
 }
 
 func (s *SimulationRunner) pushRecentIdleLocked(idx int) {
@@ -313,7 +376,7 @@ func (s *SimulationRunner) pushRecentIdleLocked(idx int) {
 	s.recentHead = (s.recentHead + 1) % len(s.recentIdle)
 }
 
-func (s *SimulationRunner) stopActiveRun(pauseOrchestrator bool) bool {
+func (s *SimulationRunner) stopActiveRun(pauseOrchestrator, keepSeats bool) bool {
 	s.mu.Lock()
 	wasActive := s.running || s.isResetting()
 	if !wasActive {
@@ -357,6 +420,12 @@ func (s *SimulationRunner) stopActiveRun(pauseOrchestrator bool) bool {
 		}
 	}
 	s.clearSlotsLocked()
+	if keepSeats {
+		if sk, ok := s.target.(StopKeepSeatsCleanup); ok {
+			sk.ClearSimulatedActivityKeepSeats()
+			return true
+		}
+	}
 	if sc, ok := s.target.(StopCleanup); ok {
 		sc.ClearSimulatedActivity()
 	}
@@ -381,7 +450,7 @@ func (s *SimulationRunner) Start(count int) error {
 		return fmt.Errorf("cannot start simulation: gateway is closed: %w", baseCtx.Err())
 	}
 
-	s.stopActiveRun(false)
+	s.stopActiveRun(false, count > 65536)
 
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -429,7 +498,15 @@ func (s *SimulationRunner) Start(count int) error {
 func (s *SimulationRunner) Stop() {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
-	s.stopActiveRun(true)
+	s.stopActiveRun(true, false)
+}
+
+// StopKeepSeats halts all active virtual attendees without scheduling
+// SuspendActor drains on warm worker seats (used during gateway shutdowns).
+func (s *SimulationRunner) StopKeepSeats() {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	s.stopActiveRun(true, true)
 }
 
 // Status returns whether the simulation is currently active and the number of virtual attendees.
@@ -553,16 +630,55 @@ func (s *SimulationRunner) claimMaturedRecentIdleLocked(nowMs int64, totalCount,
 	return 0, false
 }
 
+func (s *SimulationRunner) claimAdoptedWarmSlotLocked(totalCount, hStride int) (int, bool) {
+	for s.warmAdoptHead < len(s.warmAdoptQueue) {
+		idx := s.warmAdoptQueue[s.warmAdoptHead]
+		s.warmAdoptHead++
+		if s.warmAdoptHead >= len(s.warmAdoptQueue) {
+			s.warmAdoptUntilUnixMs.Store(0)
+		}
+		if idx < 1 || idx > totalCount || (hStride > 1 && idx%hStride == 0) {
+			continue
+		}
+		st := &s.slots[idx]
+		if st.phase != phaseIdle {
+			continue
+		}
+		attendeeID := fmt.Sprintf("attendee-%02d", idx)
+		if s.isReserved(attendeeID, idx) {
+			continue
+		}
+		st.phase = phaseAdoptedChatInFlight
+		st.hasContainerApproval = false
+		return idx, true
+	}
+	return 0, false
+}
+
 func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int) (int, slotPhase, string, bool) {
 	nowMs := now.UnixMilli()
 	hStride := s.humanStrideLocked(totalCount)
+	hyper := totalCount > 65536
+	canWakeCheckpointed := !hyper || nowMs-s.lastCheckpointWakeMs >= 125
 
-	// Re-wake matured checkpointed actors on every 3rd dispatch so individual
-	// actors visibly cycle repeatedly while fresh actors continue illuminating the fleet.
-	if s.dispatchSeq%3 == 0 {
+	if idx, ok := s.claimAdoptedWarmSlotLocked(totalCount, hStride); ok {
+		return idx, phaseAdoptedChatInFlight, "", true
+	}
+
+	// Re-wake matured checkpointed actors on every 3rd dispatch (paced to <=8/s
+	// in hyper mode to stay well below GCP's 100 QPS STS token-exchange limit).
+	if s.dispatchSeq%3 == 0 && canWakeCheckpointed {
 		if idx, ok := s.claimMaturedRecentIdleLocked(nowMs, totalCount, hStride); ok {
+			if hyper {
+				s.lastCheckpointWakeMs = nowMs
+			}
 			return idx, phaseChatInFlight, "", true
 		}
+	}
+
+	var ckptChecker CheckpointedSlotChecker
+	if hyper {
+		ckptChecker, _ = s.target.(CheckpointedSlotChecker)
 	}
 
 	stride := coprimeStrideForTotal(totalCount)
@@ -578,17 +694,29 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 		if st.phase != phaseIdle || nowMs < st.readyAtUnixMs {
 			continue
 		}
+		isCkpt := ckptChecker != nil && ckptChecker.IsCheckpointedSlot(idx)
+		if isCkpt && !canWakeCheckpointed {
+			continue
+		}
 		attendeeID := fmt.Sprintf("attendee-%02d", idx)
 		if s.isReserved(attendeeID, idx) {
 			continue
+		}
+		if isCkpt {
+			s.lastCheckpointWakeMs = nowMs
 		}
 		st.phase = phaseChatInFlight
 		st.hasContainerApproval = false
 		return idx, phaseChatInFlight, "", true
 	}
 
-	if idx, ok := s.claimMaturedRecentIdleLocked(nowMs, totalCount, hStride); ok {
-		return idx, phaseChatInFlight, "", true
+	if canWakeCheckpointed {
+		if idx, ok := s.claimMaturedRecentIdleLocked(nowMs, totalCount, hStride); ok {
+			if hyper {
+				s.lastCheckpointWakeMs = nowMs
+			}
+			return idx, phaseChatInFlight, "", true
+		}
 	}
 	return 0, phaseIdle, "", false
 }
@@ -666,28 +794,75 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 	s.mu.RUnlock()
 
 	turnsInSession := 1
+	quickCheckpointCohort := false
 	if totalCount > 65536 && !fastMode {
-		turnsInSession = 4 + (slotIndex % 3)
+		if slotIndex%512 == 0 {
+			quickCheckpointCohort = true
+			turnsInSession = 1 + (slotIndex % 2)
+		} else {
+			turnsInSession = 24 + (slotIndex % 8)
+		}
 	}
 	holder, hasHolder := s.target.(SeatHolder)
 
 	var err error
 	action := "chat"
+	if phase == phaseAdoptedChatInFlight && totalCount > 65536 && !fastMode && hasHolder {
+		adoptPause := time.Duration(3000+rand.Intn(280000)) * time.Millisecond
+		holder.HoldSeat(attendeeID, adoptPause+15*time.Second)
+		if !sleepWithContext(ctx, adoptPause) {
+			err = ctx.Err()
+			turnsInSession = 0
+		}
+	}
+
+	s.slotMu.Lock()
+	coldSem := s.coldWakeSem
+	s.slotMu.Unlock()
+
+turnLoop:
 	for turnIdx := 0; turnIdx < turnsInSession; turnIdx++ {
 		turnPrompt := prompt
 		if turnIdx > 0 || turnPrompt == "" {
 			turnPrompt = simulationPrompts[(slotIndex+turnIdx)%len(simulationPrompts)]
 		}
+		needColdSem := turnIdx == 0 && phase != phaseAdoptedChatInFlight && totalCount > 65536 && !fastMode && coldSem != nil
+		if needColdSem {
+			select {
+			case coldSem <- struct{}{}:
+			case <-ctx.Done():
+				err = ctx.Err()
+				break turnLoop
+			}
+			if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
+				<-coldSem
+				break turnLoop
+			}
+		}
 		var chatMsg *types.ChatMessage
 		chatMsg, err = s.sendChat(ctx, attendeeID, token, turnPrompt)
+		if needColdSem {
+			<-coldSem
+		}
+		if err != nil && turnIdx > 0 && ctx.Err() == nil {
+			if hasHolder {
+				holder.HoldSeat(attendeeID, 15*time.Second)
+			}
+			if sleepWithContext(ctx, 2*time.Second) {
+				chatMsg, err = s.sendChat(ctx, attendeeID, token, turnPrompt)
+			}
+		}
 		if err != nil {
 			break
 		}
 		if chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
-			if turnsInSession > 1 && (slotIndex+turnIdx)%5 < 3 {
-				reviewPause := time.Duration(20000+rand.Intn(16000)) * time.Millisecond
+			if turnsInSession > 1 && (quickCheckpointCohort || (slotIndex+turnIdx)%5 < 4) {
+				reviewPause := time.Duration(280000+rand.Intn(180000)) * time.Millisecond
+				if quickCheckpointCohort {
+					reviewPause = time.Duration(8000+rand.Intn(10000)) * time.Millisecond
+				}
 				if hasHolder {
-					holder.HoldSeat(attendeeID, reviewPause+8*time.Second)
+					holder.HoldSeat(attendeeID, reviewPause+12*time.Second)
 				}
 				if !sleepWithContext(ctx, reviewPause) {
 					err = ctx.Err()
@@ -700,15 +875,26 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 			}
 			s.slotMu.Unlock()
 			err = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
+			if err != nil && turnIdx > 0 && ctx.Err() == nil {
+				if hasHolder {
+					holder.HoldSeat(attendeeID, 15*time.Second)
+				}
+				if sleepWithContext(ctx, 2*time.Second) {
+					err = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
+				}
+			}
 			action = "turn"
 			if err != nil {
 				break
 			}
 		}
 		if turnIdx+1 < turnsInSession {
-			runPause := time.Duration(52000+rand.Intn(36000)) * time.Millisecond
+			runPause := time.Duration(440000+rand.Intn(240000)) * time.Millisecond
+			if quickCheckpointCohort {
+				runPause = time.Duration(10000+rand.Intn(12000)) * time.Millisecond
+			}
 			if hasHolder {
-				holder.HoldSeat(attendeeID, runPause+8*time.Second)
+				holder.HoldSeat(attendeeID, runPause+12*time.Second)
 			}
 			s.slotMu.Lock()
 			if slotIndex < len(s.slots) {

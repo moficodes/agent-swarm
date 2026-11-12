@@ -112,97 +112,149 @@ func (g *Gateway) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	compactParam := r.URL.Query().Get("compact")
 	includeCompact := compactParam != "0" && (compactParam != "auto" || g.maxActors <= actorstate.HyperFleetThreshold)
 	leasedIDs := g.LeasedIDs()
-	views, fleetCompact, runningActors, suspendedActors, activeCohort, snapshotted, leasedCount := g.board.TelemetrySnapshotOptions(
-		g.maxActors, g.leasedChecker(), leasedIDs, includeCompact,
+
+	var (
+		views           map[string]types.ActorView
+		fleetCompact    string
+		runningActors   int
+		suspendedActors int
+		activeCohort    int
+		snapshotted     int
+		leasedCount     int
+		workers         []types.WorkerStatus
+		fastHyperDone   bool
 	)
-	names := slices.Sorted(maps.Keys(views))
-	var workers []types.WorkerStatus
-	podIndex := make(map[string]int)
-	for _, podName := range pods.PodNames {
-		if podName == "" {
-			continue
-		}
-		if _, ok := podIndex[podName]; !ok {
-			podIndex[podName] = len(workers)
-			workers = append(workers, types.WorkerStatus{PodName: podName})
-		}
-	}
-	for _, name := range names {
-		v := views[name]
-		if v.WorkerPod == "" {
-			continue
-		}
-		i, ok := podIndex[v.WorkerPod]
-		if !ok {
-			i = len(workers)
-			podIndex[v.WorkerPod] = i
-			workers = append(workers, types.WorkerStatus{PodName: v.WorkerPod})
-		}
-		workers[i].Actors = append(workers[i].Actors, types.WorkerActor{
-			ActorID:  v.ActorID,
-			State:    v.State,
-			Activity: v.Activity,
-			Source:   v.Source,
-		})
-	}
-	if g.maxActors > actorstate.HyperFleetThreshold {
-		compactActors := make(map[string]types.ActorView, len(leasedIDs)+4)
-		for name, v := range views {
-			if v.Leased || v.State == types.StateCrashed || name == "attendee-01" {
-				compactActors[name] = v
-			}
-		}
-		if _, hasFirst := compactActors["attendee-01"]; !hasFirst {
-			compactActors["attendee-01"] = g.currentView("attendee-01")
-		}
-		views = compactActors
-	}
-	if g.maxActors > 256 && g.seatsPerWorker > 0 {
-		seatPriority := func(s types.SubstrateState) int {
-			switch s {
-			case types.StateRunning:
-				return 0
-			case types.StateResuming:
-				return 1
-			case types.StateSuspending:
-				return 2
-			default:
-				return 3
-			}
-		}
-		for i := range workers {
-			if len(workers[i].Actors) > g.seatsPerWorker {
-				slices.SortStableFunc(workers[i].Actors, func(a, b types.WorkerActor) int {
-					return seatPriority(a.State) - seatPriority(b.State)
-				})
-				workers[i].Actors = workers[i].Actors[:g.seatsPerWorker]
-			}
-		}
-	}
-	slices.SortFunc(workers, func(a, b types.WorkerStatus) int { return strings.Compare(a.PodName, b.PodName) })
-	if g.maxActors > actorstate.HyperFleetThreshold {
-		totalWorkerSeats := 0
-		for i := range workers {
-			totalWorkerSeats += len(workers[i].Actors)
-		}
-		if totalWorkerSeats > 8192 {
-			for i := range workers {
-				if len(workers[i].Actors) == 0 {
+
+	if g.maxActors > actorstate.HyperFleetThreshold && !includeCompact && g.board.ActiveSeatCount() > 8192 {
+		if podNums, compactActors, rCnt, sCnt, acCnt, snapCnt, lCnt, ok := g.board.HyperWorkerTelemetrySnapshot(
+			g.maxActors, g.seatsPerWorker, g.leasedChecker(), leasedIDs,
+		); ok {
+			views = compactActors
+			runningActors = rCnt
+			suspendedActors = sCnt
+			activeCohort = acCnt
+			snapshotted = snapCnt
+			leasedCount = lCnt
+			podIndex := make(map[string]int, len(pods.PodNames)+len(podNums))
+			workers = make([]types.WorkerStatus, 0, len(pods.PodNames)+16)
+			for _, podName := range pods.PodNames {
+				if podName == "" {
 					continue
 				}
-				nums := make([]int, 0, len(workers[i].Actors))
-				allNumeric := true
-				for _, wa := range workers[i].Actors {
-					if idx, ok := actorstate.ParseAttendeeIndex(wa.ActorID, g.maxActors); ok {
-						nums = append(nums, idx)
-					} else {
-						allNumeric = false
-						break
-					}
+				if _, exists := podIndex[podName]; !exists {
+					podIndex[podName] = len(workers)
+					workers = append(workers, types.WorkerStatus{
+						PodName:   podName,
+						ActorNums: podNums[podName],
+					})
 				}
-				if allNumeric {
-					workers[i].ActorNums = nums
-					workers[i].Actors = nil
+			}
+			for podName, nums := range podNums {
+				if _, exists := podIndex[podName]; !exists {
+					podIndex[podName] = len(workers)
+					workers = append(workers, types.WorkerStatus{
+						PodName:   podName,
+						ActorNums: nums,
+					})
+				}
+			}
+			slices.SortFunc(workers, func(a, b types.WorkerStatus) int { return strings.Compare(a.PodName, b.PodName) })
+			fastHyperDone = true
+		}
+	}
+
+	if !fastHyperDone {
+		views, fleetCompact, runningActors, suspendedActors, activeCohort, snapshotted, leasedCount = g.board.TelemetrySnapshotOptions(
+			g.maxActors, g.leasedChecker(), leasedIDs, includeCompact,
+		)
+		names := slices.Sorted(maps.Keys(views))
+		podIndex := make(map[string]int)
+		for _, podName := range pods.PodNames {
+			if podName == "" {
+				continue
+			}
+			if _, ok := podIndex[podName]; !ok {
+				podIndex[podName] = len(workers)
+				workers = append(workers, types.WorkerStatus{PodName: podName})
+			}
+		}
+		for _, name := range names {
+			v := views[name]
+			if v.WorkerPod == "" {
+				continue
+			}
+			i, ok := podIndex[v.WorkerPod]
+			if !ok {
+				i = len(workers)
+				podIndex[v.WorkerPod] = i
+				workers = append(workers, types.WorkerStatus{PodName: v.WorkerPod})
+			}
+			workers[i].Actors = append(workers[i].Actors, types.WorkerActor{
+				ActorID:  v.ActorID,
+				State:    v.State,
+				Activity: v.Activity,
+				Source:   v.Source,
+			})
+		}
+		if g.maxActors > actorstate.HyperFleetThreshold {
+			compactActors := make(map[string]types.ActorView, len(leasedIDs)+4)
+			for name, v := range views {
+				if v.Leased || v.State == types.StateCrashed || name == "attendee-01" {
+					compactActors[name] = v
+				}
+			}
+			if _, hasFirst := compactActors["attendee-01"]; !hasFirst {
+				compactActors["attendee-01"] = g.currentView("attendee-01")
+			}
+			views = compactActors
+		}
+		if g.maxActors > 256 && g.seatsPerWorker > 0 {
+			seatPriority := func(s types.SubstrateState) int {
+				switch s {
+				case types.StateRunning:
+					return 0
+				case types.StateResuming:
+					return 1
+				case types.StateSuspending:
+					return 2
+				default:
+					return 3
+				}
+			}
+			for i := range workers {
+				if len(workers[i].Actors) > g.seatsPerWorker {
+					slices.SortStableFunc(workers[i].Actors, func(a, b types.WorkerActor) int {
+						return seatPriority(a.State) - seatPriority(b.State)
+					})
+					workers[i].Actors = workers[i].Actors[:g.seatsPerWorker]
+				}
+			}
+		}
+		slices.SortFunc(workers, func(a, b types.WorkerStatus) int { return strings.Compare(a.PodName, b.PodName) })
+		if g.maxActors > actorstate.HyperFleetThreshold {
+			totalWorkerSeats := 0
+			for i := range workers {
+				totalWorkerSeats += len(workers[i].Actors)
+			}
+			if totalWorkerSeats > 8192 {
+				for i := range workers {
+					if len(workers[i].Actors) == 0 {
+						continue
+					}
+					nums := make([]int, 0, len(workers[i].Actors))
+					allNumeric := true
+					for _, wa := range workers[i].Actors {
+						if idx, ok := actorstate.ParseAttendeeIndex(wa.ActorID, g.maxActors); ok {
+							nums = append(nums, idx)
+						} else {
+							allNumeric = false
+							break
+						}
+					}
+					if allNumeric {
+						workers[i].ActorNums = nums
+						workers[i].Actors = nil
+					}
 				}
 			}
 		}

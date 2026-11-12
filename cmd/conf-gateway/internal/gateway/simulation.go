@@ -44,12 +44,26 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 		totalSeats = p.Current * g.seatsPerWorker
 	}
 	reserve := max(400, totalSeats/9)
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		// Reserve ~2,560 seats (<1% of 262,144) across the 4,096 worker pods so
+		// simulated turns pack ~259,584 / 262,144 (99.02%) seats while live QR /chat
+		// scans always land on an immediately free worker seat with zero parking wait.
+		reserve = min(2560, max(64, totalSeats/100))
+	}
 	maxSimSeats := max(1, totalSeats-reserve)
+
+	activeSeats := 0
+	if g.board != nil {
+		activeSeats = g.board.ActiveSeatCount()
+	}
 
 	maxSimRouterInFlight := 512
 	if g.maxActors > actorstate.HyperFleetThreshold {
-		maxSimRouterInFlight = 6144
-		if parked, ok := g.scopedParking(); ok && parked > 4096 {
+		maxSimRouterInFlight = 12288
+		if activeSeats >= 252000 {
+			maxSimRouterInFlight = 10240
+		}
+		if parked, ok := g.scopedParking(); ok && parked > 2048 {
 			return false
 		}
 	}
@@ -63,10 +77,53 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 	if localCommitted >= maxSimSeats {
 		return false
 	}
-	if g.board != nil && g.board.ActiveSeatCount() >= maxSimSeats {
+	if activeSeats >= maxSimSeats {
 		return false
 	}
 	return true
+}
+
+// RunningSimulatedIndices returns 1-based indices of currently RUNNING actors
+// on worker pods that are neither human-reserved nor leased, allowing a newly
+// started hyper-mode simulation (e.g. after a gateway rollout) to adopt warm
+// seats immediately instead of cold-waking 260k actors from scratch.
+func (g *Gateway) RunningSimulatedIndices() []int {
+	if g.board == nil || g.maxActors <= actorstate.HyperFleetThreshold {
+		return nil
+	}
+	totalSeats := 262144
+	if p := g.workerPods.Load(); p != nil && p.Available && p.Current > 0 && g.seatsPerWorker > 0 {
+		totalSeats = p.Current * g.seatsPerWorker
+	}
+	maxAdopt := max(1, totalSeats-min(2560, max(64, totalSeats/100)))
+	views := g.board.Views()
+	if len(views) == 0 {
+		return nil
+	}
+	out := make([]int, 0, min(len(views), maxAdopt))
+	for name, v := range views {
+		if len(out) >= maxAdopt {
+			break
+		}
+		if v.State != types.StateRunning || v.WorkerPod == "" {
+			continue
+		}
+		idx, ok := actorstate.ParseAttendeeIndex(name, g.maxActors)
+		if !ok || g.IsReservedForHuman(name, idx) {
+			continue
+		}
+		out = append(out, idx)
+	}
+	return out
+}
+
+// IsCheckpointedSlot reports whether the 1-based slot index already has a
+// per-actor GCS checkpoint in hyper mode.
+func (g *Gateway) IsCheckpointedSlot(slotIndex int) bool {
+	if g.board == nil || g.maxActors <= actorstate.HyperFleetThreshold {
+		return false
+	}
+	return g.board.IsCheckpointedIndex(slotIndex)
 }
 
 // SeedSimulatedApprovalIndices bulk-marks simulated cohort slots as

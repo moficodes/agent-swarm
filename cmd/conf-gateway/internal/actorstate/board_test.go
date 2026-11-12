@@ -464,7 +464,13 @@ func TestBoard_HyperModeLifecycleResumingThinkingExecutingRunningSuspendingSuspe
 	}
 
 	// 6. FinishHyperSuspend(true) -> Checkpointed SUSPENDED -> code 1 (unseated)
+	if b.IsCheckpointedIndex(43) {
+		t.Fatalf("IsCheckpointedIndex(43) = true on untouched NeverStarted slot, want false")
+	}
 	b.FinishHyperSuspend("attendee-42", true)
+	if !b.IsCheckpointedIndex(42) {
+		t.Fatalf("IsCheckpointedIndex(42) = false after FinishHyperSuspend, want true")
+	}
 	if got := codeOf(42); got != 1 {
 		t.Fatalf("after FinishHyperSuspend code = %d, want 1 (Checkpointed SUSPENDED)", got)
 	}

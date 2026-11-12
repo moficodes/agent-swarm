@@ -457,8 +457,11 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 			gw.humanSlotStride = 16
 		}
 	}
-	if gw.maxActors > actorstate.HyperFleetThreshold && cap(gw.suspendSem) < 4096 {
-		gw.suspendSem = make(chan struct{}, 4096)
+	if gw.maxActors > actorstate.HyperFleetThreshold && cap(gw.suspendSem) < 2048 {
+		gw.suspendSem = make(chan struct{}, 2048)
+	}
+	if gw.maxActors > 262144 && gw.pollInterval == time.Second {
+		gw.pollInterval = 1500 * time.Millisecond
 	}
 
 	if gw.secret == "" {
@@ -477,7 +480,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 			simOpts = append(simOpts, WithDataGeneratorExecutor(gw.dataGeneratorURL, gw.simulationTurnURL, gw.presenterKey))
 		}
 		if gw.maxActors > actorstate.HyperFleetThreshold {
-			simOpts = append(simOpts, WithSimulationMaxConcurrentTurns(262144))
+			simOpts = append(simOpts, WithSimulationMaxConcurrentTurns(300000))
 			if gw.maxSimulationMPS > 0 {
 				simOpts = append(simOpts, WithSimulationMaxTargetMPS(gw.maxSimulationMPS))
 			}
@@ -526,12 +529,20 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		gw.wg.Add(1)
 		go func() {
 			defer gw.wg.Done()
+			var lastReconcile time.Time
 			actorstate.Poll(ctx, gw.control, gw.pollInterval, gw.board, func(d time.Duration, err error) {
 				gw.statePollMs.Store(d.Milliseconds())
 				if err == nil {
 					now := time.Now()
-					gw.reconcileStuckSuspending(now)
-					gw.reconcileStuckRunning(now)
+					if gw.maxActors > actorstate.HyperFleetThreshold {
+						if !lastReconcile.IsZero() && now.Sub(lastReconcile) < 10*time.Second {
+							return
+						}
+						lastReconcile = now
+					}
+					views := gw.board.Views()
+					gw.reconcileStuckSuspendingWithViews(now, views)
+					gw.reconcileStuckRunningWithViews(now, views)
 				}
 			})
 		}()
@@ -554,6 +565,14 @@ func (g *Gateway) StopSimulation() {
 // ClearSimulatedActivity resets gateway-side activity (Thinking, AwaitingApproval,
 // Executing) to ActivityIdle on every actor that is not leased or reserved for a live attendee.
 func (g *Gateway) ClearSimulatedActivity() {
+	g.ClearSimulatedActivityKeepSeats()
+	g.drainUnleasedHeldSeats(g.simCleanupProtectedChecker())
+}
+
+// ClearSimulatedActivityKeepSeats clears gateway-side simulated activity and
+// pending approvals without draining warm worker seats, avoiding STS
+// SuspendActor bursts across hyper-mode restarts or gateway rollouts.
+func (g *Gateway) ClearSimulatedActivityKeepSeats() {
 	isProtected := g.simCleanupProtectedChecker()
 	if g.board != nil {
 		g.board.ClearUnleasedActivityIndices(g.simCleanupProtectedIndices(), isProtected, g.HumanSlotStride())
@@ -561,13 +580,20 @@ func (g *Gateway) ClearSimulatedActivity() {
 	if g.proxy != nil {
 		g.proxy.ClearUnleasedPending(isProtected)
 	}
-	g.drainUnleasedHeldSeats(isProtected)
 }
 
 // Close stops background work, including pending auto-suspends, and waits
 // for any suspend already running to finish.
 func (g *Gateway) Close() {
-	g.StopSimulation()
+	if g.maxActors > 262144 {
+		if sr := g.SimulationRunner(); sr != nil {
+			sr.StopKeepSeats()
+		} else {
+			g.StopSimulation()
+		}
+	} else {
+		g.StopSimulation()
+	}
 
 	g.mu.Lock()
 	g.closed = true

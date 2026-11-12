@@ -445,6 +445,8 @@ func main() {
 	}
 	if !proxy.Enabled() {
 		log.Printf("VERTEX_PROJECT is unset; model calls are disabled and actors reply with the mock engine.")
+	} else if !cfg.LocalMode {
+		proxy.WarmCredentials(ctx)
 	}
 
 	routerHTTPClient, err := newRouterHTTPClient(cfg)
