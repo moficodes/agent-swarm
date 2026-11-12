@@ -21,12 +21,11 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 DEMO_CONF_PATCH_ROUTER="${DEMO_CONF_PATCH_ROUTER:-false}"
-DEMO_CONF_ACTORS="${DEMO_CONF_ACTORS:-50}"
-DEMO_CONF_MIN_WORKERS="${DEMO_CONF_MIN_WORKERS:-2}"
-DEMO_CONF_MAX_WORKERS="${DEMO_CONF_MAX_WORKERS:-5}"
-# Each conf-worker hosts this many 1-CPU actors at once
-# (manifests/workerpool.yaml.tmpl).
-DEMO_CONF_ACTORS_PER_WORKER="${DEMO_CONF_ACTORS_PER_WORKER:-4}"
+# DEMO_CONF_PROFILE selects a deployment preset ("swarm" for the 50-actor
+# booth demo on 2-5 workers with 4 seats/pod, or "megaswarm" for the 65,536-actor
+# 16^4 scale demo on 256 workers with 16 seats/pod). Individual DEMO_CONF_*
+# variables always override the selected profile's defaults.
+DEMO_CONF_PROFILE="${DEMO_CONF_PROFILE:-swarm}"
 # DEMO_CONF_TEMPLATE_REVISION marks the conf-agent template. Actor templates
 # are immutable, so bump it with every change to manifests/actortemplate.yaml.tmpl
 # and the install refuses a stale template instead of running old actors.
@@ -41,6 +40,62 @@ DEMO_CONF_NAMESPACE="${DEMO_CONF_NAMESPACE:-ate-demo-conf}"
 # to atenet-router's mTLS ingress (:443). conf_router_spiffe_id derives it from
 # DEMO_CONF_NAMESPACE on each call so inline overrides work in tests.
 DEMO_CONF_ROUTER_SPIFFE_ID="spiffe://cluster.local/ns/${DEMO_CONF_NAMESPACE}/sa/conf-gateway"
+
+conf_profile() {
+  echo "${DEMO_CONF_PROFILE:-swarm}"
+}
+
+conf_validate_profile() {
+  local p
+  p="$(conf_profile)"
+  case "${p}" in
+    swarm | megaswarm) return 0 ;;
+    *)
+      echo "error: unknown DEMO_CONF_PROFILE '${p}' (expected 'swarm' or 'megaswarm')" >&2
+      return 1
+      ;;
+  esac
+}
+
+conf_actors() {
+  if [[ -n "${DEMO_CONF_ACTORS:-}" ]]; then
+    echo "${DEMO_CONF_ACTORS}"
+  elif [[ "$(conf_profile)" == "megaswarm" ]]; then
+    echo "65536"
+  else
+    echo "50"
+  fi
+}
+
+conf_min_workers() {
+  if [[ -n "${DEMO_CONF_MIN_WORKERS:-}" ]]; then
+    echo "${DEMO_CONF_MIN_WORKERS}"
+  elif [[ "$(conf_profile)" == "megaswarm" ]]; then
+    echo "256"
+  else
+    echo "2"
+  fi
+}
+
+conf_max_workers() {
+  if [[ -n "${DEMO_CONF_MAX_WORKERS:-}" ]]; then
+    echo "${DEMO_CONF_MAX_WORKERS}"
+  elif [[ "$(conf_profile)" == "megaswarm" ]]; then
+    echo "256"
+  else
+    echo "5"
+  fi
+}
+
+conf_actors_per_worker() {
+  if [[ -n "${DEMO_CONF_ACTORS_PER_WORKER:-}" ]]; then
+    echo "${DEMO_CONF_ACTORS_PER_WORKER}"
+  elif [[ "$(conf_profile)" == "megaswarm" ]]; then
+    echo "16"
+  else
+    echo "4"
+  fi
+}
 
 conf_ns() {
   echo "${DEMO_CONF_NAMESPACE:-ate-demo-conf}"
@@ -188,7 +243,10 @@ conf_ateapi_preview_enabled() {
 # active. Setting DEMO_CONF_STORAGE_CLASS=none skips external volumes.
 conf_resolve_storage_class() {
   if [[ -z "${DEMO_CONF_STORAGE_CLASS:-}" ]]; then
-    if run_kubectl get storageclass "${DEMO_CONF_DEFAULT_STORAGE_CLASS}" >/dev/null 2>&1 \
+    if [[ "$(conf_profile)" == "megaswarm" ]]; then
+      DEMO_CONF_STORAGE_CLASS="none"
+      log_step "Profile megaswarm defaults to DEMO_CONF_STORAGE_CLASS=none (GCS snapshots + /tmp/workspace)"
+    elif run_kubectl get storageclass "${DEMO_CONF_DEFAULT_STORAGE_CLASS}" >/dev/null 2>&1 \
         && run_kubectl get csidriverconfigs.ate.dev filestore.csi.storage.gke.io >/dev/null 2>&1; then
       DEMO_CONF_STORAGE_CLASS="${DEMO_CONF_DEFAULT_STORAGE_CLASS}"
       log_step "Auto-detected external volume StorageClass ${DEMO_CONF_STORAGE_CLASS}"
@@ -220,7 +278,8 @@ conf_resolve_storage_class() {
 # acceptable: a low grace period is only unsafe once --parked-request-budget
 # is raised to 60s, so there is nothing to say about it before that.
 conf_router_flags_ok() {
-  local args_json="$1" grace="${2:-}" spiffe="${3-$(conf_router_spiffe_id)}" missing=() v s
+  local args_json="$1" grace="${2:-}" spiffe="${3-$(conf_router_spiffe_id)}" missing=() v s actors
+  actors="$(conf_actors)"
   v="$(conf_flag_value "${args_json}" --parked-request-budget)"
   s="$(conf_seconds "${v:-5s}")"
   if [[ -z "${s}" || "${s}" -lt 60 ]]; then
@@ -239,7 +298,7 @@ conf_router_flags_ok() {
   if [[ -n "${spiffe}" ]] && ! conf_router_allows_spiffe "${args_json}" "${spiffe}"; then
     missing+=("--ingress-allowed-spiffe-ids=${spiffe}")
   fi
-  if ((10#${DEMO_CONF_ACTORS:-50} > 1024)); then
+  if ((10#${actors:-50} > 1024)); then
     v="$(conf_flag_value "${args_json}" --parked-request-max)"
     if [[ ! "${v}" =~ ^[0-9]+$ ]] || ((10#${v} < 4096)); then
       missing+=("--parked-request-max=4096")
@@ -434,7 +493,11 @@ conf_build_gateway() {
 }
 
 conf_render() {
-  local seats="${DEMO_CONF_ACTORS_PER_WORKER}"
+  local actors min_workers max_workers seats
+  actors="$(conf_actors)"
+  min_workers="$(conf_min_workers)"
+  max_workers="$(conf_max_workers)"
+  seats="$(conf_actors_per_worker)"
   local default_actor_cpu=1000
   local default_actor_mem=536870912
   local default_think_min=1200
@@ -442,7 +505,7 @@ conf_render() {
   local default_exec_min=800
   local default_exec_max=1600
   local default_suspend_after="2s"
-  if ((10#${DEMO_CONF_ACTORS:-50} > 256)); then
+  if ((10#${actors:-50} > 256)); then
     default_actor_cpu=100
     default_actor_mem=134217728
     default_think_min=9000
@@ -482,13 +545,13 @@ conf_render() {
       -e "s|\${MOCK_THINK_MAX_MS}|${DEMO_CONF_MOCK_THINK_MAX_MS:-${default_think_max}}|g" \
       -e "s|\${MOCK_EXEC_MIN_MS}|${DEMO_CONF_MOCK_EXEC_MIN_MS:-${default_exec_min}}|g" \
       -e "s|\${MOCK_EXEC_MAX_MS}|${DEMO_CONF_MOCK_EXEC_MAX_MS:-${default_exec_max}}|g" \
-      -e "s|\${ACTOR_COUNT}|${DEMO_CONF_ACTORS}|g" \
+      -e "s|\${ACTOR_COUNT}|${actors}|g" \
       -e "s|\${DEMO_DOMAIN}|${DEMO_DOMAIN:-}|g" \
       -e "s|\${TEMPLATE_REVISION}|${DEMO_CONF_TEMPLATE_REVISION}|g" \
       -e "s|\${CLUSTER}|${DEMO_CONF_CLUSTER:-}|g" \
-      -e "s|\${WORKER_REPLICAS}|${DEMO_CONF_WORKER_REPLICAS:-${DEMO_CONF_MIN_WORKERS}}|g" \
-      -e "s|\${MIN_WORKERS}|${DEMO_CONF_MIN_WORKERS}|g" \
-      -e "s|\${MAX_WORKERS}|${DEMO_CONF_MAX_WORKERS}|g" \
+      -e "s|\${WORKER_REPLICAS}|${DEMO_CONF_WORKER_REPLICAS:-${min_workers}}|g" \
+      -e "s|\${MIN_WORKERS}|${min_workers}|g" \
+      -e "s|\${MAX_WORKERS}|${max_workers}|g" \
       -e "s|\${ACTORS_PER_WORKER}|${seats}|g" \
       -e "s|\${ACTOR_CPU_MILLICORES}|${actor_cpu}|g" \
       -e "s|\${ACTOR_MEMORY_BYTES}|${actor_mem}|g" \
@@ -557,11 +620,12 @@ conf_adapter_series_query() {
 }
 
 conf_adapter_metrics_query() {
-  local ns pool
+  local ns pool seats
   ns="$(conf_ns)"
   pool="$(conf_worker_pool)"
+  seats="$(conf_actors_per_worker)"
   printf '(max(ate_workerpool_workers{ate_workerpool_namespace="%s",ate_workerpool_name="%s",ate_worker_state="partial"}) or vector(0)) + (max(ate_workerpool_workers{ate_workerpool_namespace="%s",ate_workerpool_name="%s",ate_worker_state="at_capacity"}) or vector(0)) + ceil((max(conf_gateway_parked_requests{namespace="%s"}) or sum(atenet_router_parking_active) or vector(0)) / %s)' \
-    "${ns}" "${pool}" "${ns}" "${pool}" "${ns}" "${DEMO_CONF_ACTORS_PER_WORKER}"
+    "${ns}" "${pool}" "${ns}" "${pool}" "${ns}" "${seats}"
 }
 
 conf_update_adapter_configmap() {
@@ -811,7 +875,12 @@ conf_apply_dashboard() {
 }
 
 conf_deploy() {
-  log_step "Deploying the conference demo"
+  conf_validate_profile || exit 1
+  DEMO_CONF_ACTORS="$(conf_actors)"
+  DEMO_CONF_MIN_WORKERS="$(conf_min_workers)"
+  DEMO_CONF_MAX_WORKERS="$(conf_max_workers)"
+  DEMO_CONF_ACTORS_PER_WORKER="$(conf_actors_per_worker)"
+  log_step "Deploying the conference demo (profile: $(conf_profile), actors: ${DEMO_CONF_ACTORS}, workers: ${DEMO_CONF_MIN_WORKERS}-${DEMO_CONF_MAX_WORKERS}, seats/worker: ${DEMO_CONF_ACTORS_PER_WORKER})"
   log_target_context
   : "${KO_DOCKER_REPO:?KO_DOCKER_REPO must be set}"
   local tool
@@ -1002,33 +1071,55 @@ conf_delete() {
 }
 
 conf_main() {
-  local action="" arg
-  for arg in "$@"; do
-    case "${arg}" in
-      up | down) action="${arg}" ;;
+  local action=""
+  while (($# > 0)); do
+    case "$1" in
+      up | down) action="$1" ;;
       --patch-router) DEMO_CONF_PATCH_ROUTER=true ;;
+      --profile=*) DEMO_CONF_PROFILE="${1#--profile=}" ;;
+      --profile)
+        if (($# < 2)); then
+          echo "error: --profile requires an argument (swarm or megaswarm)" >&2
+          action=help
+          break
+        fi
+        DEMO_CONF_PROFILE="$2"
+        shift
+        ;;
       -h | --help) action=help ;;
-      *) echo "error: unknown argument ${arg}" >&2; action=help ;;
+      *) echo "error: unknown argument $1" >&2; action=help ;;
     esac
+    shift
   done
+  if [[ "${action}" == "up" || "${action}" == "down" ]]; then
+    if ! conf_validate_profile; then
+      return 1
+    fi
+  fi
   case "${action}" in
     up) conf_deploy ;;
     down) conf_delete ;;
     *)
-      echo "Usage: $0 up|down [--patch-router]"
-      echo "  up              deploy the demo onto a cluster running Substrate at the go.mod pin"
-      echo "  down            delete it (router flags and the gateway service account stay)"
-      echo "  --patch-router  patch atenet-router's timeouts and grace period instead of failing"
+      echo "Usage: $0 up|down [--profile=swarm|megaswarm] [--patch-router]"
+      echo "  up                       deploy the demo onto a cluster running Substrate at the go.mod pin"
+      echo "  down                     delete it (router flags and the gateway service account stay)"
+      echo "  --profile=swarm|megaswarm select deployment preset (default: DEMO_CONF_PROFILE=swarm):"
+      echo "                             swarm     : 50 actors, 2-5 workers, 4 seats/worker, 1 CPU / 512 MiB per actor, Filestore auto-detect"
+      echo "                             megaswarm : 65,536 actors (16^4), 256 workers, 16 seats/worker, 100m CPU / 128 MiB per actor, GCS + /tmp/workspace"
+      echo "  --patch-router           patch atenet-router's timeouts, max parked requests and grace period instead of failing"
       echo "  Required env: KO_DOCKER_REPO"
-      echo "  Optional env: PROJECT_ID (enables Gemini on Agent Platform; unset runs mock replies), VERTEX_LOCATION,"
-      echo "                DEMO_DOMAIN, DEMO_CONF_STATIC_IP_NAME, ALLOWED_GOOGLE_DOMAINS, GOOGLE_CLIENT_ID, FIREBASE_API_KEY,"
+      echo "  Optional env: DEMO_CONF_PROFILE (default swarm; 'swarm' or 'megaswarm'),"
+      echo "                PROJECT_ID (enables Gemini on Agent Platform; unset runs mock replies), VERTEX_LOCATION,"
+      echo "                DEMO_DOMAIN, DEMO_CONF_STATIC_IP_NAME, ALLOWED_GOOGLE_DOMAINS, GOOGLE_CLIENT_ID, FIREBASE_API_KEY, FIREBASE_PROJECT_ID,"
       echo "                DEMO_CONF_NAMESPACE (default ate-demo-conf; isolates namespace, atespace, worker pool and template),"
       echo "                DEMO_CONF_WORKER_POOL, DEMO_CONF_WORKLOAD_LABEL, DEMO_CONF_TEMPLATE_NAME, DEMO_CONF_EXTERNAL_METRIC,"
       echo "                CHAT_RATE_LIMIT_RPM (default 10), SESSION_RATE_LIMIT_RPM (default 10),"
-      echo "                DEMO_CONF_ACTORS (default 50), SUBSTRATE_REPO, BUCKET_NAME, SNAPSHOT_LOCATION,"
-      echo "                DEMO_CONF_MIN_WORKERS (default 2), DEMO_CONF_MAX_WORKERS (default 5),"
-      echo "                DEMO_CONF_ACTORS_PER_WORKER (default 4),"
-      echo "                DEMO_CONF_STORAGE_CLASS (external volume StorageClass; auto-detects substrate-volumepool-sc, set 'none' to disable),"
+      echo "                DEMO_CONF_ACTORS (default 50 for swarm, 65536 for megaswarm), SUBSTRATE_REPO, BUCKET_NAME, SNAPSHOT_LOCATION,"
+      echo "                DEMO_CONF_MIN_WORKERS (default 2 for swarm, 256 for megaswarm),"
+      echo "                DEMO_CONF_MAX_WORKERS (default 5 for swarm, 256 for megaswarm),"
+      echo "                DEMO_CONF_ACTORS_PER_WORKER (default 4 for swarm, 16 for megaswarm),"
+      echo "                DEMO_CONF_STORAGE_CLASS (external volume StorageClass; auto-detects substrate-volumepool-sc on swarm, defaults to 'none' on megaswarm),"
+      echo "                DATA_GENERATOR_REPO, DEMO_CONF_DATAGEN_ORCHESTRATOR_IMAGE, DEMO_CONF_DATAGEN_WORKER_IMAGE (optional in-cluster data-generator fleet),"
       echo "                KUBECTL_CONTEXT (defaults to the current kube context),"
       echo "                DEMO_CONF_CLUSTER (dashboard cluster label; defaults to the GKE context's cluster),"
       echo "                DEMO_CONF_ALLOW_DIRTY_SUBSTRATE (accept a cluster labeled <pin>-dirty),"

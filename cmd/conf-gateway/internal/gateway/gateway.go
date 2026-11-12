@@ -312,7 +312,7 @@ type Gateway struct {
 	// mu guards chatHistories through closed. Lock order: mu first, then the locks
 	// inside actorproxy (approvals) and feed (Log, Broker) as leaves. Those
 	// packages never call back into the gateway while holding their own lock.
-	mu              sync.RWMutex
+	mu                sync.RWMutex
 	chatHistories     map[string][]types.ChatMessage
 	lastResults       map[string]*types.ExecutionResult
 	currentActionID   map[string]string

@@ -221,12 +221,12 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 
 type resetFakeTarget struct {
 	approvalFakeTarget
-	reverted        []string
-	suspended       []string
-	completed       bool
-	doneSuspended   int
-	doneReverted    int
-	doneErrors      int
+	reverted      []string
+	suspended     []string
+	completed     bool
+	doneSuspended int
+	doneReverted  int
+	doneErrors    int
 }
 
 func (f *resetFakeTarget) SuspendActorForReset(_ context.Context, attendeeID string) error {

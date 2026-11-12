@@ -686,12 +686,63 @@ fi
 # The cluster gets the exclusion that keeps GKE from upgrading worker nodes.
 create_args="$(PROJECT_ID=p CLUSTER_NAME=c cc_create_args 1.37.0-gke.1)"
 for want in c "--project p" "--release-channel rapid" "--cluster-version 1.37.0-gke.1" \
+            "--num-nodes 2" "--machine-type c3-standard-4" \
             "--workload-pool p.svc.id.goog" "--enable-nested-virtualization"; do
   if ! tr '\n' ' ' <<<"${create_args}" | grep -qF -- "${want}"; then
     echo "FAIL: cc_create_args lacks ${want}" >&2
     fail=1
   fi
 done
+mega_create_args="$(DEMO_CONF_PROFILE=megaswarm PROJECT_ID=p CLUSTER_NAME=c cc_create_args 1.37.0-gke.1)"
+for want in "--num-nodes 16" "--machine-type c3-standard-8"; do
+  if ! tr '\n' ' ' <<<"${mega_create_args}" | grep -qF -- "${want}"; then
+    echo "FAIL: megaswarm cc_create_args lacks ${want}" >&2
+    fail=1
+  fi
+done
+if ! conf_validate_profile || ! DEMO_CONF_PROFILE=swarm conf_validate_profile || ! DEMO_CONF_PROFILE=megaswarm conf_validate_profile; then
+  echo "FAIL: conf_validate_profile rejected a valid profile" >&2
+  fail=1
+fi
+if DEMO_CONF_PROFILE=invalid conf_validate_profile 2>/dev/null || DEMO_CONF_PROFILE=invalid cc_validate_profile 2>/dev/null; then
+  echo "FAIL: validate_profile accepted an invalid profile" >&2
+  fail=1
+fi
+mega_gw="$(DEMO_CONF_PROFILE=megaswarm conf_render manifests/gateway.yaml.tmpl)"
+for pair in 'ACTOR_COUNT:65536' 'ACTORS_PER_WORKER:16' 'SUSPEND_AFTER:3s' 'MOCK_THINK_MIN_MS:9000' 'MOCK_EXEC_MIN_MS:8000'; do
+  k="${pair%%:*}"
+  v="${pair#*:}"
+  if ! grep -A1 "name: ${k}" <<<"${mega_gw}" | grep -qF "value: \"${v}\""; then
+    echo "FAIL: megaswarm gateway manifest lacks ${k}=${v}" >&2
+    fail=1
+  fi
+done
+if ! DEMO_CONF_PROFILE=megaswarm DEMO_CONF_ACTORS=4096 conf_render manifests/gateway.yaml.tmpl | grep -A1 'name: ACTOR_COUNT' | grep -qF 'value: "4096"'; then
+  echo "FAIL: DEMO_CONF_ACTORS did not override DEMO_CONF_PROFILE=megaswarm" >&2
+  fail=1
+fi
+mega_pool="$(DEMO_CONF_PROFILE=megaswarm conf_render manifests/workerpool.yaml.tmpl)"
+for want in "replicas: 256" "cpu: 300m" "memory: 1024Mi" "cpu: 1650m"; do
+  if ! grep -qF -- "${want}" <<<"${mega_pool}"; then
+    echo "FAIL: megaswarm workerpool manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+mega_tmpl="$(DEMO_CONF_PROFILE=megaswarm conf_render manifests/actortemplate.yaml.tmpl)"
+for want in "cpuMillicores: 100" "memoryBytes: 134217728"; do
+  if ! grep -qF -- "${want}" <<<"${mega_tmpl}"; then
+    echo "FAIL: megaswarm actortemplate manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+if DEMO_CONF_PROFILE=megaswarm conf_router_flags_ok '["--parked-request-budget=90s","--route-timeout=5m","--ingress-allowed-spiffe-ids='"${DEMO_CONF_ROUTER_SPIFFE_ID}"'"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}" >/dev/null; then
+  echo "FAIL: megaswarm conf_router_flags_ok did not require --parked-request-max=4096" >&2
+  fail=1
+fi
+if ! DEMO_CONF_PROFILE=megaswarm conf_router_flags_ok '["--parked-request-budget=90s","--route-timeout=5m","--parked-request-max=4096","--ingress-allowed-spiffe-ids='"${DEMO_CONF_ROUTER_SPIFFE_ID}"'"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}" >/dev/null; then
+  echo "FAIL: megaswarm conf_router_flags_ok rejected --parked-request-max=4096" >&2
+  fail=1
+fi
 exclusion_args="$(PROJECT_ID=p CLUSTER_NAME=c cc_exclusion_args)"
 for want in --add-maintenance-exclusion-scope=no_minor_or_node_upgrades --add-maintenance-exclusion-until-end-of-support; do
   if ! grep -qxF -- "${want}" <<<"${exclusion_args}"; then

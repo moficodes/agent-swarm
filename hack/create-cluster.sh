@@ -26,12 +26,47 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 CLUSTER_LOCATION="${CLUSTER_LOCATION:-us-west1-c}"
 NETWORK="${NETWORK:-default}"
 SUBNETWORK="${SUBNETWORK:-default}"
-NODE_MACHINE_TYPE="${NODE_MACHINE_TYPE:-c3-standard-4}"
-NODE_COUNT="${NODE_COUNT:-2}"
+DEMO_CONF_PROFILE="${DEMO_CONF_PROFILE:-swarm}"
 # Substrate needs GKE 1.37 or later, which some zones offer only in RAPID.
 GKE_RELEASE_CHANNEL="${GKE_RELEASE_CHANNEL:-rapid}"
 GKE_MINOR_VERSION="${GKE_MINOR_VERSION:-1.37}"
 CC_DRY_RUN="${CC_DRY_RUN:-false}"
+
+cc_profile() {
+  echo "${DEMO_CONF_PROFILE:-swarm}"
+}
+
+cc_validate_profile() {
+  local p
+  p="$(cc_profile)"
+  case "${p}" in
+    swarm | megaswarm) return 0 ;;
+    *)
+      echo "error: unknown DEMO_CONF_PROFILE '${p}' (expected 'swarm' or 'megaswarm')" >&2
+      return 1
+      ;;
+  esac
+}
+
+cc_node_machine_type() {
+  if [[ -n "${NODE_MACHINE_TYPE:-}" ]]; then
+    echo "${NODE_MACHINE_TYPE}"
+  elif [[ "$(cc_profile)" == "megaswarm" ]]; then
+    echo "c3-standard-8"
+  else
+    echo "c3-standard-4"
+  fi
+}
+
+cc_node_count() {
+  if [[ -n "${NODE_COUNT:-}" ]]; then
+    echo "${NODE_COUNT}"
+  elif [[ "$(cc_profile)" == "megaswarm" ]]; then
+    echo "16"
+  else
+    echo "2"
+  fi
+}
 
 # A channel cluster auto-upgrades its nodes, which recreates worker pods
 # mid-demo. The exclusion blocks node and minor upgrades until the version's
@@ -86,8 +121,8 @@ cc_create_args() {
     --location "${CLUSTER_LOCATION}" \
     --release-channel "${GKE_RELEASE_CHANNEL}" \
     --cluster-version "${version}" \
-    --num-nodes "${NODE_COUNT}" \
-    --machine-type "${NODE_MACHINE_TYPE}" \
+    --num-nodes "$(cc_node_count)" \
+    --machine-type "$(cc_node_machine_type)" \
     --enable-nested-virtualization \
     --network "${NETWORK}" \
     --subnetwork "${SUBNETWORK}" \
@@ -152,18 +187,36 @@ cc_create() {
   fi
 
   log_step "Cluster ready. Deploy with:"
-  echo "  KUBECTL_CONTEXT=${context} hack/deploy.sh up"
+  if [[ "$(cc_profile)" == "megaswarm" ]]; then
+    echo "  KUBECTL_CONTEXT=${context} hack/deploy.sh up --profile=megaswarm"
+  else
+    echo "  KUBECTL_CONTEXT=${context} hack/deploy.sh up"
+  fi
 }
 
 cc_main() {
-  local arg
-  for arg in "$@"; do
-    case "${arg}" in
+  while (($# > 0)); do
+    case "$1" in
       --dry-run) CC_DRY_RUN=true ;;
+      --profile=*) DEMO_CONF_PROFILE="${1#--profile=}" ;;
+      --profile)
+        if (($# < 2)); then
+          echo "error: --profile requires an argument (swarm or megaswarm)" >&2
+          cc_usage
+          return 1
+        fi
+        DEMO_CONF_PROFILE="$2"
+        shift
+        ;;
       -h | --help) cc_usage; return 0 ;;
-      *) echo "error: unknown argument ${arg}" >&2; cc_usage; return 1 ;;
+      *) echo "error: unknown argument $1" >&2; cc_usage; return 1 ;;
     esac
+    shift
   done
+  if ! cc_validate_profile; then
+    cc_usage
+    return 1
+  fi
   if [[ -z "${PROJECT_ID:-}" || -z "${CLUSTER_NAME:-}" ]]; then
     echo "error: PROJECT_ID and CLUSTER_NAME are required" >&2
     cc_usage
@@ -177,14 +230,19 @@ cc_main() {
 }
 
 cc_usage() {
-  echo "Usage: $0 [--dry-run]"
+  echo "Usage: $0 [--profile=swarm|megaswarm] [--dry-run]"
   echo "  Creates a GKE cluster for Substrate on the newest GKE_MINOR_VERSION release, with a"
   echo "  maintenance exclusion against node upgrades. On an existing cluster it adds the"
   echo "  exclusion if missing and leaves the version alone. --dry-run prints the gcloud"
   echo "  commands that change anything."
+  echo "  --profile=swarm|megaswarm select cluster size preset (default: DEMO_CONF_PROFILE=swarm):"
+  echo "                             swarm     : 2 x c3-standard-4 nodes"
+  echo "                             megaswarm : 16 x c3-standard-8 nodes"
   echo "  Required env: PROJECT_ID, CLUSTER_NAME"
-  echo "  Optional env: CLUSTER_LOCATION (default us-west1-c), NETWORK, SUBNETWORK (default default),"
-  echo "                NODE_MACHINE_TYPE (default c3-standard-4), NODE_COUNT (default 2),"
+  echo "  Optional env: DEMO_CONF_PROFILE (default swarm; 'swarm' or 'megaswarm'),"
+  echo "                CLUSTER_LOCATION (default us-west1-c), NETWORK, SUBNETWORK (default default),"
+  echo "                NODE_MACHINE_TYPE (default c3-standard-4 for swarm, c3-standard-8 for megaswarm),"
+  echo "                NODE_COUNT (default 2 for swarm, 16 for megaswarm),"
   echo "                GKE_RELEASE_CHANNEL (default rapid), GKE_MINOR_VERSION (default 1.37)"
   echo "  substrate-gke's .ate-dev-env.sh sets these names; source it or export them yourself."
 }

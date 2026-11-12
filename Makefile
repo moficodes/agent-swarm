@@ -63,9 +63,21 @@ verify-local:
 deploy:
 	bash hack/deploy.sh up $(DEPLOY_FLAGS)
 
+.PHONY: deploy-swarm
+deploy-swarm:
+	bash hack/deploy.sh up --profile=swarm $(DEPLOY_FLAGS)
+
+.PHONY: deploy-megaswarm
+deploy-megaswarm:
+	bash hack/deploy.sh up --profile=megaswarm $(DEPLOY_FLAGS)
+
 .PHONY: undeploy
 undeploy:
-	bash hack/deploy.sh down
+	bash hack/deploy.sh down $(DEPLOY_FLAGS)
+
+.PHONY: undeploy-megaswarm
+undeploy-megaswarm:
+	bash hack/deploy.sh down --profile=megaswarm $(DEPLOY_FLAGS)
 
 .PHONY: e2e
 e2e:

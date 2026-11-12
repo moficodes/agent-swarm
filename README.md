@@ -26,6 +26,8 @@ limitations under the License.
   `hack/create-cluster.sh` creates one:
 
       PROJECT_ID=my-project CLUSTER_NAME=substrate-poc hack/create-cluster.sh
+      # Or for the 65,536-actor (16^4) Mega Swarm profile (16 x c3-standard-8 nodes):
+      PROJECT_ID=my-project CLUSTER_NAME=substrate-65k hack/create-cluster.sh --profile=megaswarm
 
   It takes the newest 1.37 release in RAPID and adds a maintenance exclusion
   against node and minor upgrades until the version's end of support, since a
@@ -248,12 +250,19 @@ Gemini on Agent Platform; unset runs in mock mode with `DEMO_MOCK_LLM=true`), `V
 "Prerequisites" above for the full list.
 
 ```bash
+# Default "swarm" profile (50 actors, 2-5 workers, 4 seats/worker, Filestore auto-detect):
 make deploy DEPLOY_FLAGS=--patch-router
+
+# "megaswarm" profile (65,536 actors = 16^4, 256 workers across 16 nodes, 16 seats/worker, GCS + /tmp/workspace):
+make deploy-megaswarm DEPLOY_FLAGS=--patch-router
 ```
 
-`make deploy` runs `hack/deploy.sh up $(DEPLOY_FLAGS)`; leave `DEPLOY_FLAGS`
-unset to deploy without patching the router, or set
-`DEMO_CONF_PATCH_ROUTER=true` in the environment instead, which has the same
+`make deploy` runs `hack/deploy.sh up $(DEPLOY_FLAGS)` (defaulting to
+`DEMO_CONF_PROFILE=swarm`), while `make deploy-megaswarm` passes
+`--profile=megaswarm` (or set `DEMO_CONF_PROFILE=megaswarm` in the environment).
+Every individual `DEMO_CONF_*` variable overrides the selected profile's
+defaults. Leave `DEPLOY_FLAGS` unset to deploy without patching the router, or
+set `DEMO_CONF_PATCH_ROUTER=true` in the environment instead, which has the same
 effect regardless of any flags passed.
 
 `hack/deploy.sh` sources no dev-env file: it targets `KUBECTL_CONTEXT` if

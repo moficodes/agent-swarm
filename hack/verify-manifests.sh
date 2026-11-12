@@ -64,6 +64,7 @@ render() {
       -e "s|\${ALLOWED_GOOGLE_DOMAINS}||g" \
       -e "s|\${GOOGLE_CLIENT_ID}||g" \
       -e "s|\${FIREBASE_API_KEY}||g" \
+      -e "s|\${FIREBASE_PROJECT_ID}||g" \
       -e "s|\${CHAT_RATE_LIMIT_RPM}|10|g" \
       -e "s|\${SESSION_RATE_LIMIT_RPM}|10|g" \
       -e "s|\${SUSPEND_AFTER}|2s|g" \
