@@ -463,11 +463,11 @@ html, body {
 
   /* Tighter sidebar spacing keeps both cards on a 1080p screen. */
   .stage-sidebar .card {
-    padding: 1rem 1.25rem;
+    padding: 0.9rem 1.15rem;
   }
 
   .qr-wrapper {
-    margin: 0;
+    margin: 0.15rem 0;
   }
 
   .parking-metric-block {
@@ -484,9 +484,11 @@ html, body {
 
 /* Sidebar: QR & Parking */
 .stage-sidebar {
+  container-type: size;
+  container-name: sidebar;
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: clamp(0.5rem, 1.1vh, 1.1rem);
   height: 100%;
   min-height: 0;
   min-width: 0;
@@ -527,26 +529,30 @@ html, body {
   margin-top: 0.2rem;
 }
 
-/* QR Code Block */
+/* QR Code Block: never shrinks or clips vertically; L7 metric card absorbs vertical squeeze. */
 .hero-qr-card {
+  flex: 0 0 auto;
+  flex-shrink: 0;
   align-items: center;
   text-align: center;
   width: 100%;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: clip;
+  overflow-y: visible;
 }
 
 .hero-qr-card .card-header {
   width: 100%;
   text-align: left;
+  margin-bottom: 0.55rem;
 }
 
 .qr-wrapper {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.75rem;
-  margin: 0.5rem 0;
+  gap: 0.55rem;
+  margin: 0.2rem 0;
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -554,8 +560,9 @@ html, body {
 }
 
 .qr-box {
-  width: 180px;
-  height: 180px;
+  width: 176px;
+  height: 176px;
+  flex-shrink: 0;
   background: var(--qr-bg);
   border: 2px solid var(--neon-cyan);
   border-radius: 10px;
@@ -566,6 +573,16 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.hero-qr-card .qr-box {
+  width: clamp(132px, 24cqh, 176px);
+  height: clamp(132px, 24cqh, 176px);
+}
+
+.repo-qr-box {
+  width: 11rem;
+  height: 11rem;
 }
 
 .qr-box:hover {
@@ -591,10 +608,10 @@ html, body {
   display: inline-block;
   color: var(--neon-cyan);
   text-decoration: none;
-  font-size: 0.78rem;
+  font-size: 0.74rem;
   font-weight: 600;
-  line-height: 1.4;
-  padding: 0.35rem 0.65rem;
+  line-height: 1.35;
+  padding: 0.3rem 0.6rem;
   border-radius: 6px;
   background: rgba(0, 255, 204, 0.08);
   border: 1px solid rgba(0, 255, 204, 0.25);
@@ -618,14 +635,18 @@ html, body {
 }
 
 .qr-caption {
-  font-size: 0.75rem;
+  font-size: 0.73rem;
+  line-height: 1.35;
   color: var(--text-muted);
-  margin-top: 0.5rem;
+  margin-top: 0.35rem;
 }
 
-/* Parking Meter Card */
+/* Parking Meter Card: absorbs vertical compression so QR + URL stay 100% visible. */
 .parking-meter-card {
   position: relative;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
   transition: border-color 0.3s ease, box-shadow 0.3s ease;
 }
 
@@ -749,6 +770,193 @@ html, body {
   font-size: 0.75rem;
   color: var(--text-muted);
   line-height: 1.4;
+}
+
+/* Progressive vertical compaction: shrink the L7 Request Parking Lot card
+   first as vertical space tightens so the QR code and join URL never clip. */
+@container sidebar (max-height: 690px) {
+  .card.parking-meter-card {
+    padding: 0.75rem 1rem;
+  }
+
+  .parking-meter-card .card-header {
+    margin-bottom: 0.35rem;
+  }
+
+  .parking-meter-card .card-title {
+    font-size: 1.05rem;
+  }
+
+  .parking-metric-block {
+    margin: 0.3rem 0 0.45rem;
+  }
+
+  .parking-number {
+    font-size: 2.35rem;
+  }
+
+  .gauge-container {
+    margin-top: 0.45rem;
+  }
+
+  .gauge-track {
+    height: 11px;
+  }
+
+  .parking-desc {
+    font-size: 0.7rem;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+@container sidebar (max-height: 560px) {
+  .card.hero-qr-card {
+    padding: 0.7rem 0.95rem;
+  }
+
+  .hero-qr-card .card-header {
+    margin-bottom: 0.35rem;
+  }
+
+  .hero-qr-card .card-title {
+    font-size: 1.02rem;
+  }
+
+  .qr-wrapper {
+    gap: 0.4rem;
+    margin: 0.1rem 0;
+  }
+
+  .qr-caption {
+    font-size: 0.68rem;
+    margin-top: 0.25rem;
+  }
+
+  .card.parking-meter-card {
+    padding: 0.6rem 0.9rem;
+  }
+
+  .parking-meter-card .card-header {
+    margin-bottom: 0.25rem;
+  }
+
+  .parking-meter-card .card-title {
+    font-size: 0.95rem;
+  }
+
+  .parking-metric-block {
+    margin: 0.2rem 0 0;
+  }
+
+  .parking-number {
+    font-size: 1.85rem;
+  }
+
+  .gauge-container {
+    margin-top: 0.35rem;
+  }
+
+  .gauge-track {
+    height: 9px;
+  }
+
+  .gauge-markers {
+    margin-top: 0.2rem;
+    font-size: 0.6rem;
+  }
+
+  .parking-desc {
+    display: none;
+  }
+}
+
+@container sidebar (max-height: 450px) {
+  .card.hero-qr-card {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .hero-qr-card .card-header {
+    margin-bottom: 0.2rem;
+  }
+
+  .hero-qr-card .card-title {
+    font-size: 0.92rem;
+    margin-top: 0.1rem;
+  }
+
+  .hero-qr-card .qr-box {
+    width: clamp(104px, 32cqh, 132px);
+    height: clamp(104px, 32cqh, 132px);
+    padding: 6px;
+  }
+
+  .qr-wrapper {
+    gap: 0.3rem;
+    margin: 0;
+  }
+
+  .qr-url-link {
+    font-size: 0.68rem;
+    padding: 0.22rem 0.45rem;
+  }
+
+  .qr-caption {
+    display: none;
+  }
+
+  .card.parking-meter-card {
+    padding: 0.45rem 0.8rem;
+  }
+
+  .parking-meter-card .card-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.4rem;
+    margin-bottom: 0.15rem;
+  }
+
+  .parking-meter-card .card-title {
+    font-size: 0.82rem;
+    margin-top: 0;
+  }
+
+  .parking-meter-card .card-tag {
+    font-size: 0.58rem;
+  }
+
+  .parking-metric-block {
+    margin: 0.1rem 0 0;
+  }
+
+  .parking-number {
+    font-size: 1.4rem;
+  }
+
+  .parking-unit {
+    font-size: 0.62rem;
+  }
+
+  .parking-state {
+    font-size: 0.68rem;
+  }
+
+  .gauge-container {
+    margin-top: 0.2rem;
+  }
+
+  .gauge-track {
+    height: 7px;
+  }
+
+  .gauge-markers,
+  .parking-desc {
+    display: none;
+  }
 }
 
 /* Stage Content: Workers & Fleet */
