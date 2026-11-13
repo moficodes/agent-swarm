@@ -481,4 +481,28 @@ func TestBoard_HyperModeLifecycleResumingThinkingExecutingRunningSuspendingSuspe
 	if seats := b.ActiveSeatCount(); seats != 0 {
 		t.Fatalf("ActiveSeatCount after FinishHyperSuspend = %d, want 0", seats)
 	}
+
+	// 7. MarkCheckpointedBatch hydrates pre-existing checkpointed actors on startup,
+	// and unseated BeginHyperResume(ActivityExecuting) immediately shows code 7 (Executing).
+	b.MarkCheckpointedBatch([]int{10, 20, 30})
+	if !b.IsCheckpointedIndex(20) || codeOf(20) != 1 {
+		t.Fatalf("after MarkCheckpointedBatch codeOf(20) = %d, want 1 (Checkpointed SUSPENDED)", codeOf(20))
+	}
+	b.SetActivity("attendee-20", types.ActivityAwaitingApproval)
+	b.FinishHyperSuspend("attendee-20", true)
+	if got := codeOf(20); got != 6 {
+		t.Fatalf("while suspended awaiting approval codeOf(20) = %d, want 6", got)
+	}
+	b.BeginHyperResume("attendee-20", types.ActivityExecuting)
+	if got := codeOf(20) & 15; got != 7 {
+		t.Fatalf("after unseated BeginHyperResume(ActivityExecuting) code = %d, want 7 (Executing)", got)
+	}
+	b.BeginHyperSuspend("attendee-20")
+	if got := codeOf(20) & 15; got != 3 {
+		t.Fatalf("during post-execution BeginHyperSuspend code = %d, want 3 (Suspending)", got)
+	}
+	b.FinishHyperSuspend("attendee-20", true)
+	if got := codeOf(20); got != 1 {
+		t.Fatalf("after post-execution FinishHyperSuspend code = %d, want 1 (Checkpointed SUSPENDED)", got)
+	}
 }

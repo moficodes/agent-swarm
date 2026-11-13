@@ -352,7 +352,7 @@ func (s *SimulationRunner) checkResetCompletionLocked(now time.Time, rh ResetHan
 	if !s.resetting {
 		return false, 0, 0, 0
 	}
-	if time.Since(s.resetStartedAt) > 45*time.Second {
+	if time.Since(s.resetStartedAt) > 180*time.Second {
 		s.resetting = false
 		return true, s.resetSuspended, s.resetReverted, s.resetErrors
 	}
@@ -389,10 +389,12 @@ func (s *SimulationRunner) executeNextResetTurn(ctx context.Context) (bool, stri
 	if len(s.resetQueue) == 0 {
 		s.enqueueResetStragglersLocked(now, rh)
 	}
-	for i := 0; i < len(s.resetQueue); i++ {
+	scanLimit := min(len(s.resetQueue), 512)
+	for i := 0; i < scanLimit; i++ {
 		if !now.Before(s.resetQueue[i].readyAt) {
 			item = s.resetQueue[i]
-			s.resetQueue = append(s.resetQueue[:i], s.resetQueue[i+1:]...)
+			s.resetQueue[i] = s.resetQueue[0]
+			s.resetQueue = s.resetQueue[1:]
 			delete(s.resetQueued, item.actorID)
 			s.resetInFlight[item.actorID] = true
 			claimed = true
@@ -506,7 +508,7 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		now := time.Now()
 		dispatched := 0
-		const hyperBatchFanout = 8
+		const hyperBatchFanout = 2
 	fanoutLoop:
 		for range hyperBatchFanout {
 			if s.turnSem != nil {
@@ -516,11 +518,15 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 					break fanoutLoop
 				}
 			}
-			canAcquireSeat := true
+			canAcquireChatSeat := true
 			if checker, ok := s.target.(SeatLoadChecker); ok {
-				canAcquireSeat = checker.CanAcquireSimulatedSeat()
+				canAcquireChatSeat = checker.CanAcquireSimulatedSeat()
 			}
-			slotIndex, phase, approvalID, ok := s.claimNextSlot(now, canAcquireSeat)
+			canAcquireApproveSeat := canAcquireChatSeat
+			if appChecker, ok := s.target.(ApproveSeatLoadChecker); ok {
+				canAcquireApproveSeat = appChecker.CanAcquireSimulatedApproveSeat()
+			}
+			slotIndex, phase, approvalID, ok := s.claimNextSlot(now, canAcquireChatSeat, canAcquireApproveSeat)
 			if !ok {
 				if s.turnSem != nil {
 					<-s.turnSem
@@ -579,7 +585,23 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		err        error
 	)
 	if resetting {
-		executed, attendeeID, action, err = s.executeNextResetTurn(ctx)
+		s.resetMu.Lock()
+		qLen := len(s.resetQueue)
+		s.resetMu.Unlock()
+		if qLen > 256 {
+			var rwg sync.WaitGroup
+			for range 7 {
+				rwg.Add(1)
+				go func() {
+					defer rwg.Done()
+					_, _, _, _ = s.executeNextResetTurn(ctx)
+				}()
+			}
+			executed, attendeeID, action, err = s.executeNextResetTurn(ctx)
+			rwg.Wait()
+		} else {
+			executed, attendeeID, action, err = s.executeNextResetTurn(ctx)
+		}
 	} else {
 		reviewDelay := time.Duration(payload.ReviewDelayMs) * time.Millisecond
 		if reviewDelay <= 0 {

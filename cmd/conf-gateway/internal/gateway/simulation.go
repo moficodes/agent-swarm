@@ -56,11 +56,8 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 
 	maxSimRouterInFlight := 512
 	if g.maxActors > actorstate.HyperFleetThreshold {
-		maxSimRouterInFlight = 12288
-		if activeSeats >= 252000 {
-			maxSimRouterInFlight = 10240
-		}
-		if parked, ok := g.scopedParking(); ok && parked > 2048 {
+		maxSimRouterInFlight = 1024
+		if parked, ok := g.scopedParking(); ok && parked > 1024 {
 			return false
 		}
 	}
@@ -70,10 +67,12 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 
 	g.mu.RLock()
 	inFlightTurns := len(g.turnsInFlight)
-	localCommitted := inFlightTurns + len(g.suspendTimers) + len(g.suspendsInFlight)
+	suspendsInFlight := len(g.suspendsInFlight)
+	pendingSuspends := len(g.suspendTimers) + suspendsInFlight
+	localCommitted := inFlightTurns + pendingSuspends
 	g.mu.RUnlock()
 	if g.maxActors > actorstate.HyperFleetThreshold {
-		if inFlightTurns >= maxSimSeats || activeSeats >= maxSimSeats {
+		if inFlightTurns >= maxSimSeats || activeSeats >= maxSimSeats || suspendsInFlight >= 512 || pendingSuspends >= 2048 {
 			return false
 		}
 		return true
@@ -85,6 +84,47 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 		return false
 	}
 	return true
+}
+
+// CanAcquireSimulatedApproveSeat reports whether a matured Phase 2 (/api/approve)
+// turn can acquire a worker seat to finish its execution loop and checkpoint.
+func (g *Gateway) CanAcquireSimulatedApproveSeat() bool {
+	if g.maxActors <= actorstate.HyperFleetThreshold {
+		return g.CanAcquireSimulatedSeat()
+	}
+	totalSeats := 262144
+	if p := g.workerPods.Load(); p != nil && p.Available && p.Current > 0 && g.seatsPerWorker > 0 {
+		totalSeats = p.Current * g.seatsPerWorker
+	}
+	reserve := min(1280, max(64, totalSeats/200))
+	maxApproveSeats := max(1, totalSeats-reserve)
+	activeSeats := 0
+	if g.board != nil {
+		activeSeats = g.board.ActiveSeatCount()
+	}
+	if activeSeats >= maxApproveSeats {
+		return false
+	}
+	if g.proxy != nil && g.proxy.SimRouterInFlight() >= 1536 {
+		return false
+	}
+	if parked, ok := g.scopedParking(); ok && parked > 2048 {
+		return false
+	}
+	g.mu.RLock()
+	suspendsInFlight := len(g.suspendsInFlight)
+	g.mu.RUnlock()
+	return suspendsInFlight < 1024
+}
+
+// IsCheckpointedActorIndex reports whether the 1-based actor index already has
+// a completed checkpoint in hyper mode so SimulationRunner prioritizes
+// NeverStarted actors first across the 16.78M fleet.
+func (g *Gateway) IsCheckpointedActorIndex(slotIndex int) bool {
+	if g.board == nil {
+		return false
+	}
+	return g.board.IsCheckpointedIndex(slotIndex)
 }
 
 // SimulationController defines the interface for managing background audience simulations.

@@ -325,12 +325,19 @@ func TestRunner_DataGeneratorResetOrchestrationAndHandleTurn(t *testing.T) {
 type oversubFakeTarget struct {
 	approvalFakeTarget
 	canAcquireSeat bool
+	checkpointed   map[int]bool
 }
 
 func (f *oversubFakeTarget) CanAcquireSimulatedSeat() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.canAcquireSeat
+}
+
+func (f *oversubFakeTarget) IsCheckpointedActorIndex(slotIndex int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.checkpointed != nil && f.checkpointed[slotIndex]
 }
 
 func TestRunner_RealExecutionOnlyWithoutStaticPurpleSeeding(t *testing.T) {
@@ -400,4 +407,45 @@ func TestRunner_RealExecutionOnlyWithoutStaticPurpleSeeding(t *testing.T) {
 		t.Fatalf("after approval turn chats=%d approvals=%d, want 1 and 1", len(target.chats), len(target.approvals))
 	}
 	target.mu.Unlock()
+}
+
+func TestRunner_PrioritizesNeverStartedBeforeCheckpointedSlots(t *testing.T) {
+	orchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer orchSrv.Close()
+
+	// Mark all slots except slot 7 as already checkpointed.
+	checkpointed := make(map[int]bool)
+	for i := 1; i <= 64; i++ {
+		if i != 7 {
+			checkpointed[i] = true
+		}
+	}
+	target := &oversubFakeTarget{
+		approvalFakeTarget: approvalFakeTarget{ctx: context.Background()},
+		canAcquireSeat:     true,
+		checkpointed:       checkpointed,
+	}
+	r := NewRunner(target,
+		WithSimulationDelays(10*time.Millisecond, 10*time.Millisecond),
+		WithDataGenerator(orchSrv.URL, "http://conf-gateway/api/simulation/turn", "test-key"),
+	)
+	if err := r.Start(64); err != nil {
+		t.Fatalf("Start(64): %v", err)
+	}
+	defer r.Stop()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{"review_delay_ms":5000}`)))
+	rec := httptest.NewRecorder()
+	r.HandleTurn(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleTurn status = %d, want 200", rec.Code)
+	}
+
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if len(target.chats) != 1 || target.chats[0] != "attendee-07" {
+		t.Fatalf("chats = %v, want [attendee-07] (the only NeverStarted slot)", target.chats)
+	}
 }

@@ -18,6 +18,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -470,6 +472,166 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 		return nil, firstErr
 	}
 	return out, nil
+}
+
+type actorPageToken struct {
+	V     int      `json:"v"`
+	Kind  string   `json:"kind"`
+	Scope string   `json:"scope"`
+	Last  []string `json:"last"`
+}
+
+func encodeActorPageToken(atespace, lastName string) string {
+	if lastName == "" {
+		return ""
+	}
+	b, err := json.Marshal(actorPageToken{
+		V:     1,
+		Kind:  "actor",
+		Scope: atespace,
+		Last:  []string{lastName},
+	})
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func isActorProtoCheckpointed(a *ateapi.Actor) bool {
+	st := a.GetStatus()
+	if st == nil {
+		return false
+	}
+	state := st.GetState()
+	if state == ateapi.ActorState_ACTOR_STATE_RUNNING ||
+		state == ateapi.ActorState_ACTOR_STATE_RESUMING ||
+		state == ateapi.ActorState_ACTOR_STATE_SUSPENDING {
+		return true
+	}
+	for _, snap := range st.GetSnapshots() {
+		if snap.GetOwner() == ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR {
+			return true
+		}
+		if uri := snap.GetDurableSnapshot().GetObject().GetSnapshotUri(); uri != "" && !strings.Contains(uri, "/tags/") {
+			return true
+		}
+	}
+	return false
+}
+
+// HydrateCheckpointed scans the atespace's actors in parallel lexicographical
+// key-range shards and invokes onBatch with 1-based actor indices that already
+// have an actor-owned checkpoint or active state.
+func (g *GRPCControl) HydrateCheckpointed(ctx context.Context, maxActors int, onBatch func(indices []int)) error {
+	if maxActors <= 0 || onBatch == nil {
+		return nil
+	}
+	if _, err := g.getClient(ctx); err != nil {
+		return err
+	}
+
+	type lexShard struct {
+		start string
+		end   string
+	}
+	var shards []lexShard
+	if maxActors > HyperFleetThreshold {
+		bounds := make([]string, 0, 155)
+		bounds = append(bounds, "")
+		for p := 100; p <= 169; p++ {
+			bounds = append(bounds, fmt.Sprintf("attendee-%d", p))
+		}
+		for p := 17; p <= 99; p++ {
+			bounds = append(bounds, fmt.Sprintf("attendee-%d", p))
+		}
+		bounds = append(bounds, "")
+		shards = make([]lexShard, 0, len(bounds)-1)
+		for i := 0; i < len(bounds)-1; i++ {
+			shards = append(shards, lexShard{start: bounds[i], end: bounds[i+1]})
+		}
+	} else {
+		shards = []lexShard{{start: "", end: ""}}
+	}
+
+	shardCh := make(chan lexShard, len(shards))
+	for _, sh := range shards {
+		shardCh <- sh
+	}
+	close(shardCh)
+
+	concurrency := min(len(shards), 16)
+	var (
+		errMu    sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			batch := make([]int, 0, 4096)
+			for sh := range shardCh {
+				if ctx.Err() != nil {
+					return
+				}
+				pageToken := encodeActorPageToken(g.atespace, sh.start)
+				for {
+					c, cErr := g.getClient(ctx)
+					if cErr != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = cErr
+						}
+						errMu.Unlock()
+						return
+					}
+					resp, lErr := c.ListActors(ctx, &ateapi.ListActorsRequest{
+						Atespace: g.atespace,
+						Options: &ateapi.ListOptions{
+							PageSize:  1000,
+							PageToken: pageToken,
+						},
+					})
+					if lErr != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("HydrateCheckpointed ListActors(%q..%q): %w", sh.start, sh.end, lErr)
+						}
+						errMu.Unlock()
+						return
+					}
+					reachedEnd := false
+					for _, a := range resp.GetActors() {
+						name := a.GetMetadata().GetName()
+						if sh.end != "" && name > sh.end {
+							reachedEnd = true
+							break
+						}
+						if !isActorProtoCheckpointed(a) {
+							continue
+						}
+						if idx, ok := ParseAttendeeIndex(name, maxActors); ok {
+							batch = append(batch, idx)
+							if len(batch) >= 4096 {
+								onBatch(batch)
+								batch = batch[:0]
+							}
+						}
+					}
+					if len(batch) > 0 {
+						onBatch(batch)
+						batch = batch[:0]
+					}
+					if reachedEnd || resp.GetNextPageToken() == "" {
+						break
+					}
+					pageToken = resp.GetNextPageToken()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // Suspend asks ateapi to suspend one actor.

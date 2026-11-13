@@ -122,6 +122,14 @@ func (c attendeeControl) Get(ctx context.Context, name string) (actorstate.Statu
 	return getter.Get(ctx, name)
 }
 
+func (c attendeeControl) HydrateCheckpointed(ctx context.Context, maxActors int, onBatch func(indices []int)) error {
+	h, ok := c.ActorControl.(actorstate.CheckpointHydrator)
+	if !ok {
+		return nil
+	}
+	return h.HydrateCheckpointed(ctx, maxActors, onBatch)
+}
+
 // WithPollInterval sets how often actor state is read from ateapi.
 func WithPollInterval(d time.Duration) Option {
 	return func(g *Gateway) {
@@ -372,6 +380,9 @@ type Gateway struct {
 	simulationTurnURL string
 	// suspendSem bounds concurrent SuspendActor RPCs to ate-api-server.
 	suspendSem chan struct{}
+	// suspendNextUnixNano paces automated hyper-mode SuspendActor RPCs so
+	// checkpoint uploads stay below GCP's project-wide 100 QPS STS token-exchange limit.
+	suspendNextUnixNano atomic.Int64
 	// suspendTimers holds each attendee's pending auto-suspend when
 	// suspendAfter is positive. Each pending timer holds one wg count.
 	suspendTimers map[string]*time.Timer
@@ -497,7 +508,13 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		transport = gw.httpClient.Transport
 	}
 	gw.proxy = actorproxy.New(targetURL, gw.atespace, []byte(gw.secret), transport, gw.model, actorproxy.Hooks{
-		OnActorError:       func(attendeeID string) { gw.setActivity(attendeeID, types.ActivityIdle) },
+		OnActorError: func(attendeeID string) {
+			if gw.proxy != nil && gw.proxy.PendingApproval(attendeeID) != nil {
+				gw.setActivity(attendeeID, types.ActivityAwaitingApproval)
+				return
+			}
+			gw.setActivity(attendeeID, types.ActivityIdle)
+		},
 		OnReply:            gw.onActorReply,
 		OnReplyWithContext: gw.onActorReplyWithContext,
 		OnError:            gw.onProxyError,
@@ -521,6 +538,38 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	}
 	if gw.control != nil {
 		gw.control = attendeeControl{ActorControl: gw.control, maxActors: gw.maxActors}
+		if gw.maxActors > actorstate.HyperFleetThreshold {
+			if hydrator, ok := gw.control.(actorstate.CheckpointHydrator); ok {
+				gw.wg.Add(1)
+				go func() {
+					defer gw.wg.Done()
+					for attempt := 0; attempt < 3; attempt++ {
+						if ctx.Err() != nil {
+							return
+						}
+						started := time.Now()
+						var totalHydrated atomic.Int64
+						err := hydrator.HydrateCheckpointed(ctx, gw.maxActors, func(indices []int) {
+							totalHydrated.Add(int64(len(indices)))
+							gw.board.MarkCheckpointedBatch(indices)
+						})
+						if err == nil {
+							log.Printf("[gateway] hydrated %d checkpointed actors from ateapi in %s", totalHydrated.Load(), time.Since(started).Round(time.Millisecond))
+							return
+						}
+						if ctx.Err() != nil {
+							return
+						}
+						log.Printf("[gateway] checkpoint hydration attempt %d failed (%d hydrated so far): %v", attempt+1, totalHydrated.Load(), err)
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(3 * time.Second):
+						}
+					}
+				}()
+			}
+		}
 		gw.wg.Add(1)
 		go func() {
 			defer gw.wg.Done()
@@ -530,7 +579,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 				if err == nil {
 					now := time.Now()
 					if gw.maxActors > actorstate.HyperFleetThreshold {
-						if !lastReconcile.IsZero() && now.Sub(lastReconcile) < 10*time.Second {
+						if !lastReconcile.IsZero() && now.Sub(lastReconcile) < 5*time.Second {
 							return
 						}
 						lastReconcile = now

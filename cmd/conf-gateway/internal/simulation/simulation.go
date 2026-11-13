@@ -78,6 +78,20 @@ type SeatLoadChecker interface {
 	CanAcquireSimulatedSeat() bool
 }
 
+// ApproveSeatLoadChecker is optionally implemented by Target so matured Phase 2
+// (/api/approve) turns can finish their execution and checkpoint loop even when
+// new Phase 1 (/api/chat) admissions are throttled by backpressure.
+type ApproveSeatLoadChecker interface {
+	CanAcquireSimulatedApproveSeat() bool
+}
+
+// CheckpointedChecker is optionally implemented by Target so SimulationRunner
+// prioritizes untouched NeverStarted actors before re-running already
+// checkpointed actors across the fleet.
+type CheckpointedChecker interface {
+	IsCheckpointedActorIndex(slotIndex int) bool
+}
+
 // ResetHandler is optionally implemented by Target so external data-generator
 // workers can drive cluster-wide actor revert and suspend operations during a
 // stage reset.
@@ -173,6 +187,7 @@ type slotState struct {
 	readyAtUnixMs        int64
 	phase                slotPhase
 	hasContainerApproval bool
+	approveRetries       uint8
 }
 
 func gcdUint64(a, b uint64) uint64 {
@@ -483,7 +498,7 @@ func (s *SimulationRunner) humanStrideLocked(totalCount int) int {
 
 func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount int) (int, slotPhase, string, bool) {
 	nowMs := now.UnixMilli()
-	scanLimit := min(len(s.readyQueue), 128)
+	scanLimit := min(len(s.readyQueue), 4096)
 	for i := 0; i < scanLimit; i++ {
 		idx := s.readyQueue[i]
 		if idx < 1 || idx > totalCount {
@@ -495,7 +510,8 @@ func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount 
 			delete(s.containerApprovals, idx)
 			st.phase = phaseApproveInFlight
 			st.hasContainerApproval = false
-			s.readyQueue = append(s.readyQueue[:i], s.readyQueue[i+1:]...)
+			s.readyQueue[i] = s.readyQueue[0]
+			s.readyQueue = s.readyQueue[1:]
 			return idx, phaseApproveInFlight, appID, true
 		}
 	}
@@ -507,6 +523,8 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 	hStride := s.humanStrideLocked(totalCount)
 	stride := coprimeStrideForTotal(totalCount)
 	probes := min(totalCount, 128)
+	cc, hasCheckpointedChecker := s.target.(CheckpointedChecker)
+	fallbackIdx := 0
 	for p := 0; p < probes; p++ {
 		step := s.turnCursor
 		s.turnCursor++
@@ -522,15 +540,29 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 		if s.isReserved(attendeeID, idx) {
 			continue
 		}
+		if hasCheckpointedChecker && cc.IsCheckpointedActorIndex(idx) {
+			if fallbackIdx == 0 {
+				fallbackIdx = idx
+			}
+			continue
+		}
 		st.phase = phaseChatInFlight
 		st.hasContainerApproval = false
+		st.approveRetries = 0
 		return idx, phaseChatInFlight, "", true
+	}
+	if fallbackIdx > 0 {
+		st := &s.slots[fallbackIdx]
+		st.phase = phaseChatInFlight
+		st.hasContainerApproval = false
+		st.approveRetries = 0
+		return fallbackIdx, phaseChatInFlight, "", true
 	}
 	return 0, phaseIdle, "", false
 }
 
-func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireSeat bool) (int, slotPhase, string, bool) {
-	if !canAcquireSeat {
+func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireChatSeat, canAcquireApproveSeat bool) (int, slotPhase, string, bool) {
+	if !canAcquireChatSeat && !canAcquireApproveSeat {
 		return 0, phaseIdle, "", false
 	}
 
@@ -543,10 +575,16 @@ func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireSeat bool) (in
 	}
 
 	s.dispatchSeq++
-	// Interleave new chat turns with matured approvals when an approval
-	// backlog is queued so both Thinking (pink) and Executing (amber) remain
-	// visible concurrently across the worker pods.
-	if len(s.readyQueue) > 16 && (s.dispatchSeq%2 == 0) {
+	if !canAcquireChatSeat {
+		return s.claimMaturedApprovalLocked(now, totalCount)
+	}
+	if !canAcquireApproveSeat {
+		return s.claimIdleChatSlotLocked(now, totalCount)
+	}
+	// Prioritize matured Phase 2 approvals 75% of the time so every actor that
+	// completes its review delay promptly executes and checkpoints while still
+	// interleaving new Phase 1 chat turns across the worker pods.
+	if len(s.readyQueue) > 16 && (s.dispatchSeq%4 == 0) {
 		if idx, ph, appID, ok := s.claimIdleChatSlotLocked(now, totalCount); ok {
 			return idx, ph, appID, true
 		}
@@ -561,12 +599,16 @@ func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireSeat bool) (in
 
 func (s *SimulationRunner) executeNextTurn(ctx context.Context, prompt string, reviewDelay, idleDelay time.Duration) (bool, string, string, error) {
 	now := time.Now()
-	canAcquireSeat := true
+	canAcquireChatSeat := true
 	if checker, ok := s.target.(SeatLoadChecker); ok {
-		canAcquireSeat = checker.CanAcquireSimulatedSeat()
+		canAcquireChatSeat = checker.CanAcquireSimulatedSeat()
+	}
+	canAcquireApproveSeat := canAcquireChatSeat
+	if appChecker, ok := s.target.(ApproveSeatLoadChecker); ok {
+		canAcquireApproveSeat = appChecker.CanAcquireSimulatedApproveSeat()
 	}
 
-	slotIndex, phase, approvalID, ok := s.claimNextSlot(now, canAcquireSeat)
+	slotIndex, phase, approvalID, ok := s.claimNextSlot(now, canAcquireChatSeat, canAcquireApproveSeat)
 	if !ok {
 		return false, "", "", nil
 	}
@@ -582,10 +624,21 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 		err := s.sendApprove(ctx, attendeeID, token, approvalID)
 		s.slotMu.Lock()
 		if slotIndex < len(s.slots) {
-			s.slots[slotIndex].phase = phaseIdle
-			delete(s.containerApprovals, slotIndex)
-			s.slots[slotIndex].hasContainerApproval = false
-			s.slots[slotIndex].readyAtUnixMs = time.Now().Add(idleDelay).UnixMilli()
+			st := &s.slots[slotIndex]
+			if err != nil && approvalID != "" && st.approveRetries < 3 && !strings.Contains(err.Error(), "status 409") {
+				st.approveRetries++
+				st.phase = phaseAwaitingApproval
+				s.containerApprovals[slotIndex] = approvalID
+				st.hasContainerApproval = true
+				st.readyAtUnixMs = time.Now().Add(3 * time.Second).UnixMilli()
+				s.readyQueue = append(s.readyQueue, slotIndex)
+			} else {
+				st.phase = phaseIdle
+				st.approveRetries = 0
+				delete(s.containerApprovals, slotIndex)
+				st.hasContainerApproval = false
+				st.readyAtUnixMs = time.Now().Add(idleDelay).UnixMilli()
+			}
 		}
 		s.slotMu.Unlock()
 		return true, attendeeID, "approve", err
@@ -599,12 +652,14 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 	if slotIndex < len(s.slots) {
 		if err == nil && chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
 			s.slots[slotIndex].phase = phaseAwaitingApproval
+			s.slots[slotIndex].approveRetries = 0
 			s.containerApprovals[slotIndex] = chatMsg.Approval.ApprovalID
 			s.slots[slotIndex].hasContainerApproval = true
 			s.slots[slotIndex].readyAtUnixMs = time.Now().Add(reviewDelay).UnixMilli()
 			s.readyQueue = append(s.readyQueue, slotIndex)
 		} else {
 			s.slots[slotIndex].phase = phaseIdle
+			s.slots[slotIndex].approveRetries = 0
 			delete(s.containerApprovals, slotIndex)
 			s.slots[slotIndex].hasContainerApproval = false
 			backoff := idleDelay

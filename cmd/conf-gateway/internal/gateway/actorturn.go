@@ -38,7 +38,7 @@ func (g *Gateway) beginHyperTurnActivity(attendeeID string, act types.Activity) 
 		return func() {}
 	}
 	g.board.BeginHyperResume(attendeeID, act)
-	t := time.AfterFunc(2200*time.Millisecond, func() {
+	t := time.AfterFunc(1000*time.Millisecond, func() {
 		if g.ctx != nil && g.ctx.Err() != nil {
 			return
 		}
@@ -236,7 +236,11 @@ func (g *Gateway) shouldRecordAction(attendeeID, actionID string, isStart bool) 
 
 // onProxyError records a router that could not be reached.
 func (g *Gateway) onProxyError(attendeeID string, err error) {
-	g.setActivity(attendeeID, types.ActivityIdle)
+	if g.proxy != nil && g.proxy.PendingApproval(attendeeID) != nil {
+		g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+	} else {
+		g.setActivity(attendeeID, types.ActivityIdle)
+	}
 	g.mu.Lock()
 	g.addEventLocked(fmt.Sprintf("Router proxy error for %s: %v", attendeeID, err))
 	g.mu.Unlock()
@@ -306,6 +310,10 @@ func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID str
 		g.board.SetSource(attendeeID, chatMsg.Source)
 		if isWaitingForApproval {
 			g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+		} else if chatMsg.Execution != nil && g.control != nil && g.suspendAfter > 0 && g.board != nil && g.board.IsHyperMode() {
+			// Keep ActivityExecuting visible during the SUSPEND_AFTER window until
+			// BeginHyperSuspend transitions the actor to StateSuspending.
+			g.setActivity(attendeeID, types.ActivityExecuting)
 		} else {
 			g.setActivity(attendeeID, types.ActivityIdle)
 		}

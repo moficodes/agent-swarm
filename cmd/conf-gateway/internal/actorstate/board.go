@@ -328,7 +328,9 @@ func (b *Board) SetStatuses(statuses []Status) {
 				v.SnapshotURI = s.InProgressSnapshotURI
 			}
 			v.VolumeType, v.VolumeShare, v.VolumeURI = s.VolumeType, s.VolumeShare, s.VolumeURI
-			v.NeverStarted = s.State == types.StateSuspended && s.SnapshotURI == "" && s.InProgressSnapshotURI == ""
+			v.NeverStarted = s.State == types.StateSuspended &&
+				(s.SnapshotURI == "" || strings.Contains(s.SnapshotURI, "/tags/")) &&
+				(s.InProgressSnapshotURI == "" || strings.Contains(s.InProgressSnapshotURI, "/tags/"))
 		}
 		if !existed || v != old {
 			b.views[name] = v
@@ -446,6 +448,9 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 		v.StateDetail = ""
 		v.WorkerPod = ""
 		v.NeverStarted = false
+		if v.Activity == types.ActivityExecuting {
+			v.Activity = types.ActivityIdle
+		}
 		if idx, validIdx := ParseAttendeeIndex(name, b.hyperCount); validIdx {
 			b.compact[idx-1] |= compactCheckpointed
 			b.syncCompactFromViewLocked(idx, v)
@@ -548,7 +553,11 @@ func (b *Board) BeginHyperResume(actor string, targetActivity types.Activity) {
 		b.hyperResuming[actor] = targetActivity
 		v.State = types.StateResuming
 		v.StateDetail = ""
-		v.Activity = types.ActivityIdle
+		if targetActivity == types.ActivityExecuting {
+			v.Activity = types.ActivityExecuting
+		} else {
+			v.Activity = types.ActivityIdle
+		}
 	})
 }
 
@@ -581,6 +590,9 @@ func (b *Board) BeginHyperSuspend(actor string) {
 	}
 	b.update([]string{actor}, func(v *types.ActorView) {
 		delete(b.hyperResuming, actor)
+		if v.Activity == types.ActivityExecuting {
+			v.Activity = types.ActivityIdle
+		}
 		if v.State == types.StateSuspended && v.WorkerPod == "" {
 			return
 		}
@@ -597,6 +609,9 @@ func (b *Board) FinishHyperSuspend(actor string, succeeded bool) {
 	}
 	b.update([]string{actor}, func(v *types.ActorView) {
 		delete(b.hyperSuspending, actor)
+		if v.Activity == types.ActivityExecuting {
+			v.Activity = types.ActivityIdle
+		}
 		if succeeded {
 			v.State = types.StateSuspended
 			v.StateDetail = ""
@@ -1205,4 +1220,22 @@ func (b *Board) IsCheckpointedIndex(idx int) bool {
 		return false
 	}
 	return (b.compact[idx-1] & compactCheckpointed) != 0
+}
+
+// MarkCheckpointedBatch marks a batch of 1-based actor indices as having a
+// completed actor-owned checkpoint in hyper mode.
+func (b *Board) MarkCheckpointedBatch(indices []int) {
+	if len(indices) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.hyperCount == 0 {
+		return
+	}
+	for _, idx := range indices {
+		if idx >= 1 && idx <= len(b.compact) {
+			b.compact[idx-1] |= compactCheckpointed
+		}
+	}
 }
