@@ -211,7 +211,7 @@ func TestApprove_SuccessfulRunIsUnchanged(t *testing.T) {
 	}
 }
 
-func TestApprove_HumanTurnSkipsMockExecDelay(t *testing.T) {
+func TestApprove_NoPostExecutionSleep(t *testing.T) {
 	fake := geminitest.New(t, geminitest.ApprovalResponse("run it", fixedScript, "python"))
 	s := server.NewWorkloadServer(
 		server.WithWorkspaceDir(t.TempDir()),
@@ -223,7 +223,7 @@ func TestApprove_HumanTurnSkipsMockExecDelay(t *testing.T) {
 		t.Fatalf("chat reply carried no approval: %+v", proposal)
 	}
 
-	// Non-mock human approval must NOT sleep the 3s mockExecMin delay.
+	// Approvals must return immediately after sandbox execution without artificial sleep.
 	t0 := time.Now()
 	msg := approveDriven(t, s.Handler(), fake.URL, proposal.Approval.ApprovalID)
 	elapsed := time.Since(t0)
@@ -231,6 +231,6 @@ func TestApprove_HumanTurnSkipsMockExecDelay(t *testing.T) {
 		t.Fatalf("Execution = %+v, want exit 0", msg.Execution)
 	}
 	if elapsed >= 2*time.Second {
-		t.Fatalf("human approval wall time = %v, want < 2s (slept simulated mockExecMin)", elapsed)
+		t.Fatalf("approval wall time = %v, want < 2s (no post-execution sleep)", elapsed)
 	}
 }

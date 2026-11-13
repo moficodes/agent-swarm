@@ -1753,7 +1753,7 @@
                 if (p == 70) activeSeen = 1;
               } else if (p == 70 && bestPrio == 70) {
                 activeSeen++;
-                if (((pxSalt + activeSeen) % activeSeen) == 0) {
+                if (((uint(pxSalt) * 2654435761u + uint(activeSeen) * 2246822519u) % uint(activeSeen)) == 0u) {
                   bestRaw = r;
                 }
               }

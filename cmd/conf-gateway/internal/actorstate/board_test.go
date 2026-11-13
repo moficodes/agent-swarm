@@ -293,7 +293,10 @@ func TestBoard_HyperMode16Million(t *testing.T) {
 		t.Fatalf("expected IsHyperMode() == true for %d actors", total)
 	}
 
-	b.SeedSimulatedActivityIndices([]int{1, 2, 16777215}, types.ActivityAwaitingApproval, types.SourceMock)
+	for _, id := range []string{"attendee-01", "attendee-02", "attendee-16777215"} {
+		b.SetActivity(id, types.ActivityAwaitingApproval)
+		b.SetSource(id, types.SourceMock)
+	}
 	b.SetActiveStatuses([]actorstate.Status{
 		{Name: "attendee-4096", State: types.StateRunning, WorkerPod: "conf-workers-pod-1"},
 		{Name: "attendee-8192", State: types.StateRunning, WorkerPod: "conf-workers-pod-2"},
@@ -392,7 +395,8 @@ func TestBoard_HyperMode16Million(t *testing.T) {
 	}
 
 	// Fast ClearUnleasedActivityIndices preserves protected indices and 4096-stride slots while clearing unleased simulated activity.
-	b.SeedSimulatedActivityIndices([]int{4096}, types.ActivityThinking, types.SourceGemini)
+	b.SetActivity("attendee-4096", types.ActivityThinking)
+	b.SetSource("attendee-4096", types.SourceGemini)
 	b.ClearUnleasedActivityIndices(map[int]bool{2: true}, func(id string) bool { return id == "attendee-02" }, 4096)
 	binAfter := b.FleetBinarySnapshot(total, nil, nil)
 	payloadAfter := binAfter[actorstate.FleetBinaryHeaderBytes:]

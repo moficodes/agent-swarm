@@ -614,40 +614,6 @@ func (b *Board) FinishHyperSuspend(actor string, succeeded bool) {
 	})
 }
 
-// SeedSimulatedActivity records both activity and reply source in a single board update.
-func (b *Board) SeedSimulatedActivity(actor string, a types.Activity, s types.ReplySource) {
-	b.update([]string{actor}, func(v *types.ActorView) {
-		v.Activity = a
-		v.Source = s
-	})
-}
-
-// SeedSimulatedActivityIndices bulk-updates simulated activity and reply source
-// by 1-based actor indices without string formatting or map growth in hyper mode.
-func (b *Board) SeedSimulatedActivityIndices(indices []int, a types.Activity, s types.ReplySource) {
-	if b.hyperCount == 0 {
-		for _, idx := range indices {
-			b.SeedSimulatedActivity(fmt.Sprintf("attendee-%02d", idx), a, s)
-		}
-		return
-	}
-	actBits := encodeCompactActivity(a)
-	var srcBit byte
-	if s == types.SourceMock {
-		srcBit = compactMockSource
-	}
-	b.mu.Lock()
-	for _, idx := range indices {
-		if idx < 1 || idx > len(b.compact) {
-			continue
-		}
-		cb := b.compact[idx-1]
-		cb = (cb &^ (compactActMask | compactMockSource)) | actBits | srcBit
-		b.compact[idx-1] = cb
-	}
-	b.mu.Unlock()
-}
-
 // Reset clears gateway-side activity and reply source on every actor.
 func (b *Board) Reset() {
 	if b.hyperCount > 0 {

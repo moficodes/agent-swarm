@@ -182,14 +182,11 @@ func WithMockLLM(on bool) Option {
 	return func(g *Gateway) { g.mockLLM = on }
 }
 
-// WithMockTurnDelays sets optional simulated thinking and execution durations
-// held while an actor is running on a worker seat during mock turns.
-func WithMockTurnDelays(thinkMin, thinkMax, execMin, execMax time.Duration) Option {
+// WithMockTurnDelays sets optional simulated thinking durations for mock chat turns.
+func WithMockTurnDelays(thinkMin, thinkMax, _, _ time.Duration) Option {
 	return func(g *Gateway) {
 		g.mockThinkMin = thinkMin
 		g.mockThinkMax = thinkMax
-		g.mockExecMin = execMin
-		g.mockExecMax = execMax
 	}
 }
 
@@ -353,9 +350,8 @@ type Gateway struct {
 	mockLLM              bool
 	mockThinkMin         time.Duration
 	mockThinkMax         time.Duration
-	mockExecMin          time.Duration
-	mockExecMax          time.Duration
 	statePollMs          atomic.Int64
+	nextHyperSuspendNs   atomic.Int64
 
 	mux         *http.ServeMux
 	proxy       *actorproxy.Proxy

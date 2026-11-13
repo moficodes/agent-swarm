@@ -516,13 +516,11 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 					break fanoutLoop
 				}
 			}
-			if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
-				if s.turnSem != nil {
-					<-s.turnSem
-				}
-				break fanoutLoop
+			canAcquireSeat := true
+			if checker, ok := s.target.(SeatLoadChecker); ok {
+				canAcquireSeat = checker.CanAcquireSimulatedSeat()
 			}
-			slotIndex, phase, approvalID, ok := s.claimNextSlot(now)
+			slotIndex, phase, approvalID, ok := s.claimNextSlot(now, canAcquireSeat)
 			if !ok {
 				if s.turnSem != nil {
 					<-s.turnSem

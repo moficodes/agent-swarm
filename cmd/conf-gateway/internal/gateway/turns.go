@@ -18,9 +18,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"strings"
 	"time"
 
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
@@ -108,12 +110,46 @@ func (g *Gateway) suspendIfIdle(attendee string, seq uint64) {
 	g.suspendActor(attendee)
 }
 
+func (g *Gateway) paceHyperSuspend() bool {
+	if g.maxActors <= actorstate.HyperFleetThreshold || g.suspendAfter < 500*time.Millisecond {
+		return true
+	}
+	// Pace hyper-mode SuspendActor RPCs to ~66.7 QPS (15ms interval) so
+	// per-checkpoint STS token exchanges stay safely below GCP's project-wide
+	// 100 QPS (6,000 RPM) sts.googleapis.com quota.
+	const stepNs = int64(15 * time.Millisecond)
+	for {
+		nowNs := time.Now().UnixNano()
+		prev := g.nextHyperSuspendNs.Load()
+		target := max(nowNs, prev+stepNs)
+		if g.nextHyperSuspendNs.CompareAndSwap(prev, target) {
+			wait := time.Duration(target - nowNs)
+			if wait <= 0 {
+				return true
+			}
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+				return true
+			case <-g.suspendCtx.Done():
+				timer.Stop()
+				return false
+			}
+		}
+	}
+}
+
 func (g *Gateway) suspendActor(attendee string) {
+	hyperProd := g.maxActors > actorstate.HyperFleetThreshold && g.suspendAfter >= 500*time.Millisecond
 	if g.suspendSem != nil {
 		select {
 		case g.suspendSem <- struct{}{}:
 			defer func() { <-g.suspendSem }()
 		default:
+			if hyperProd {
+				g.scheduleSuspendRetry(attendee)
+				return
+			}
 			select {
 			case g.suspendSem <- struct{}{}:
 				defer func() { <-g.suspendSem }()
@@ -122,8 +158,15 @@ func (g *Gateway) suspendActor(attendee string) {
 			}
 		}
 	}
+	if hyperProd && !g.paceHyperSuspend() {
+		return
+	}
 
 	g.mu.Lock()
+	if g.turnsInFlight[attendee] > 0 {
+		g.mu.Unlock()
+		return
+	}
 	g.suspendsInFlight[attendee]++
 	g.mu.Unlock()
 	defer func() {
@@ -148,7 +191,11 @@ func (g *Gateway) suspendActor(attendee string) {
 		if g.suspendCtx.Err() != nil {
 			return // the gateway's suspend drain window ended
 		}
-		if strings.Contains(err.Error(), "another operation is in progress") || strings.Contains(err.Error(), "Aborted") {
+		if strings.Contains(err.Error(), "another operation is in progress") ||
+			strings.Contains(err.Error(), "Aborted") ||
+			strings.Contains(err.Error(), "status 429") ||
+			strings.Contains(err.Error(), "ResourceExhausted") ||
+			strings.Contains(err.Error(), "preparing storage credentials") {
 			g.scheduleSuspendRetry(attendee)
 			return
 		}
@@ -157,42 +204,6 @@ func (g *Gateway) suspendActor(attendee string) {
 		g.addEventLocked(fmt.Sprintf("Warning: suspend actor %s failed: %v", attendee, err))
 		g.mu.Unlock()
 	}
-}
-
-// HoldSeat extends a warm seated actor's post-turn auto-suspend timer so a
-// multi-turn session keeps its live sandbox on the worker pod between turns
-// without holding an open HTTP stream through atenet-router.
-func (g *Gateway) HoldSeat(attendee string, d time.Duration) {
-	if d <= 0 {
-		return
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.control == nil || g.closed || g.turnsInFlight[attendee] > 0 {
-		return
-	}
-	if t, ok := g.suspendTimers[attendee]; ok && t.Stop() {
-		g.wg.Done()
-	}
-	seq := g.turnSeq[attendee]
-	g.wg.Add(1)
-	var t *time.Timer
-	t = time.AfterFunc(d, func() {
-		defer g.wg.Done()
-		g.mu.Lock()
-		if g.closed {
-			g.mu.Unlock()
-			return
-		}
-		if g.suspendTimers[attendee] == t {
-			delete(g.suspendTimers, attendee)
-		}
-		g.suspendWG.Add(1)
-		g.mu.Unlock()
-		defer g.suspendWG.Done()
-		g.suspendIfIdle(attendee, seq)
-	})
-	g.suspendTimers[attendee] = t
 }
 
 func (g *Gateway) drainUnleasedHeldSeats(isProtected func(string) bool) {
@@ -260,6 +271,9 @@ func (g *Gateway) scheduleSuspendRetry(attendee string) {
 	}
 	seq := g.turnSeq[attendee]
 	retryDelay := max(g.suspendAfter, 2*time.Second)
+	if g.maxActors > actorstate.HyperFleetThreshold && g.suspendAfter >= 500*time.Millisecond {
+		retryDelay += time.Duration(rand.IntN(3000)) * time.Millisecond
+	}
 	g.wg.Add(1)
 	var t *time.Timer
 	t = time.AfterFunc(retryDelay, func() {

@@ -325,24 +325,12 @@ func TestRunner_DataGeneratorResetOrchestrationAndHandleTurn(t *testing.T) {
 type oversubFakeTarget struct {
 	approvalFakeTarget
 	canAcquireSeat bool
-	seeded         map[string]string
 }
 
 func (f *oversubFakeTarget) CanAcquireSimulatedSeat() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.canAcquireSeat
-}
-
-func (f *oversubFakeTarget) SeedSimulatedApproval(attendeeID, prompt string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.seeded == nil {
-		f.seeded = make(map[string]string)
-	}
-	appID := "seed-appr-" + attendeeID
-	f.seeded[attendeeID] = prompt
-	return appID
 }
 
 func TestRunner_RealExecutionOnlyWithoutStaticPurpleSeeding(t *testing.T) {
@@ -376,14 +364,10 @@ func TestRunner_RealExecutionOnlyWithoutStaticPurpleSeeding(t *testing.T) {
 	}
 
 	target.mu.Lock()
-	seededCount := len(target.seeded)
 	chatCount := len(target.chats)
 	target.canAcquireSeat = true
 	target.mu.Unlock()
 
-	if seededCount != 0 {
-		t.Fatalf("seededCount = %d, want 0 (real execution only)", seededCount)
-	}
 	if chatCount != 0 {
 		t.Fatalf("chatCount while seat-blocked = %d, want 0", chatCount)
 	}

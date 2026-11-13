@@ -79,13 +79,11 @@ func WithMockEngine(m *engine.MockEngine) ServerOption {
 	}
 }
 
-// WithMockDelays configures simulated thinking and execution latency ranges for mock turns.
-func WithMockDelays(thinkMin, thinkMax, execMin, execMax time.Duration) ServerOption {
+// WithMockDelays configures simulated thinking latency ranges for mock chat turns.
+func WithMockDelays(thinkMin, thinkMax, _, _ time.Duration) ServerOption {
 	return func(s *WorkloadServer) {
 		s.mockThinkMin = thinkMin
 		s.mockThinkMax = thinkMax
-		s.mockExecMin = execMin
-		s.mockExecMax = execMax
 	}
 }
 
@@ -126,8 +124,6 @@ type WorkloadServer struct {
 	forceMock       bool
 	mockThinkMin    time.Duration
 	mockThinkMax    time.Duration
-	mockExecMin     time.Duration
-	mockExecMax     time.Duration
 	workspaceDir    string
 	turnSlot        chan struct{} // held for the length of a chat or fix turn
 	mu              sync.Mutex
@@ -154,8 +150,6 @@ func NewWorkloadServer(opts ...ServerOption) *WorkloadServer {
 		forceMock:    os.Getenv("DEMO_MOCK_LLM") == "true",
 		mockThinkMin: envMillisDuration("MOCK_THINK_MIN_MS"),
 		mockThinkMax: envMillisDuration("MOCK_THINK_MAX_MS"),
-		mockExecMin:  envMillisDuration("MOCK_EXEC_MIN_MS"),
-		mockExecMax:  envMillisDuration("MOCK_EXEC_MAX_MS"),
 		turnSlot:     make(chan struct{}, 1),
 	}
 
@@ -430,21 +424,9 @@ func (s *WorkloadServer) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	execStart := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	exec := runResult(s.executor.Execute(ctx, pending.Language, pending.Code))
 	cancel()
-
-	if req.Mock || s.forceMock || s.gemini == nil {
-		if targetDur := randomDurationRange(s.mockExecMin, s.mockExecMax); targetDur > 0 {
-			if rem := targetDur - time.Since(execStart); rem > 0 {
-				select {
-				case <-r.Context().Done():
-				case <-time.After(rem):
-				}
-			}
-		}
-	}
 
 	if exec.ExitCode != 0 && !wasFix && !s.forceMock && s.gemini != nil {
 		s.startFix(w, r, pending, exec)

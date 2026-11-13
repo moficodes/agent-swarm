@@ -547,8 +547,8 @@ conf_render() {
     default_actor_mem=536870912
     default_think_min=9000
     default_think_max=13000
-    default_exec_min=8000
-    default_exec_max=12000
+    default_exec_min=0
+    default_exec_max=0
     default_suspend_after="3s"
     default_datagen_replicas=32
     default_gw_mem_limit="16Gi"

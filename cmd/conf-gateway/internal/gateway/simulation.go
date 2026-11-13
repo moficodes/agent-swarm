@@ -22,11 +22,8 @@ import (
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/simulation"
-	"github.com/agent-substrate/agent-swarm/internal/workload/engine"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
-
-var simMockEngine = engine.NewMockEngine()
 
 // CanAcquireSimulatedSeat reports whether the worker pool has available seat
 // headroom for a simulated container turn. It reserves a small cushion for
@@ -72,8 +69,15 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 	}
 
 	g.mu.RLock()
-	localCommitted := len(g.turnsInFlight) + len(g.suspendTimers) + len(g.suspendsInFlight)
+	inFlightTurns := len(g.turnsInFlight)
+	localCommitted := inFlightTurns + len(g.suspendTimers) + len(g.suspendsInFlight)
 	g.mu.RUnlock()
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		if inFlightTurns >= maxSimSeats || activeSeats >= maxSimSeats {
+			return false
+		}
+		return true
+	}
 	if localCommitted >= maxSimSeats {
 		return false
 	}
@@ -124,58 +128,6 @@ func (g *Gateway) IsCheckpointedSlot(slotIndex int) bool {
 		return false
 	}
 	return g.board.IsCheckpointedIndex(slotIndex)
-}
-
-// SeedSimulatedApprovalIndices bulk-marks simulated cohort slots as
-// AwaitingApproval in hyper mode without allocating 13.75M chat histories or
-// pending approval structs on the heap.
-func (g *Gateway) SeedSimulatedApprovalIndices(indices []int) {
-	if g.board == nil || len(indices) == 0 {
-		return
-	}
-	g.board.SeedSimulatedActivityIndices(indices, types.ActivityAwaitingApproval, types.SourceMock)
-	if g.control == nil {
-		g.board.SetUnavailable(localModeReason)
-	}
-}
-
-// SeedSimulatedApproval populates a checkpointed actor's human-in-the-loop
-// review state (chat history, pending approval, and AwaitingApproval activity)
-// while its memory snapshot rests in GCS during the 80-90% idle review window.
-func (g *Gateway) SeedSimulatedApproval(attendeeID, prompt string) string {
-	if g.IsLeased(attendeeID) {
-		return ""
-	}
-	msg := simMockEngine.GenerateTurn(prompt)
-	if msg == nil || msg.Approval == nil {
-		return ""
-	}
-	msg.Source = types.SourceMock
-	now := time.Now().Unix()
-	userMsg := types.ChatMessage{
-		ID:        fmt.Sprintf("user-seed-%s-%d", attendeeID, now),
-		Sender:    types.SenderUser,
-		Content:   prompt,
-		Timestamp: now,
-	}
-
-	g.mu.Lock()
-	if len(g.chatHistories[attendeeID]) == 0 {
-		g.appendChatHistoryLocked(attendeeID, userMsg)
-		g.appendChatHistoryLocked(attendeeID, *msg)
-	}
-	if g.proxy != nil {
-		g.proxy.SetPending(attendeeID, msg.Approval)
-	}
-	g.mu.Unlock()
-
-	if g.board != nil {
-		g.board.SeedSimulatedActivity(attendeeID, types.ActivityAwaitingApproval, types.SourceMock)
-		if g.control == nil {
-			g.board.SetUnavailable(localModeReason)
-		}
-	}
-	return msg.Approval.ApprovalID
 }
 
 // SimulationController defines the interface for managing background audience simulations.

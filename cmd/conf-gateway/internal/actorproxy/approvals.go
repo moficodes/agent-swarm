@@ -159,7 +159,9 @@ func (a *approvals) ClaimApprovalWithFallback(w http.ResponseWriter, r *http.Req
 		a.mu.Unlock()
 	}
 
-	body, _ := json.Marshal(req)
+	fwd := req
+	fwd.Mock = false
+	body, _ := json.Marshal(fwd)
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.Header.Set("Content-Length", strconv.Itoa(len(body)))

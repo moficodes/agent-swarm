@@ -269,17 +269,12 @@ func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID str
 		}
 	}
 
-	if hasChatMsg && chatMsg.Source == types.SourceMock {
+	if hasChatMsg && chatMsg.Source == types.SourceMock && isWaitingForApproval {
 		if reqCtx != nil && reqCtx.Err() != nil {
 			g.setActivity(attendeeID, types.ActivityIdle)
 			return
 		}
-		var hold time.Duration
-		if isWaitingForApproval {
-			hold = g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
-		} else {
-			hold = g.mockTurnDelay(g.mockExecMin, g.mockExecMax)
-		}
+		hold := g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
 		if reqCtx != nil {
 			if startedAt, ok := reqCtx.Value(turnStartCtxKey{}).(time.Time); ok {
 				hold -= time.Since(startedAt)

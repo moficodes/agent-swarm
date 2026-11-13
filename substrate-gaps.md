@@ -117,3 +117,73 @@ The real fixes belong in `ate-api-server` / `atenet-router` (propagating client
 cancellation or idle-timeout auto-suspend for woken actors) and in the
 `WorkerPool` controller (preferring empty workers on scale-down or suspending
 hosted actors in a `preStop` / finalizer drain before deleting a worker).
+
+## Per-checkpoint STS token exchanges hit the 100 QPS project quota
+
+In `ate-api-server`, `workflow_suspend.go` and `workflow_resume.go` call
+`gcsboundary.MintCredentials` (`sts.googleapis.com/v1/token`) on every actor
+checkpoint upload (`SuspendActor`) and every restore of a checkpointed actor
+(`ResumeActor` when `owner == 1` under `/actors/<uid>/snapshots/<snap_uuid>`).
+First-wake restores of `NeverStarted` actors (`owner == 2` under `/tags/...`)
+hit the node-local `/var/lib/ate/image-cache` and do not call STS after the
+first pull per node, but every per-actor checkpoint upload and restore makes a
+fresh synchronous `ExchangeToken` RPC. On Google Cloud, `sts.googleapis.com`
+enforces a project-wide `Token exchange requests` quota of 6,000 RPM (100 QPS),
+shared with `gke-metadata-server` Workload Identity across all nodes in the
+project. Exceeding ~85 combined checkpoint uploads and restores per second returns
+`HTTP 429 RATE_LIMIT_EXCEEDED` from STS, which aborts `SuspendActor` and
+`ResumeActor` with `codes.Internal: preparing storage credentials` and can
+starve Workload Identity token refreshes on `conf-gateway`. `conf-gateway`
+works around this in hyper mode by pacing `SuspendActor` RPCs to ~66.7 QPS,
+pacing checkpointed `ResumeActor` wakes to <=8 QPS, and pre-warming + caching
+its own Google Cloud OAuth2 token source with retry backoff. The fix belongs in
+`ate-api-server`'s `gcsboundary` / `objectstore-plugin`, which should either
+sign GCS V4 URLs locally using the control plane's service account key or cache
+and reuse prefix-scoped Credential Access Boundary tokens per worker or bucket
+prefix across their 1-hour lifetime instead of calling `sts.googleapis.com` on
+every actor state transition.
+
+## `gcsboundary` Credential Access Boundaries fail on Hierarchical Namespace buckets
+
+When the snapshot GCS bucket has Hierarchical Namespace (`HNS`) enabled,
+uploading a snapshot tar object to
+`gs://<bucket>/actors/<uid>/snapshots/<snap_uuid>` implicitly creates or
+updates managed folder resources (`projects/_/buckets/<bucket>/folders/...`).
+`gcsboundary` mints an STS Credential Access Boundary (CAB) rule that grants
+`roles/storage.objectAdmin` conditioned on the resource prefix
+`projects/_/buckets/<bucket>/objects/actors/<uid>/snapshots/`, which does not
+match `.../folders/...` resources. `atelet`'s `SuspendActor` upload then fails
+with `HTTP 403 PermissionDenied` from GCS. `hack/create-cluster.sh` and this
+demo's bucket setup use flat (non-HNS) regional buckets as a workaround. The
+fix belongs in `ate-setup` (refusing or warning on HNS buckets during setup)
+and in `gcsboundary` (adding folder resource prefixes or switching to V4 signed
+URLs).
+
+## `ListActors` and `ListWorkerActorAssignments` do not scale to $10^7$ actors
+
+`ListActors` caps `page_size` at 1,000 rows (`maxPageSize = 1000`), so listing
+a 16,777,216-actor atespace requires 16,778 sequential paginated RPCs (~40–60s
+per sweep) and allocates tens of millions of protobuf objects. At >262,144
+actors (`HyperFleetThreshold`), `conf-gateway` instead polls `ListWorkers` (5
+pages across 4,096 workers) followed by 4,096 bounded-concurrency
+`ListWorkerActorAssignments` RPCs (~620ms per sweep) to observe which actors
+are seated on worker pods. However, `WorkerActorAssignment` only returns the
+actor's `ObjectRef` (`atespace`, `name`, `uid`) without its `ActorState`
+(`RESUMING`, `RUNNING`, `SUSPENDING`, `CRASHED`) or `latest_snapshot_generation`.
+`conf-gateway` therefore has to track in-flight `RESUMING` and `SUSPENDING`
+transitions and checkpoint existence in its own 16 MiB compact byte board
+(`BeginHyperResume`, `BeginHyperSuspend`, `FinishHyperSuspend`). The fix
+belongs in `ateapipb`: including `ActorState` and snapshot metadata in
+`WorkerActorAssignment`, exposing an `Atespace` summary RPC for aggregate state
+and snapshot counts, and providing a watch/delta stream (`WatchActors`) for
+state transitions since a revision or timestamp.
+
+## Provisioning $10^7$ actors requires $10^7$ unary `CreateActor` RPCs
+
+`ateapipb` only provides a unary `CreateActor` RPC, which runs a separate
+database transaction per actor. Provisioning 16,777,216 actors therefore
+requires 16,777,216 unary RPCs (~28 minutes across a 64-shard Indexed Job with
+3,072 concurrent gRPC streams in `cmd/conf-provision`). A `BatchCreateActors`
+RPC accepting up to 500–1,000 actors per call and executing a single batched
+PostgreSQL `INSERT` / `COPY` would reduce 16.78M actor creation to ~16,778
+RPCs (<90 seconds).

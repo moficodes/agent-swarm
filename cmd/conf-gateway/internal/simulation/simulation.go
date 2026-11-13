@@ -86,31 +86,11 @@ type SeatLoadChecker interface {
 	CanAcquireSimulatedSeat() bool
 }
 
-// SeatHolder is optionally implemented by Target so multi-turn simulated
-// sessions keep their live gVisor sandbox warm on its worker pod seat between
-// turns without holding an open HTTP request in atenet-router.
-type SeatHolder interface {
-	HoldSeat(attendeeID string, d time.Duration)
-}
-
 // RunningSlotSeeder is optionally implemented by Target so hyper-mode
 // simulations can adopt already-RUNNING worker seats immediately on Start
 // (for example across a gateway rollout) instead of cold-waking from scratch.
 type RunningSlotSeeder interface {
 	RunningSimulatedIndices() []int
-}
-
-// ApprovalSeeder is optionally implemented by Target to seed a checkpointed
-// actor's human-review state (AwaitingApproval) during massive oversubscription.
-type ApprovalSeeder interface {
-	SeedSimulatedApproval(attendeeID, prompt string) string
-}
-
-// BulkApprovalSeeder is optionally implemented by Target to bulk-seed
-// simulated AwaitingApproval state by 1-based actor indices at 16.78M scale
-// without per-actor string formatting or map growth.
-type BulkApprovalSeeder interface {
-	SeedSimulatedApprovalIndices(indices []int)
 }
 
 // ResetHandler is optionally implemented by Target so external data-generator
@@ -655,7 +635,7 @@ func (s *SimulationRunner) claimAdoptedWarmSlotLocked(totalCount, hStride int) (
 	return 0, false
 }
 
-func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int) (int, slotPhase, string, bool) {
+func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int, canAcquireSeat bool) (int, slotPhase, string, bool) {
 	nowMs := now.UnixMilli()
 	hStride := s.humanStrideLocked(totalCount)
 	hyper := totalCount > 65536
@@ -663,6 +643,9 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 
 	if idx, ok := s.claimAdoptedWarmSlotLocked(totalCount, hStride); ok {
 		return idx, phaseAdoptedChatInFlight, "", true
+	}
+	if !canAcquireSeat {
+		return 0, phaseIdle, "", false
 	}
 
 	// Re-wake matured checkpointed actors on every 3rd dispatch (paced to <=8/s
@@ -721,7 +704,7 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 	return 0, phaseIdle, "", false
 }
 
-func (s *SimulationRunner) claimNextSlot(now time.Time) (int, slotPhase, string, bool) {
+func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireSeat bool) (int, slotPhase, string, bool) {
 	s.slotMu.Lock()
 	defer s.slotMu.Unlock()
 
@@ -734,16 +717,17 @@ func (s *SimulationRunner) claimNextSlot(now time.Time) (int, slotPhase, string,
 	if idx, ph, appID, ok := s.claimMaturedApprovalLocked(now, totalCount); ok {
 		return idx, ph, appID, true
 	}
-	return s.claimIdleChatSlotLocked(now, totalCount)
+	return s.claimIdleChatSlotLocked(now, totalCount, canAcquireSeat)
 }
 
 func (s *SimulationRunner) executeNextTurn(ctx context.Context, prompt string, reviewDelay, idleDelay time.Duration) (bool, string, string, error) {
 	now := time.Now()
-	if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
-		return false, "", "", nil
+	canAcquireSeat := true
+	if checker, ok := s.target.(SeatLoadChecker); ok {
+		canAcquireSeat = checker.CanAcquireSimulatedSeat()
 	}
 
-	slotIndex, phase, approvalID, ok := s.claimNextSlot(now)
+	slotIndex, phase, approvalID, ok := s.claimNextSlot(now, canAcquireSeat)
 	if !ok {
 		return false, "", "", nil
 	}
@@ -765,7 +749,7 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, phase slotPhase, approvalID, prompt string, _ /* reviewDelay */, idleDelay time.Duration) (bool, string, string, error) {
+func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, phase slotPhase, approvalID, prompt string, reviewDelay, idleDelay time.Duration) (bool, string, string, error) {
 	attendeeID := fmt.Sprintf("attendee-%02d", slotIndex)
 	token := s.target.MintToken(attendeeID)
 
@@ -787,124 +771,65 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 
 	s.slotMu.Lock()
 	totalCount := max(0, len(s.slots)-1)
+	coldSem := s.coldWakeSem
 	s.slotMu.Unlock()
 
 	s.mu.RLock()
 	fastMode := s.readingDelay < 100*time.Millisecond
 	s.mu.RUnlock()
 
-	turnsInSession := 1
-	quickCheckpointCohort := false
-	if totalCount > 65536 && !fastMode {
-		if slotIndex%512 == 0 {
-			quickCheckpointCohort = true
-			turnsInSession = 1 + (slotIndex % 2)
-		} else {
-			turnsInSession = 24 + (slotIndex % 8)
-		}
+	if prompt == "" {
+		prompt = simulationPrompts[slotIndex%len(simulationPrompts)]
 	}
-	holder, hasHolder := s.target.(SeatHolder)
 
 	var err error
 	action := "chat"
-	if phase == phaseAdoptedChatInFlight && totalCount > 65536 && !fastMode && hasHolder {
-		adoptPause := time.Duration(3000+rand.Intn(280000)) * time.Millisecond
-		holder.HoldSeat(attendeeID, adoptPause+15*time.Second)
-		if !sleepWithContext(ctx, adoptPause) {
+	needColdSem := phase != phaseAdoptedChatInFlight && totalCount > 65536 && !fastMode && coldSem != nil
+	if needColdSem {
+		select {
+		case coldSem <- struct{}{}:
+		case <-ctx.Done():
 			err = ctx.Err()
-			turnsInSession = 0
+		}
+		if err == nil {
+			if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
+				<-coldSem
+				s.slotMu.Lock()
+				if slotIndex < len(s.slots) {
+					s.slots[slotIndex].phase = phaseIdle
+				}
+				s.slotMu.Unlock()
+				return false, "", "", nil
+			}
 		}
 	}
 
-	s.slotMu.Lock()
-	coldSem := s.coldWakeSem
-	s.slotMu.Unlock()
-
-turnLoop:
-	for turnIdx := 0; turnIdx < turnsInSession; turnIdx++ {
-		turnPrompt := prompt
-		if turnIdx > 0 || turnPrompt == "" {
-			turnPrompt = simulationPrompts[(slotIndex+turnIdx)%len(simulationPrompts)]
-		}
-		needColdSem := turnIdx == 0 && phase != phaseAdoptedChatInFlight && totalCount > 65536 && !fastMode && coldSem != nil
-		if needColdSem {
-			select {
-			case coldSem <- struct{}{}:
-			case <-ctx.Done():
-				err = ctx.Err()
-				break turnLoop
-			}
-			if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
-				<-coldSem
-				break turnLoop
-			}
-		}
-		var chatMsg *types.ChatMessage
-		chatMsg, err = s.sendChat(ctx, attendeeID, token, turnPrompt)
+	var chatMsg *types.ChatMessage
+	if err == nil {
+		chatMsg, err = s.sendChat(ctx, attendeeID, token, prompt)
 		if needColdSem {
 			<-coldSem
 		}
-		if err != nil && turnIdx > 0 && ctx.Err() == nil {
-			if hasHolder {
-				holder.HoldSeat(attendeeID, 15*time.Second)
+	}
+	if err == nil && chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
+		if fastMode && reviewDelay > 0 {
+			if !sleepWithContext(ctx, reviewDelay) {
+				err = ctx.Err()
 			}
-			if sleepWithContext(ctx, 2*time.Second) {
-				chatMsg, err = s.sendChat(ctx, attendeeID, token, turnPrompt)
+		} else if totalCount > 65536 && !fastMode {
+			// Brief human-in-the-loop review pause (< SUSPEND_AFTER) before approving execution.
+			if !sleepWithContext(ctx, time.Duration(600+rand.Intn(900))*time.Millisecond) {
+				err = ctx.Err()
 			}
 		}
-		if err != nil {
-			break
-		}
-		if chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
-			if turnsInSession > 1 && (quickCheckpointCohort || (slotIndex+turnIdx)%5 < 4) {
-				reviewPause := time.Duration(280000+rand.Intn(180000)) * time.Millisecond
-				if quickCheckpointCohort {
-					reviewPause = time.Duration(8000+rand.Intn(10000)) * time.Millisecond
-				}
-				if hasHolder {
-					holder.HoldSeat(attendeeID, reviewPause+12*time.Second)
-				}
-				if !sleepWithContext(ctx, reviewPause) {
-					err = ctx.Err()
-					break
-				}
-			}
+		if err == nil {
 			s.slotMu.Lock()
 			if slotIndex < len(s.slots) {
 				s.slots[slotIndex].phase = phaseApproveInFlight
 			}
 			s.slotMu.Unlock()
 			err = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
-			if err != nil && turnIdx > 0 && ctx.Err() == nil {
-				if hasHolder {
-					holder.HoldSeat(attendeeID, 15*time.Second)
-				}
-				if sleepWithContext(ctx, 2*time.Second) {
-					err = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
-				}
-			}
 			action = "turn"
-			if err != nil {
-				break
-			}
-		}
-		if turnIdx+1 < turnsInSession {
-			runPause := time.Duration(440000+rand.Intn(240000)) * time.Millisecond
-			if quickCheckpointCohort {
-				runPause = time.Duration(10000+rand.Intn(12000)) * time.Millisecond
-			}
-			if hasHolder {
-				holder.HoldSeat(attendeeID, runPause+12*time.Second)
-			}
-			s.slotMu.Lock()
-			if slotIndex < len(s.slots) {
-				s.slots[slotIndex].phase = phaseChatInFlight
-			}
-			s.slotMu.Unlock()
-			if !sleepWithContext(ctx, runPause) {
-				err = ctx.Err()
-				break
-			}
 		}
 	}
 
