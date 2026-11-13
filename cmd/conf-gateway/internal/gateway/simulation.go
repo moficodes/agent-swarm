@@ -182,7 +182,7 @@ func (g *Gateway) TryScheduleSimulatedSuspend(attendeeID string, slotIndex int) 
 	if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && activeSeats < 225000 {
 		return false
 	}
-	maxPending := 512
+	maxPending := 1536
 
 	g.mu.Lock()
 	defer g.mu.Unlock()

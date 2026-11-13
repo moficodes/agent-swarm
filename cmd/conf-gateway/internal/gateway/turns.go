@@ -97,13 +97,13 @@ func (g *Gateway) endTurnWithOpts(attendee string, useMock, isApprove bool) {
 	}
 
 	if !isApprove {
-		if !belowSeatFloor && pendingSuspends < 160 {
+		if !belowSeatFloor && pendingSuspends < 384 {
 			g.suspendAfterTurnLocked(attendee)
 		}
 		return
 	}
 
-	if !belowSeatFloor && pendingSuspends < 512 {
+	if !belowSeatFloor && pendingSuspends < 1536 {
 		g.suspendAfterTurnLocked(attendee)
 		return
 	}
@@ -198,7 +198,7 @@ func (g *Gateway) paceAutomatedSuspend(ctx context.Context, attendee string) boo
 	if next <= now {
 		return true
 	}
-	const stepNs = int64(10 * time.Millisecond)
+	const stepNs = int64(1 * time.Millisecond)
 	var wait time.Duration
 	for {
 		prev := g.suspendNextUnixNano.Load()
