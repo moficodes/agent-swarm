@@ -87,49 +87,6 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 	return true
 }
 
-// RunningSimulatedIndices returns 1-based indices of currently RUNNING actors
-// on worker pods that are neither human-reserved nor leased, allowing a newly
-// started hyper-mode simulation (e.g. after a gateway rollout) to adopt warm
-// seats immediately instead of cold-waking 260k actors from scratch.
-func (g *Gateway) RunningSimulatedIndices() []int {
-	if g.board == nil || g.maxActors <= actorstate.HyperFleetThreshold {
-		return nil
-	}
-	totalSeats := 262144
-	if p := g.workerPods.Load(); p != nil && p.Available && p.Current > 0 && g.seatsPerWorker > 0 {
-		totalSeats = p.Current * g.seatsPerWorker
-	}
-	maxAdopt := max(1, totalSeats-min(2560, max(64, totalSeats/100)))
-	views := g.board.Views()
-	if len(views) == 0 {
-		return nil
-	}
-	out := make([]int, 0, min(len(views), maxAdopt))
-	for name, v := range views {
-		if len(out) >= maxAdopt {
-			break
-		}
-		if v.State != types.StateRunning || v.WorkerPod == "" {
-			continue
-		}
-		idx, ok := actorstate.ParseAttendeeIndex(name, g.maxActors)
-		if !ok || g.IsReservedForHuman(name, idx) {
-			continue
-		}
-		out = append(out, idx)
-	}
-	return out
-}
-
-// IsCheckpointedSlot reports whether the 1-based slot index already has a
-// per-actor GCS checkpoint in hyper mode.
-func (g *Gateway) IsCheckpointedSlot(slotIndex int) bool {
-	if g.board == nil || g.maxActors <= actorstate.HyperFleetThreshold {
-		return false
-	}
-	return g.board.IsCheckpointedIndex(slotIndex)
-}
-
 // SimulationController defines the interface for managing background audience simulations.
 type SimulationController = simulation.SimulationController
 

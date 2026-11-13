@@ -351,7 +351,6 @@ type Gateway struct {
 	mockThinkMin         time.Duration
 	mockThinkMax         time.Duration
 	statePollMs          atomic.Int64
-	nextHyperSuspendNs   atomic.Int64
 
 	mux         *http.ServeMux
 	proxy       *actorproxy.Proxy
@@ -453,8 +452,8 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 			gw.humanSlotStride = 16
 		}
 	}
-	if gw.maxActors > actorstate.HyperFleetThreshold && cap(gw.suspendSem) < 2048 {
-		gw.suspendSem = make(chan struct{}, 2048)
+	if gw.maxActors > actorstate.HyperFleetThreshold && cap(gw.suspendSem) < 4096 {
+		gw.suspendSem = make(chan struct{}, 4096)
 	}
 	if gw.maxActors > 262144 && gw.pollInterval == time.Second {
 		gw.pollInterval = 1500 * time.Millisecond

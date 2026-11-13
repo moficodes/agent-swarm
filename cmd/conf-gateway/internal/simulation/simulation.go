@@ -28,7 +28,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/pkg/types"
@@ -73,24 +72,10 @@ type StopKeepSeatsCleanup interface {
 	ClearSimulatedActivityKeepSeats()
 }
 
-// CheckpointedSlotChecker is optionally implemented by Target so hyper-mode
-// simulations can pace STS-backed checkpoint restores well below GCP project
-// STS token-exchange rate limits while waking golden-snapshot actors freely.
-type CheckpointedSlotChecker interface {
-	IsCheckpointedSlot(slotIndex int) bool
-}
-
 // SeatLoadChecker is optionally implemented by Target to apply backpressure
 // when physical worker pod seats are near saturation.
 type SeatLoadChecker interface {
 	CanAcquireSimulatedSeat() bool
-}
-
-// RunningSlotSeeder is optionally implemented by Target so hyper-mode
-// simulations can adopt already-RUNNING worker seats immediately on Start
-// (for example across a gateway rollout) instead of cold-waking from scratch.
-type RunningSlotSeeder interface {
-	RunningSimulatedIndices() []int
 }
 
 // ResetHandler is optionally implemented by Target so external data-generator
@@ -177,7 +162,6 @@ type slotPhase uint8
 const (
 	phaseIdle slotPhase = iota
 	phaseChatInFlight
-	phaseAdoptedChatInFlight
 	phaseAwaitingApproval
 	phaseApproveInFlight
 )
@@ -190,8 +174,6 @@ type slotState struct {
 	phase                slotPhase
 	hasContainerApproval bool
 }
-
-const recentIdleCap = 8192
 
 func gcdUint64(a, b uint64) uint64 {
 	for b != 0 {
@@ -234,23 +216,15 @@ type SimulationRunner struct {
 	presenterKey      string
 	dgClient          *http.Client
 	turnSem           chan struct{}
-	coldWakeSem       chan struct{}
 	maxTargetMPS      int
 	resetSettleWindow time.Duration
 
-	slotMu               sync.Mutex
-	slots                []slotState
-	containerApprovals   map[int]string
-	readyQueue           []int
-	warmAdoptQueue       []int
-	warmAdoptHead        int
-	warmAdoptUntilUnixMs atomic.Int64
-	lastCheckpointWakeMs int64
-	recentIdle           []int
-	recentHead           int
-	recentCount          int
-	turnCursor           uint64
-	dispatchSeq          uint64
+	slotMu             sync.Mutex
+	slots              []slotState
+	containerApprovals map[int]string
+	readyQueue         []int
+	turnCursor         uint64
+	dispatchSeq        uint64
 
 	resetMu          sync.Mutex
 	resetting        bool
@@ -281,33 +255,11 @@ func NewRunner(t Target, opts ...SimulationOption) *SimulationRunner {
 }
 
 func (s *SimulationRunner) initSlotsLocked(count int) {
-	var adopted []int
-	if count > 65536 {
-		if seeder, ok := s.target.(RunningSlotSeeder); ok {
-			adopted = seeder.RunningSimulatedIndices()
-		}
-	}
 	s.slotMu.Lock()
 	defer s.slotMu.Unlock()
 	s.slots = make([]slotState, count+1)
 	s.containerApprovals = make(map[int]string)
 	s.readyQueue = nil
-	s.warmAdoptQueue = adopted
-	s.warmAdoptHead = 0
-	if len(adopted) > 0 {
-		s.warmAdoptUntilUnixMs.Store(time.Now().Add(45 * time.Second).UnixMilli())
-	} else {
-		s.warmAdoptUntilUnixMs.Store(0)
-	}
-	if count > 65536 {
-		s.coldWakeSem = make(chan struct{}, 3072)
-	} else {
-		s.coldWakeSem = nil
-	}
-	s.recentIdle = make([]int, recentIdleCap)
-	s.recentHead = 0
-	s.recentCount = 0
-	s.lastCheckpointWakeMs = 0
 	if count > 65536 {
 		s.turnCursor = uint64(rand.Intn(count))
 	} else {
@@ -322,38 +274,8 @@ func (s *SimulationRunner) clearSlotsLocked() {
 	s.slots = nil
 	s.containerApprovals = nil
 	s.readyQueue = nil
-	s.warmAdoptQueue = nil
-	s.warmAdoptHead = 0
-	s.warmAdoptUntilUnixMs.Store(0)
-	s.lastCheckpointWakeMs = 0
-	s.coldWakeSem = nil
-	s.recentIdle = nil
-	s.recentHead = 0
-	s.recentCount = 0
 	s.turnCursor = 0
 	s.dispatchSeq = 0
-}
-
-// IsAdoptingWarmSeats reports lock-free whether an active hyper-mode simulation
-// is within its initial warm-seat adoption window, preventing orphaned-RUNNING
-// reconciliation from suspending seats before their session loops start.
-func (s *SimulationRunner) IsAdoptingWarmSeats(now time.Time) bool {
-	until := s.warmAdoptUntilUnixMs.Load()
-	return until > 0 && now.UnixMilli() < until
-}
-
-func (s *SimulationRunner) pushRecentIdleLocked(idx int) {
-	if len(s.recentIdle) == 0 || idx <= 0 {
-		return
-	}
-	if s.recentCount < len(s.recentIdle) {
-		tail := (s.recentHead + s.recentCount) % len(s.recentIdle)
-		s.recentIdle[tail] = idx
-		s.recentCount++
-		return
-	}
-	s.recentIdle[s.recentHead] = idx
-	s.recentHead = (s.recentHead + 1) % len(s.recentIdle)
 }
 
 func (s *SimulationRunner) stopActiveRun(pauseOrchestrator, keepSeats bool) bool {
@@ -580,90 +502,9 @@ func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount 
 	return 0, phaseIdle, "", false
 }
 
-func (s *SimulationRunner) claimMaturedRecentIdleLocked(nowMs int64, totalCount, hStride int) (int, bool) {
-	if s.recentCount == 0 || len(s.recentIdle) == 0 {
-		return 0, false
-	}
-	limit := min(s.recentCount, 16)
-	for i := 0; i < limit; i++ {
-		pos := (s.recentHead + i) % len(s.recentIdle)
-		idx := s.recentIdle[pos]
-		if idx < 1 || idx > totalCount || (hStride > 1 && idx%hStride == 0) {
-			continue
-		}
-		st := &s.slots[idx]
-		if st.phase != phaseIdle || nowMs < st.readyAtUnixMs {
-			continue
-		}
-		attendeeID := fmt.Sprintf("attendee-%02d", idx)
-		if s.isReserved(attendeeID, idx) {
-			continue
-		}
-		// Remove claimed slot by swapping from head.
-		s.recentIdle[pos] = s.recentIdle[s.recentHead]
-		s.recentHead = (s.recentHead + 1) % len(s.recentIdle)
-		s.recentCount--
-		st.phase = phaseChatInFlight
-		st.hasContainerApproval = false
-		return idx, true
-	}
-	return 0, false
-}
-
-func (s *SimulationRunner) claimAdoptedWarmSlotLocked(totalCount, hStride int) (int, bool) {
-	for s.warmAdoptHead < len(s.warmAdoptQueue) {
-		idx := s.warmAdoptQueue[s.warmAdoptHead]
-		s.warmAdoptHead++
-		if s.warmAdoptHead >= len(s.warmAdoptQueue) {
-			s.warmAdoptUntilUnixMs.Store(0)
-		}
-		if idx < 1 || idx > totalCount || (hStride > 1 && idx%hStride == 0) {
-			continue
-		}
-		st := &s.slots[idx]
-		if st.phase != phaseIdle {
-			continue
-		}
-		attendeeID := fmt.Sprintf("attendee-%02d", idx)
-		if s.isReserved(attendeeID, idx) {
-			continue
-		}
-		st.phase = phaseAdoptedChatInFlight
-		st.hasContainerApproval = false
-		return idx, true
-	}
-	return 0, false
-}
-
-func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int, canAcquireSeat bool) (int, slotPhase, string, bool) {
+func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int) (int, slotPhase, string, bool) {
 	nowMs := now.UnixMilli()
 	hStride := s.humanStrideLocked(totalCount)
-	hyper := totalCount > 65536
-	canWakeCheckpointed := !hyper || nowMs-s.lastCheckpointWakeMs >= 125
-
-	if idx, ok := s.claimAdoptedWarmSlotLocked(totalCount, hStride); ok {
-		return idx, phaseAdoptedChatInFlight, "", true
-	}
-	if !canAcquireSeat {
-		return 0, phaseIdle, "", false
-	}
-
-	// Re-wake matured checkpointed actors on every 3rd dispatch (paced to <=8/s
-	// in hyper mode to stay well below GCP's 100 QPS STS token-exchange limit).
-	if s.dispatchSeq%3 == 0 && canWakeCheckpointed {
-		if idx, ok := s.claimMaturedRecentIdleLocked(nowMs, totalCount, hStride); ok {
-			if hyper {
-				s.lastCheckpointWakeMs = nowMs
-			}
-			return idx, phaseChatInFlight, "", true
-		}
-	}
-
-	var ckptChecker CheckpointedSlotChecker
-	if hyper {
-		ckptChecker, _ = s.target.(CheckpointedSlotChecker)
-	}
-
 	stride := coprimeStrideForTotal(totalCount)
 	probes := min(totalCount, 128)
 	for p := 0; p < probes; p++ {
@@ -677,34 +518,22 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 		if st.phase != phaseIdle || nowMs < st.readyAtUnixMs {
 			continue
 		}
-		isCkpt := ckptChecker != nil && ckptChecker.IsCheckpointedSlot(idx)
-		if isCkpt && !canWakeCheckpointed {
-			continue
-		}
 		attendeeID := fmt.Sprintf("attendee-%02d", idx)
 		if s.isReserved(attendeeID, idx) {
 			continue
-		}
-		if isCkpt {
-			s.lastCheckpointWakeMs = nowMs
 		}
 		st.phase = phaseChatInFlight
 		st.hasContainerApproval = false
 		return idx, phaseChatInFlight, "", true
 	}
-
-	if canWakeCheckpointed {
-		if idx, ok := s.claimMaturedRecentIdleLocked(nowMs, totalCount, hStride); ok {
-			if hyper {
-				s.lastCheckpointWakeMs = nowMs
-			}
-			return idx, phaseChatInFlight, "", true
-		}
-	}
 	return 0, phaseIdle, "", false
 }
 
 func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireSeat bool) (int, slotPhase, string, bool) {
+	if !canAcquireSeat {
+		return 0, phaseIdle, "", false
+	}
+
 	s.slotMu.Lock()
 	defer s.slotMu.Unlock()
 
@@ -714,10 +543,20 @@ func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireSeat bool) (in
 	}
 
 	s.dispatchSeq++
+	// Interleave new chat turns with matured approvals when an approval
+	// backlog is queued so both Thinking (pink) and Executing (amber) remain
+	// visible concurrently across the worker pods.
+	if len(s.readyQueue) > 16 && (s.dispatchSeq%2 == 0) {
+		if idx, ph, appID, ok := s.claimIdleChatSlotLocked(now, totalCount); ok {
+			return idx, ph, appID, true
+		}
+		return s.claimMaturedApprovalLocked(now, totalCount)
+	}
+
 	if idx, ph, appID, ok := s.claimMaturedApprovalLocked(now, totalCount); ok {
 		return idx, ph, appID, true
 	}
-	return s.claimIdleChatSlotLocked(now, totalCount, canAcquireSeat)
+	return s.claimIdleChatSlotLocked(now, totalCount)
 }
 
 func (s *SimulationRunner) executeNextTurn(ctx context.Context, prompt string, reviewDelay, idleDelay time.Duration) (bool, string, string, error) {
@@ -735,20 +574,6 @@ func (s *SimulationRunner) executeNextTurn(ctx context.Context, prompt string, r
 	return s.runClaimedTurn(ctx, slotIndex, phase, approvalID, prompt, reviewDelay, idleDelay)
 }
 
-func sleepWithContext(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return ctx.Err() == nil
-	}
-	t := time.NewTimer(d)
-	select {
-	case <-ctx.Done():
-		t.Stop()
-		return false
-	case <-t.C:
-		return true
-	}
-}
-
 func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, phase slotPhase, approvalID, prompt string, reviewDelay, idleDelay time.Duration) (bool, string, string, error) {
 	attendeeID := fmt.Sprintf("attendee-%02d", slotIndex)
 	token := s.target.MintToken(attendeeID)
@@ -761,94 +586,36 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 			delete(s.containerApprovals, slotIndex)
 			s.slots[slotIndex].hasContainerApproval = false
 			s.slots[slotIndex].readyAtUnixMs = time.Now().Add(idleDelay).UnixMilli()
-			if err == nil {
-				s.pushRecentIdleLocked(slotIndex)
-			}
 		}
 		s.slotMu.Unlock()
 		return true, attendeeID, "approve", err
 	}
 
-	s.slotMu.Lock()
-	totalCount := max(0, len(s.slots)-1)
-	coldSem := s.coldWakeSem
-	s.slotMu.Unlock()
-
-	s.mu.RLock()
-	fastMode := s.readingDelay < 100*time.Millisecond
-	s.mu.RUnlock()
-
 	if prompt == "" {
 		prompt = simulationPrompts[slotIndex%len(simulationPrompts)]
 	}
-
-	var err error
-	action := "chat"
-	needColdSem := phase != phaseAdoptedChatInFlight && totalCount > 65536 && !fastMode && coldSem != nil
-	if needColdSem {
-		select {
-		case coldSem <- struct{}{}:
-		case <-ctx.Done():
-			err = ctx.Err()
-		}
-		if err == nil {
-			if checker, ok := s.target.(SeatLoadChecker); ok && !checker.CanAcquireSimulatedSeat() {
-				<-coldSem
-				s.slotMu.Lock()
-				if slotIndex < len(s.slots) {
-					s.slots[slotIndex].phase = phaseIdle
-				}
-				s.slotMu.Unlock()
-				return false, "", "", nil
-			}
-		}
-	}
-
-	var chatMsg *types.ChatMessage
-	if err == nil {
-		chatMsg, err = s.sendChat(ctx, attendeeID, token, prompt)
-		if needColdSem {
-			<-coldSem
-		}
-	}
-	if err == nil && chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
-		if fastMode && reviewDelay > 0 {
-			if !sleepWithContext(ctx, reviewDelay) {
-				err = ctx.Err()
-			}
-		} else if totalCount > 65536 && !fastMode {
-			// Brief human-in-the-loop review pause (< SUSPEND_AFTER) before approving execution.
-			if !sleepWithContext(ctx, time.Duration(600+rand.Intn(900))*time.Millisecond) {
-				err = ctx.Err()
-			}
-		}
-		if err == nil {
-			s.slotMu.Lock()
-			if slotIndex < len(s.slots) {
-				s.slots[slotIndex].phase = phaseApproveInFlight
-			}
-			s.slotMu.Unlock()
-			err = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
-			action = "turn"
-		}
-	}
-
+	chatMsg, err := s.sendChat(ctx, attendeeID, token, prompt)
 	s.slotMu.Lock()
 	if slotIndex < len(s.slots) {
-		s.slots[slotIndex].phase = phaseIdle
-		delete(s.containerApprovals, slotIndex)
-		s.slots[slotIndex].hasContainerApproval = false
-		backoff := idleDelay
-		if err != nil {
-			backoff = min(idleDelay, 2*time.Second)
-		}
-		s.slots[slotIndex].readyAtUnixMs = time.Now().Add(backoff).UnixMilli()
-		if err == nil {
-			s.pushRecentIdleLocked(slotIndex)
+		if err == nil && chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
+			s.slots[slotIndex].phase = phaseAwaitingApproval
+			s.containerApprovals[slotIndex] = chatMsg.Approval.ApprovalID
+			s.slots[slotIndex].hasContainerApproval = true
+			s.slots[slotIndex].readyAtUnixMs = time.Now().Add(reviewDelay).UnixMilli()
+			s.readyQueue = append(s.readyQueue, slotIndex)
+		} else {
+			s.slots[slotIndex].phase = phaseIdle
+			delete(s.containerApprovals, slotIndex)
+			s.slots[slotIndex].hasContainerApproval = false
+			backoff := idleDelay
+			if err != nil {
+				backoff = min(idleDelay, 2*time.Second)
+			}
+			s.slots[slotIndex].readyAtUnixMs = time.Now().Add(backoff).UnixMilli()
 		}
 	}
 	s.slotMu.Unlock()
-	return true, attendeeID, action, err
+	return true, attendeeID, "chat", err
 }
 
 func (s *SimulationRunner) runStridedWorker(ctx context.Context, wg *sync.WaitGroup, workerIdx int, rDelay, lDelay time.Duration) {
@@ -937,13 +704,15 @@ func (s *SimulationRunner) runAttendee(ctx context.Context, wg *sync.WaitGroup, 
 		}
 
 		if chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
-			if rDelay > 0 && rDelay < 100*time.Millisecond {
+			sleepDur := s.calculateReviewDelay(offset, rDelay)
+			if sleepDur > 0 {
 				select {
 				case <-ctx.Done():
 					return
-				case <-time.After(rDelay):
+				case <-time.After(sleepDur):
 				}
 			}
+
 			_ = s.sendApprove(ctx, attendeeID, token, chatMsg.Approval.ApprovalID)
 		}
 

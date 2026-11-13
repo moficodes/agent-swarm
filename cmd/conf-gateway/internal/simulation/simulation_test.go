@@ -174,13 +174,13 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 	orchMu.Unlock()
 
-	// Drive a simulated turn via HandleTurn: simulated Mock LLM turns must
-	// auto-chain /api/chat -> /api/approve in a single turn without leaving
-	// the actor paused in AwaitingApproval.
+	// Drive a simulated turn via HandleTurn: Turn 1 dispatches /api/chat and
+	// pauses in AwaitingApproval for ReviewDelayMs so the actor suspends to GCS
+	// while awaiting approval, matching the live human-in-the-loop lifecycle.
 	turnBody, _ := json.Marshal(TurnPayload{
 		TurnID:        "t1",
 		Prompt:        "Run benchmark sandbox test",
-		ReviewDelayMs: 15000,
+		ReviewDelayMs: 20,
 		IdleDelayMs:   50,
 	})
 	req1 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader(turnBody))
@@ -191,14 +191,14 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 
 	target.mu.Lock()
-	if len(target.chats) != 1 || len(target.approvals) != 1 || target.approvals[0] != target.chats[0] {
-		t.Fatalf("after first turn chats=%v approvals=%v, want 1 chat auto-chained into 1 matching approval", target.chats, target.approvals)
+	if len(target.chats) != 1 || len(target.approvals) != 0 {
+		t.Fatalf("after first turn chats=%v approvals=%v, want 1 chat awaiting approval and 0 approvals", target.chats, target.approvals)
 	}
 	firstAttendee := target.chats[0]
 	target.mu.Unlock()
 
-	// Driving a second HandleTurn immediately dispatches another distinct actor's
-	// full chat -> approve cycle.
+	// Wait for ReviewDelayMs to mature, then drive Turn 2 to dispatch /api/approve.
+	time.Sleep(30 * time.Millisecond)
 	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader(turnBody))
 	rec2 := httptest.NewRecorder()
 	r.HandleTurn(rec2, req2)
@@ -207,8 +207,8 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 
 	target.mu.Lock()
-	if len(target.chats) != 2 || len(target.approvals) != 2 || target.chats[1] == firstAttendee {
-		t.Fatalf("after second turn chats=%v approvals=%v, want 2 distinct auto-chained turns", target.chats, target.approvals)
+	if len(target.chats) != 1 || len(target.approvals) != 1 || target.approvals[0] != firstAttendee {
+		t.Fatalf("after second turn chats=%v approvals=%v, want matured approval for %s", target.chats, target.approvals, firstAttendee)
 	}
 	target.mu.Unlock()
 
@@ -372,8 +372,9 @@ func TestRunner_RealExecutionOnlyWithoutStaticPurpleSeeding(t *testing.T) {
 		t.Fatalf("chatCount while seat-blocked = %d, want 0", chatCount)
 	}
 
-	// Once seat headroom opens up, HandleTurn dispatches a full chat -> approve container turn.
-	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{}`)))
+	// Once seat headroom opens up, HandleTurn dispatches /api/chat (Phase 1) and
+	// then /api/approve (Phase 2) once ReviewDelayMs matures.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{"review_delay_ms":10}`)))
 	rec2 := httptest.NewRecorder()
 	r.HandleTurn(rec2, req2)
 	if rec2.Code != http.StatusOK {
@@ -381,8 +382,22 @@ func TestRunner_RealExecutionOnlyWithoutStaticPurpleSeeding(t *testing.T) {
 	}
 
 	target.mu.Lock()
+	if len(target.chats) != 1 || len(target.approvals) != 0 {
+		t.Fatalf("after chat turn chats=%d approvals=%d, want 1 and 0", len(target.chats), len(target.approvals))
+	}
+	target.mu.Unlock()
+
+	time.Sleep(15 * time.Millisecond)
+	req3 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{"review_delay_ms":10}`)))
+	rec3 := httptest.NewRecorder()
+	r.HandleTurn(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("third HandleTurn status = %d, want 200", rec3.Code)
+	}
+
+	target.mu.Lock()
 	if len(target.chats) != 1 || len(target.approvals) != 1 {
-		t.Fatalf("after seat opened chats=%d approvals=%d, want 1 and 1", len(target.chats), len(target.approvals))
+		t.Fatalf("after approval turn chats=%d approvals=%d, want 1 and 1", len(target.chats), len(target.approvals))
 	}
 	target.mu.Unlock()
 }

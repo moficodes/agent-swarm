@@ -110,56 +110,14 @@ func (g *Gateway) suspendIfIdle(attendee string, seq uint64) {
 	g.suspendActor(attendee)
 }
 
-func (g *Gateway) paceHyperSuspend() bool {
-	if g.maxActors <= actorstate.HyperFleetThreshold || g.suspendAfter < 500*time.Millisecond {
-		return true
-	}
-	// Pace hyper-mode SuspendActor RPCs to ~66.7 QPS (15ms interval) so
-	// per-checkpoint STS token exchanges stay safely below GCP's project-wide
-	// 100 QPS (6,000 RPM) sts.googleapis.com quota.
-	const stepNs = int64(15 * time.Millisecond)
-	for {
-		nowNs := time.Now().UnixNano()
-		prev := g.nextHyperSuspendNs.Load()
-		target := max(nowNs, prev+stepNs)
-		if g.nextHyperSuspendNs.CompareAndSwap(prev, target) {
-			wait := time.Duration(target - nowNs)
-			if wait <= 0 {
-				return true
-			}
-			timer := time.NewTimer(wait)
-			select {
-			case <-timer.C:
-				return true
-			case <-g.suspendCtx.Done():
-				timer.Stop()
-				return false
-			}
-		}
-	}
-}
-
 func (g *Gateway) suspendActor(attendee string) {
-	hyperProd := g.maxActors > actorstate.HyperFleetThreshold && g.suspendAfter >= 500*time.Millisecond
 	if g.suspendSem != nil {
 		select {
 		case g.suspendSem <- struct{}{}:
 			defer func() { <-g.suspendSem }()
-		default:
-			if hyperProd {
-				g.scheduleSuspendRetry(attendee)
-				return
-			}
-			select {
-			case g.suspendSem <- struct{}{}:
-				defer func() { <-g.suspendSem }()
-			case <-g.suspendCtx.Done():
-				return
-			}
+		case <-g.suspendCtx.Done():
+			return
 		}
-	}
-	if hyperProd && !g.paceHyperSuspend() {
-		return
 	}
 
 	g.mu.Lock()
@@ -370,10 +328,6 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 	var candidates []string
 	g.mu.RLock()
 	if g.closed {
-		g.mu.RUnlock()
-		return
-	}
-	if sc, ok := g.simController.(*SimulationRunner); ok && sc.IsAdoptingWarmSeats(now) {
 		g.mu.RUnlock()
 		return
 	}
