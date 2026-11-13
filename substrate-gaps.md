@@ -20,170 +20,46 @@ This demo runs against upstream Substrate as-is, but it has to work around a
 few gaps to do it. Each is listed here with its symptom, the workaround in
 this repo, and where the real fix belongs.
 
-## `atenet-router`'s defaults are too short for LLM turns
+## `atenet-router`'s parking and drain budgets are too short for bursty LLM turns
 
-`atenet-router`'s default `--parked-request-budget`, `--route-timeout` and
-termination grace period are sized for short-lived requests, not multi-second
-LLM turns; deployed as-is, the router either 503s a parked request or gets
-SIGKILLed mid-drain during a rollout. `hack/deploy.sh` checks these values
-before deploying and, with `--patch-router`, raises them; see the thresholds
-and exact values in the README's "Deploy" section. The fix belongs in
-`atenet-router`'s own defaults, or in a Substrate-level profile for
-long-running backends, so a deploy that fronts an LLM does not need an
-external patch step at all.
+While `atenet-router`'s default `--route-timeout` is 5 minutes (`defaultRouteTimeout = 5 * time.Minute` in `cmd/atenet/internal/router/xds.go:158`, raised in PR #1529), its default `--parked-request-budget` is 5s (`DefaultParkedRequestBudget = 5s` in `cmd/atenet/internal/router/ingress/parking.go:29`), `drainRouteBudget` is 10s (`xds.go:173`), and the deployment's `terminationGracePeriodSeconds` is 60s (`manifests/ate-install/atenet-router.yaml:201`). Under cold-wake contention or lease retries past 5s, the router sheds parked requests with 503, and raising `--parked-request-budget` to 60s without also raising `terminationGracePeriodSeconds` extends the drain chain to ~103s so Kubernetes SIGKILLs router pods mid-drain during a rollout (Issue #1525, open PR #2560). `hack/deploy.sh` checks these values before deploying and, with `--patch-router`, raises them; see the thresholds and exact values in the README's "Deploy" section. The fix belongs in `atenet-router`'s own defaults and `ate-setup` flags (PR #2560), so a deploy that fronts bursty LLM turns does not need an external patch step.
 
 ## WorkerPools cannot cap how many actors a worker hosts
 
-A worker hosts actors until its capacity runs out or it reaches ateworker's
-`--max-actors` (default 1000), and a WorkerPool cannot set that flag. The
-capacity comes from the ateworker container's `limits.cpu` and `limits.memory`;
-without limits it is the node's allocatable CPU and memory, so a worker on a
-4-vCPU node would take as many of this demo's 1-CPU actors as the node has
-CPUs. The demo wants exactly 4 actors per worker, so `hack/deploy.sh` sets
-the `conf-workers` CPU limit to 4500m, which fits four actors but not five,
-and leaves memory unlimited so a sandbox cannot OOM-kill its worker
-(`manifests/workerpool.yaml.tmpl`). The seat count is then a side effect of
-the actor template's CPU limit: raising an actor to 2 CPUs would quietly
-halve it. The fix belongs in the WorkerPool API: a field for the actors per
-worker, passed to ateworker as `--max-actors`.
+A worker hosts actors until its capacity runs out or it reaches ateworker's `--max-actors` (`cmd/ateworker-gvisor/main.go:110` and `cmd/ateworker-microvm/main.go:83`, default 1000), and `WorkerPoolSpec` (`api/infra/k8s/ate/v1/workerpool_types.go:88-114`) has no field that passes `--max-actors` in `cmd/atecontroller/internal/controllers/workerpool_apply.go:124-169` (also noted in upstream's own `cmd/benchmarking/isolate/internal/fakeworker/fakeworker.go:35-41`). Instead, `workerpool_apply.go:216-223` projects the container's `limits.cpu` and `limits.memory` via the Downward API into `/run/worker-capacity` (`internal/workercapacity/workercapacity.go:20-22`), and `ate-api-server`'s scheduler (`cmd/ateapi/internal/scheduling/scheduling.go:321-338` `checkRoom`) divides worker limits by the actor template's limits on each placement; without limits it uses the node's allocatable CPU and memory. The standard demo wants 4 actors per worker (`4500m` worker CPU limit for `1000m` actors), and the 16.78M hyperswarm profile wants 64 actors per worker (`32250m` worker CPU limit with `750m` CPU request for `500m` actors, `manifests/workerpool.yaml.tmpl`). The seat count is then a side effect of the actor template's CPU limit: raising an actor from 1 CPU to 2 CPUs quietly halves its worker seats. The fix belongs in the `WorkerPool` API: a `maxActorsPerWorker` field passed to `ateworker` as `--max-actors`.
 
 ## Worker metrics do not count actors
 
-`ate_workerpool_workers` counts workers by occupancy (`idle`, `partial`,
-`at_capacity`, `unschedulable`), and no metric reports how many actors a
-worker or pool hosts. The `conf-workers` HPA therefore counts a worker with
-one of its 4 seats taken as fully busy
-(`manifests/autoscaling.yaml.tmpl`), and scales up earlier than seat usage
-calls for. A per-pool gauge of hosted actors, next to the pool's seat
-capacity, would let the demand be actors over seats.
+`ate.workerpool.workers` (`ate_workerpool_workers` in Prometheus, emitted by `ate-api-server` in `cmd/ateapi/internal/controlapi/metrics.go:33, 68-147`) reads `allocated.GetActors()` only to bucket workers into four occupancy states (`idle`, `partial`, `at_capacity`, `unschedulable` in `internal/ateattr/ateattr.go:290-295`), and no metric reports how many actors a worker or pool hosts or its total seat capacity (Issue #1864, #671, #796). The `conf-workers` HPA therefore counts a worker with one of its seats taken as `partial` (`manifests/autoscaling.yaml.tmpl`), and scales up earlier than seat usage calls for. A per-pool gauge of hosted actors, next to the pool's seat capacity, would let the demand be actors over seats.
 
 ## WorkerPools cannot spread their workers across nodes
 
-`WorkerPoolPodTemplate` has no `topologySpreadConstraints` field, so a pool
-cannot require its workers to land on different nodes. The demo sets
-resource requests so the scheduler prefers the emptier node, which is a
-preference, not a guarantee. The fix belongs in the WorkerPool API and its
-controller, which should pass topology spread constraints through to the
-pod template.
+`WorkerPoolPodTemplate` (`api/infra/k8s/ate/v1/workerpool_types.go:32-86`) has no `topologySpreadConstraints` or `podAntiAffinity` field, and `cmd/atecontroller/internal/controllers/workerpool_apply.go:582-620` resets `Affinity` (`:591`) and maps only `NodeAffinity` (`:609`), so a pool cannot require its workers to land on different nodes. The demo sets resource requests so the scheduler prefers the emptier node, which is a preference, not a guarantee. The fix belongs in the `WorkerPool` API and its controller, which should pass `topologySpreadConstraints` and `podAntiAffinity` through to the pod template.
 
 ## The router's parking gauge has no pool label
 
-`atenet.router.parking.active` counts parked requests per router replica
-with no WorkerPool, template, or atespace label, so on a shared router every
-consumer sees the whole cluster's queue. `conf-gateway` bounds its reported
-`parked_requests` (and the `conf_gateway_parked_requests` gauge it exports on
-`:9090/metrics` for the HPA) by the number of initial HTTP requests it
-currently has awaiting `atenet-router`, keeping an idle namespace's stage UI
-and autoscaler unaffected by bursts in sibling namespaces. Two namespaces
-bursting simultaneously can still over-count up to each gateway's own
-in-flight requests (capped by `DEMO_CONF_MAX_WORKERS` in
-`manifests/autoscaling.yaml.tmpl`). The real fix belongs in `atenet-router`'s
-metrics, which should label parked requests with the target atespace/template
-or pool.
+`atenet.router.parking.active` (`cmd/atenet/internal/router/ingress/metrics.go:37, 56-60` and `docs/metrics/registry/metrics.yaml:1541-1555`) is registered with `attributes: []` and incremented in `parking.go:164` with no `WorkerPool`, `template`, or `atespace` label, so on a shared router every consumer sees the whole replica's global parking queue (`parking.go:145-198`). `conf-gateway` bounds its reported `parked_requests` (and the `conf_gateway_parked_requests` gauge it exports on `:9090/metrics` for the HPA) by the number of initial HTTP requests it currently has awaiting `atenet-router`, keeping an idle namespace's stage UI and autoscaler unaffected by bursts in sibling namespaces. Two namespaces bursting simultaneously can still over-count up to each gateway's own in-flight requests (capped by `DEMO_CONF_MAX_WORKERS` in `manifests/autoscaling.yaml.tmpl`). The real fix belongs in `atenet-router`'s metrics, which should label parked requests with the target atespace/template or pool.
 
 ## Interrupted `SuspendActor` calls leave actors wedged in `SUSPENDING`
 
-`ate-api-server` executes `SuspendActor` on the caller's gRPC request context
-even after committing `ACTOR_STATE_SUSPENDING` to PostgreSQL and starting
-`atelet.Checkpoint`. If the caller disconnects mid-checkpoint (for example
-during a `conf-gateway` rollout), `atelet` finishes checkpointing and tears
-down the sandbox, while `ate-api-server` aborts before detaching volumes,
-releasing the worker seat, or finalizing `ACTOR_STATE_SUSPENDED` — and neither
-`ResumeActor` nor `ReportActorSnapshotState` accepts an actor in `SUSPENDING`.
-`conf-gateway` works around this in three ways: draining in-flight `Suspend`
-calls before canceling them on shutdown, including `SUSPENDING` actors in
-`POST /api/reset`, and automatically re-driving Substrate's idempotent
-`SuspendActor` when an idle actor remains in `SUSPENDING` for more than 20s.
-The fix belongs in `ate-api-server`, which should detach its post-commit
-suspend workflow from the caller's context or reconcile orphaned `SUSPENDING`
-actors in `ate-controller`.
+`ate-api-server` executes `SuspendActor` (`cmd/ateapi/internal/controlapi/workflow_suspend.go:98-136`) on `leaseCtx = context.WithCancel(ctx)` (`cmd/ateapi/internal/store/atepg/lease.go:57-63`) even after committing `ACTOR_STATE_SUSPENDING` to PostgreSQL (`:183`) and starting `atelet.Checkpoint` (`:265`). If the caller disconnects mid-checkpoint (for example during a `conf-gateway` rollout), `atelet` finishes checkpointing on its own detached context (`cmd/atelet/main.go:1067-1077`, PR #2602) and tears down the sandbox, while `ate-api-server` aborts before detaching volumes (`:305`), releasing the worker seat, or finalizing `ACTOR_STATE_SUSPENDED` (`:381-401`) — and `ResumeActor` rejects `SUSPENDING` with `FailedPrecondition` (`workflow_resume.go:241-251`) while `ReportActorSnapshotState` rejects it with `Aborted` (`snapshot_report.go:62-66`). `conf-gateway` works around this in three ways: draining in-flight `Suspend` calls before canceling them on shutdown, including `SUSPENDING` actors in `POST /api/reset`, and automatically re-driving Substrate's idempotent `SuspendActor` (`workflow_suspend.go:166-173`) when an idle actor remains in `SUSPENDING` for more than 20s. The fix belongs in `ate-api-server` (Issues #2394, #1914; open PR #2558), which should detach its post-commit suspend workflow from the caller's context (`context.WithoutCancel(ctx)`) or reconcile orphaned `SUSPENDING` user actors in the control plane (`template_reconciler.go:294-300` currently only reconciles template actors).
 
 ## Canceled `ResumeActor` calls orphan `RUNNING` actors that `WorkerPool` scale-down crashes
 
-When a client disconnects from `atenet-router` while an actor is still waking
-(~3s `ResumeActor` restore), `atenet-router` aborts the HTTP request (`request
-for actor ... canceled by client`), and `conf-gateway`'s immediate post-turn
-`SuspendActor` call fails because `ate-api-server` still holds the actor's
-operation lease in `ACTOR_STATE_RESUMING`. Moments later, `ate-api-server`
-finishes `ResumeActor` anyway and leaves the actor stranded in
-`ACTOR_STATE_RUNNING` with no turn running. When the `WorkerPool` HPA later
-scales down, Kubernetes deletes a `ReplicaSet` worker pod without draining or
-suspending hosted actors first, and `ate-api-server`'s `DeleteWorker` workflow
-marks any still-bound `RUNNING` actor `ACTOR_STATE_CRASHED` (`"worker pod went
-away while hosting the actor"`). `conf-gateway` works around this by
-automatically suspending any actor that remains in `RUNNING` for more than 20s
-with no local turn, auto-suspend timer, history clear, or suspend in flight.
-The real fixes belong in `ate-api-server` / `atenet-router` (propagating client
-cancellation or idle-timeout auto-suspend for woken actors) and in the
-`WorkerPool` controller (preferring empty workers on scale-down or suspending
-hosted actors in a `preStop` / finalizer drain before deleting a worker).
+When a client disconnects from `atenet-router` while an actor is still waking (~3s `ResumeActor` restore), `atenet-router` aborts the HTTP request (`resumer.go:274-279`), and `conf-gateway`'s immediate post-turn `SuspendActor` call fails because `ate-api-server` still holds the actor's operation lease in `ACTOR_STATE_RESUMING`. Because `atenet-router` detaches the background wake flight (`cmd/atenet/internal/router/ingress/resumer.go:204-228`, PR #1160), `ate-api-server` finishes `ResumeActor` moments later (`workflow_resume.go:884`) and leaves the actor stranded in `ACTOR_STATE_RUNNING` with no turn running and no built-in idle auto-suspend (Issue #424). When the `WorkerPool` HPA later scales down (`cmd/atecontroller/internal/controllers/workerpool_apply.go:277`), Kubernetes deletes a `ReplicaSet` worker pod without draining or suspending hosted actors first (Issue #2130), and `ate-api-server`'s `DeleteWorker` workflow (`cmd/ateapi/internal/controlapi/workflow_worker_delete.go:234-277` `crashBoundActor`) marks any still-bound `RUNNING` or `SUSPENDING` actor `ACTOR_STATE_CRASHED` (`crash.go:44`: `"worker pod went away while hosting the actor"`). `conf-gateway` works around this by automatically suspending any actor that remains in `RUNNING` for more than 20s with no local turn, auto-suspend timer, history clear, or suspend in flight. The real fixes belong in `ate-api-server` / `atenet-router` (idle-timeout auto-suspend for woken actors, Issue #424) and in the `WorkerPool` controller (preferring empty workers on scale-down or suspending hosted actors in a `preStop` / finalizer drain before deleting a worker, Issue #2130).
 
 ## Per-checkpoint STS token exchanges hit the 100 QPS project quota
 
-In `ate-api-server`, `workflow_suspend.go` and `workflow_resume.go` call
-`gcsboundary.MintCredentials` (`sts.googleapis.com/v1/token`) on every actor
-checkpoint upload (`SuspendActor`) and every restore of a checkpointed actor
-(`ResumeActor` when `owner == 1` under `/actors/<uid>/snapshots/<snap_uuid>`).
-First-wake restores of `NeverStarted` actors (`owner == 2` under `/tags/...`)
-hit the node-local `/var/lib/ate/image-cache` and do not call STS after the
-first pull per node, but every per-actor checkpoint upload and restore makes a
-fresh synchronous `ExchangeToken` RPC. On Google Cloud, `sts.googleapis.com`
-enforces a project-wide `Token exchange requests` quota of 6,000 RPM (100 QPS),
-shared with `gke-metadata-server` Workload Identity across all nodes in the
-project. Exceeding ~85 combined checkpoint uploads and restores per second returns
-`HTTP 429 RATE_LIMIT_EXCEEDED` from STS, which aborts `SuspendActor` and
-`ResumeActor` with `codes.Internal: preparing storage credentials` and can
-starve Workload Identity token refreshes on `conf-gateway`. `conf-gateway`
-works around this in hyper mode by pacing `SuspendActor` RPCs to ~66.7 QPS,
-pacing checkpointed `ResumeActor` wakes to <=8 QPS, and pre-warming + caching
-its own Google Cloud OAuth2 token source with retry backoff. The fix belongs in
-`ate-api-server`'s `gcsboundary` / `objectstore-plugin`, which should either
-sign GCS V4 URLs locally using the control plane's service account key or cache
-and reuse prefix-scoped Credential Access Boundary tokens per worker or bucket
-prefix across their 1-hour lifetime instead of calling `sts.googleapis.com` on
-every actor state transition.
+When `atelet` uploads or restores a per-actor checkpoint (`cmd/atelet/snapshot_transfer.go:53, 76`), it requests scoped GCS credentials from `objectstore-plugin`, where `internal/objectstoreplugin/gcsissuer/issuer.go:146-213` (`Issue` / `mint`) calls `sts.googleapis.com/v1/token` (`issuer.go:196-200`). First-wake restores of `NeverStarted` actors hit the node-local template snapshot cache (`/var/lib/ate/snapshot-cache`, `internal/ateletpath/ateletpath.go:72`) and do not call STS after the first pull per node, but per-actor checkpoints miss or thrash the control-plane issuer's 100,000-entry actor-UID LRU cache (`issuer.go:58, 152-166`, which also lacks `singleflight` deduplication on cold misses) and make synchronous `ExchangeToken` RPCs. On Google Cloud, `sts.googleapis.com` enforces a project-wide `Token exchange requests` quota of 6,000 RPM (100 QPS), shared with `gke-metadata-server` Workload Identity across all nodes in the project. Exceeding ~85 combined checkpoint token exchanges per second returns `HTTP 429 RATE_LIMIT_EXCEEDED` from STS (Issue #3156), which aborts snapshot credential issuance and can starve Workload Identity token refreshes on `conf-gateway`. `conf-gateway` works around this in hyper mode by pacing `SuspendActor` RPCs to ~66.7 QPS, pacing checkpointed `ResumeActor` wakes to <=8 QPS, and pre-warming + caching its own Google Cloud OAuth2 token source with retry backoff. The fix belongs in `objectstore-plugin` (`internal/objectstoreplugin/gcsissuer`), and open PR #3150 (approved, closing Issue #3156) resolves it by minting downscoped tokens locally with `tink-go` instead of calling `sts.googleapis.com`.
 
 ## `gcsboundary` Credential Access Boundaries fail on Hierarchical Namespace buckets
 
-When the snapshot GCS bucket has Hierarchical Namespace (`HNS`) enabled,
-uploading a snapshot tar object to
-`gs://<bucket>/actors/<uid>/snapshots/<snap_uuid>` implicitly creates or
-updates managed folder resources (`projects/_/buckets/<bucket>/folders/...`).
-`gcsboundary` mints an STS Credential Access Boundary (CAB) rule that grants
-`roles/storage.objectAdmin` conditioned on the resource prefix
-`projects/_/buckets/<bucket>/objects/actors/<uid>/snapshots/`, which does not
-match `.../folders/...` resources. `atelet`'s `SuspendActor` upload then fails
-with `HTTP 403 PermissionDenied` from GCS. `hack/create-cluster.sh` and this
-demo's bucket setup use flat (non-HNS) regional buckets as a workaround. The
-fix belongs in `ate-setup` (refusing or warning on HNS buckets during setup)
-and in `gcsboundary` (adding folder resource prefixes or switching to V4 signed
-URLs).
+When the snapshot GCS bucket has Hierarchical Namespace (`HNS`) enabled, uploading a snapshot tar object to `gs://<bucket>/actors/<uid>/snapshots/<snap_uuid>` implicitly creates or updates managed folder resources (`projects/_/buckets/<bucket>/folders/...`). `internal/objectstoreplugin/gcsboundary/boundary.go:60-66` constructs an STS Credential Access Boundary (CAB) rule that grants `roles/storage.objectAdmin` and `roles/storage.objectViewer` (`:31-36`) conditioned strictly on `resource.name.startsWith('projects/_/buckets/<bucket>/objects/<prefix>/')`, which does not match `.../folders/...` resources, and `cmd/atesetup/internal/apienv/apienv.go:193-205` only checks the `gs://` URI prefix without inspecting `hierarchicalNamespace.enabled`. `atelet`'s snapshot upload then fails with `HTTP 403 PermissionDenied` from GCS. `hack/create-cluster.sh` and this demo's bucket setup use flat (non-HNS) regional buckets as a workaround. The fix belongs in `ate-setup` (refusing or warning on HNS buckets during setup) and in `gcsboundary` (adding folder resource prefixes or switching to V4 signed URLs).
 
 ## `ListActors` and `ListWorkerActorAssignments` do not scale to $10^7$ actors
 
-`ListActors` caps `page_size` at 1,000 rows (`maxPageSize = 1000`), so listing
-a 16,777,216-actor atespace requires 16,778 sequential paginated RPCs (~40–60s
-per sweep) and allocates tens of millions of protobuf objects. At >262,144
-actors (`HyperFleetThreshold`), `conf-gateway` instead polls `ListWorkers` (5
-pages across 4,096 workers) followed by 4,096 bounded-concurrency
-`ListWorkerActorAssignments` RPCs (~620ms per sweep) to observe which actors
-are seated on worker pods. However, `WorkerActorAssignment` only returns the
-actor's `ObjectRef` (`atespace`, `name`, `uid`) without its `ActorState`
-(`RESUMING`, `RUNNING`, `SUSPENDING`, `CRASHED`) or `latest_snapshot_generation`.
-`conf-gateway` therefore has to track in-flight `RESUMING` and `SUSPENDING`
-transitions and checkpoint existence in its own 16 MiB compact byte board
-(`BeginHyperResume`, `BeginHyperSuspend`, `FinishHyperSuspend`). The fix
-belongs in `ateapipb`: including `ActorState` and snapshot metadata in
-`WorkerActorAssignment`, exposing an `Atespace` summary RPC for aggregate state
-and snapshot counts, and providing a watch/delta stream (`WatchActors`) for
-state transitions since a revision or timestamp.
+`ListActors` caps `page_size` at 1,000 rows (`maxPageSize = 1000` in `cmd/ateapi/internal/controlapi/pagination.go:25-34`) and unmarshals the full binary `proto` column for every row (`cmd/ateapi/internal/store/atepg/actor.go:192, 220-224, 268-271`; `migrations/000001_initial.up.sql:24-32` has no separate indexed `state` column), so listing a 16,777,216-actor atespace requires 16,778 sequential paginated RPCs (~40–60s per sweep) and allocates tens of millions of protobuf objects (Issues #1256, #796, #186, #3439; open PR #1204). At >262,144 actors (`HyperFleetThreshold`), `conf-gateway` instead polls `ListWorkers` (5 pages across 4,096 workers) followed by 4,096 bounded-concurrency `ListWorkerActorAssignments` RPCs (~620ms per sweep) to observe which actors are seated on worker pods. However, `ListWorkerActorAssignments` (`cmd/ateapi/internal/store/atepg/worker_assignment.go:253-257`) returns `ateapipb.ActorAssignment` (`api/ateapi/v1/ateapi.proto:2604-2635`), which only contains `metadata`, `actor` (`ObjectRef`), `actor_uid`, and `resources` without the actor's `ActorState` (`RESUMING`, `RUNNING`, `SUSPENDING`, `CRASHED`) or `latest_snapshot_generation`. `conf-gateway` therefore has to track in-flight `RESUMING` and `SUSPENDING` transitions and checkpoint existence in its own 16 MiB compact byte board (`BeginHyperResume`, `BeginHyperSuspend`, `FinishHyperSuspend`). The fix belongs in `ateapi.proto` and `controlapi`: including `ActorState` and snapshot metadata in `ActorAssignment`, indexing `state` in PostgreSQL to expose an `Atespace` summary RPC for aggregate state and snapshot counts, and providing a watch/delta stream (`WatchActors`) for state transitions since a revision or timestamp.
 
 ## Provisioning $10^7$ actors requires $10^7$ unary `CreateActor` RPCs
 
-`ateapipb` only provides a unary `CreateActor` RPC, which runs a separate
-database transaction per actor. Provisioning 16,777,216 actors therefore
-requires 16,777,216 unary RPCs (~28 minutes across a 64-shard Indexed Job with
-3,072 concurrent gRPC streams in `cmd/conf-provision`). A `BatchCreateActors`
-RPC accepting up to 500–1,000 actors per call and executing a single batched
-PostgreSQL `INSERT` / `COPY` would reduce 16.78M actor creation to ~16,778
-RPCs (<90 seconds).
+`api/ateapi/v1/ateapi.proto:32, 1778` only provides a unary `CreateActor` RPC, and each call in `cmd/ateapi/internal/controlapi/actor.go:40, 68-150` executes template lookup, tag resolution, and a separate single-row PostgreSQL `INSERT` transaction (`cmd/ateapi/internal/store/atepg/actor.go:48-51`). Provisioning 16,777,216 actors therefore requires 16,777,216 unary RPCs (~28 minutes across a 64-shard Indexed Job with 3,072 concurrent gRPC streams in `cmd/conf-provision`). A `BatchCreateActors` RPC (tracked in design Issue #3594) accepting up to 500–1,000 actors per call and executing a single batched PostgreSQL `INSERT` / `COPY` would reduce 16.78M actor creation to ~16,778 RPCs (<90 seconds).
