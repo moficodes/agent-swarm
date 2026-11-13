@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -430,6 +431,9 @@ func newWorkerScaleReader(cfg Config) (*workerscale.Reader, error) {
 
 func main() {
 	cfg := LoadConfig()
+	if cfg.ActorCount > actorstate.HyperFleetThreshold && os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(12 << 30)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

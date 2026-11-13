@@ -56,8 +56,16 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 
 	maxSimRouterInFlight := 512
 	if g.maxActors > actorstate.HyperFleetThreshold {
-		maxSimRouterInFlight = 1024
-		if parked, ok := g.scopedParking(); ok && parked > 1024 {
+		freeSeats := maxSimSeats - activeSeats
+		if freeSeats <= 0 {
+			return false
+		}
+		maxUnseatedInFlight := min(1536, max(128, freeSeats/2))
+		if int(g.unseatedSimInFlight.Load()) >= maxUnseatedInFlight {
+			return false
+		}
+		maxSimRouterInFlight = 16384
+		if parked, ok := g.scopedParking(); ok && parked > 3072 {
 			return false
 		}
 	}
@@ -67,12 +75,10 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 
 	g.mu.RLock()
 	inFlightTurns := len(g.turnsInFlight)
-	suspendsInFlight := len(g.suspendsInFlight)
-	pendingSuspends := len(g.suspendTimers) + suspendsInFlight
-	localCommitted := inFlightTurns + pendingSuspends
+	localCommitted := inFlightTurns + len(g.suspendTimers) + len(g.suspendsInFlight)
 	g.mu.RUnlock()
 	if g.maxActors > actorstate.HyperFleetThreshold {
-		if inFlightTurns >= maxSimSeats || activeSeats >= maxSimSeats || suspendsInFlight >= 512 || pendingSuspends >= 2048 {
+		if inFlightTurns >= maxSimSeats || activeSeats >= maxSimSeats {
 			return false
 		}
 		return true
@@ -96,25 +102,99 @@ func (g *Gateway) CanAcquireSimulatedApproveSeat() bool {
 	if p := g.workerPods.Load(); p != nil && p.Available && p.Current > 0 && g.seatsPerWorker > 0 {
 		totalSeats = p.Current * g.seatsPerWorker
 	}
-	reserve := min(1280, max(64, totalSeats/200))
+	reserve := min(640, max(64, totalSeats/400))
 	maxApproveSeats := max(1, totalSeats-reserve)
 	activeSeats := 0
 	if g.board != nil {
 		activeSeats = g.board.ActiveSeatCount()
 	}
-	if activeSeats >= maxApproveSeats {
+	freeSeats := maxApproveSeats - activeSeats
+	if freeSeats <= 0 {
 		return false
 	}
-	if g.proxy != nil && g.proxy.SimRouterInFlight() >= 1536 {
+	maxUnseatedInFlight := min(1536, max(128, freeSeats/2))
+	if int(g.unseatedSimInFlight.Load()) >= maxUnseatedInFlight {
 		return false
 	}
-	if parked, ok := g.scopedParking(); ok && parked > 2048 {
+	if g.proxy != nil && g.proxy.SimRouterInFlight() >= 16384 {
 		return false
 	}
+	if parked, ok := g.scopedParking(); ok && parked > 3072 {
+		return false
+	}
+	return true
+}
+
+// CanRunSeatedSimulatedTurn reports whether an already-seated actor on a worker
+// pod can start its next HTTP turn without overloading router/proxy concurrency.
+func (g *Gateway) CanRunSeatedSimulatedTurn() bool {
+	if g.maxActors <= actorstate.HyperFleetThreshold {
+		return true
+	}
+	maxInFlight := 12288
+	if g.board != nil && g.board.ActiveSeatCount() < 225000 {
+		maxInFlight = 4096
+	}
+	if g.proxy != nil && g.proxy.SimRouterInFlight() >= maxInFlight {
+		return false
+	}
+	if parked, ok := g.scopedParking(); ok && parked > 16384 {
+		return false
+	}
+	return true
+}
+
+// ActiveSimulatedSeats returns the number of currently occupied worker seats.
+func (g *Gateway) ActiveSimulatedSeats() int {
+	if g.board == nil {
+		return 0
+	}
+	return g.board.ActiveSeatCount()
+}
+
+// IsSeatedActorIndex reports whether the 1-based actor index is currently
+// occupying or transitioning on a worker pod seat.
+func (g *Gateway) IsSeatedActorIndex(slotIndex int) bool {
+	if g.board == nil {
+		return false
+	}
+	return g.board.IsSeatedIndex(slotIndex)
+}
+
+// HasPendingSuspend reports whether attendeeID has a pending suspend timer or
+// an in-flight SuspendActor RPC.
+func (g *Gateway) HasPendingSuspend(attendeeID string) bool {
 	g.mu.RLock()
-	suspendsInFlight := len(g.suspendsInFlight)
-	g.mu.RUnlock()
-	return suspendsInFlight < 1024
+	defer g.mu.RUnlock()
+	return g.suspendTimers[attendeeID] != nil || g.suspendsInFlight[attendeeID] > 0
+}
+
+// TryScheduleSimulatedSuspend schedules a post-execution SuspendActor timer for
+// an already-seated simulated actor when the GCS checkpoint pipeline has room.
+func (g *Gateway) TryScheduleSimulatedSuspend(attendeeID string, slotIndex int) bool {
+	if g.control == nil || g.suspendAfter <= 0 || g.maxActors <= actorstate.HyperFleetThreshold {
+		return false
+	}
+	activeSeats := 0
+	if g.board != nil {
+		activeSeats = g.board.ActiveSeatCount()
+	}
+	if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && activeSeats < 225000 {
+		return false
+	}
+	maxPending := 512
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed || g.turnsInFlight[attendeeID] > 0 || g.suspendTimers[attendeeID] != nil || g.suspendsInFlight[attendeeID] > 0 {
+		return false
+	}
+	pending := len(g.suspendTimers) + len(g.suspendsInFlight)
+	if pending >= maxPending {
+		return false
+	}
+	g.suspendAfterTurnLocked(attendeeID)
+	return true
 }
 
 // IsCheckpointedActorIndex reports whether the 1-based actor index already has

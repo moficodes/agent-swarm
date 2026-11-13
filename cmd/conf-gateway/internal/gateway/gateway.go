@@ -359,6 +359,7 @@ type Gateway struct {
 	mockThinkMin         time.Duration
 	mockThinkMax         time.Duration
 	statePollMs          atomic.Int64
+	unseatedSimInFlight  atomic.Int64
 
 	mux         *http.ServeMux
 	proxy       *actorproxy.Proxy
@@ -398,7 +399,8 @@ type Gateway struct {
 	turnsInFlight map[string]int
 	// turnSeq counts each attendee's turns, so a scheduled suspend can tell
 	// that a newer turn has started since it was scheduled.
-	turnSeq map[string]uint64
+	turnSeq     map[string]uint64
+	nextTurnSeq uint64
 	// beforeSuspendCheck, when set by tests, runs just before a scheduled
 	// suspend re-checks for newer turns.
 	beforeSuspendCheck func(attendee string)

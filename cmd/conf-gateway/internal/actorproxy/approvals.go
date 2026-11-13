@@ -58,6 +58,9 @@ func (a *approvals) SetPending(attendeeID string, req *types.ApprovalRequest) {
 func (a *approvals) ClearPending(attendeeID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if len(a.consumed) >= 8192 {
+		clear(a.consumed)
+	}
 	if p := a.pending[attendeeID]; p != nil && p.ApprovalID != "" {
 		a.consumed[attendeeID] = p.ApprovalID
 	} else if inFlight := a.inFlight[attendeeID]; inFlight != "" {

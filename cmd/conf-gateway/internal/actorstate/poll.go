@@ -32,6 +32,7 @@ func Poll(ctx context.Context, c ActorControl, interval time.Duration, b *Board,
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var lastErr string
+	consecutiveErrs := 0
 	seatLister, hasSeatLister := c.(ActiveSeatLister)
 	useActiveSeats := b != nil && b.IsHyperMode() && hasSeatLister
 	for {
@@ -51,12 +52,16 @@ func Poll(ctx context.Context, c ActorControl, interval time.Duration, b *Board,
 			return
 		}
 		if err != nil {
+			consecutiveErrs++
 			if err.Error() != lastErr {
 				log.Printf("[gateway] listing actors: %v", err)
 				lastErr = err.Error()
 			}
-			b.SetUnavailable(unavailableReason)
+			if !useActiveSeats || (consecutiveErrs >= 5 && b.ActiveSeatCount() == 0) {
+				b.SetUnavailable(unavailableReason)
+			}
 		} else {
+			consecutiveErrs = 0
 			lastErr = ""
 			if useActiveSeats {
 				b.SetActiveStatuses(statuses)

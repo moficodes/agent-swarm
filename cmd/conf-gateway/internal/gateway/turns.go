@@ -28,11 +28,20 @@ import (
 
 // beginTurn marks a turn in flight and cancels any pending suspend, so an
 // actor is never suspended while it is serving a turn.
-func (g *Gateway) beginTurn(attendee string) {
+func (g *Gateway) beginTurn(attendee string) uint64 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.turnsInFlight[attendee]++
-	g.turnSeq[attendee]++
+	g.nextTurnSeq++
+	seq := g.nextTurnSeq
+	if g.maxActors > actorstate.HyperFleetThreshold && len(g.turnSeq) >= 65536 {
+		for k := range g.turnSeq {
+			if g.turnsInFlight[k] == 0 && g.suspendTimers[k] == nil && g.suspendsInFlight[k] == 0 {
+				delete(g.turnSeq, k)
+			}
+		}
+	}
+	g.turnSeq[attendee] = seq
 	delete(g.runningIdleSince, attendee)
 	if t, ok := g.suspendTimers[attendee]; ok {
 		if t.Stop() {
@@ -40,11 +49,29 @@ func (g *Gateway) beginTurn(attendee string) {
 		}
 		delete(g.suspendTimers, attendee)
 	}
+	return seq
 }
 
 // endTurn marks a turn finished and, once no turn is in flight, schedules
 // the actor's suspend.
 func (g *Gateway) endTurn(attendee string) {
+	g.endTurnWithOpts(attendee, false, false)
+}
+
+// endTurnWithOpts marks a turn finished and schedules the actor's suspend
+// (or in hyper mode keeps seated simulated actors cycling when the GCS
+// checkpoint pipeline is saturated).
+func (g *Gateway) endTurnWithOpts(attendee string, useMock, isApprove bool) {
+	isHyperMock := useMock && g.maxActors > actorstate.HyperFleetThreshold && !isReservedHumanSlotID(attendee, g.maxActors, g.HumanSlotStride())
+	activeSeats := 0
+	isUnseatedSuspended := false
+	if isHyperMock && g.board != nil {
+		activeSeats = g.board.ActiveSeatCount()
+		if v, ok := g.board.View(attendee); ok && v.State == types.StateSuspended && v.WorkerPod == "" {
+			isUnseatedSuspended = true
+		}
+	}
+
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.turnsInFlight[attendee]--
@@ -52,7 +79,56 @@ func (g *Gateway) endTurn(attendee string) {
 		return
 	}
 	delete(g.turnsInFlight, attendee)
-	g.suspendAfterTurnLocked(attendee)
+
+	exp, hasLease := g.leasedUntil[attendee]
+	isLeased := hasLease && time.Now().Before(exp)
+	if !isHyperMock || isLeased {
+		g.suspendAfterTurnLocked(attendee)
+		return
+	}
+	if isUnseatedSuspended {
+		return
+	}
+
+	pendingSuspends := len(g.suspendTimers) + len(g.suspendsInFlight)
+	belowSeatFloor := false
+	if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && activeSeats < 225000 {
+		belowSeatFloor = true
+	}
+
+	if !isApprove {
+		if !belowSeatFloor && pendingSuspends < 160 {
+			g.suspendAfterTurnLocked(attendee)
+		}
+		return
+	}
+
+	if !belowSeatFloor && pendingSuspends < 512 {
+		g.suspendAfterTurnLocked(attendee)
+		return
+	}
+	g.schedulePostExecActivityHoldLocked(attendee, 36*time.Second)
+}
+
+func (g *Gateway) schedulePostExecActivityHoldLocked(attendee string, d time.Duration) {
+	if g.closed || g.board == nil {
+		return
+	}
+	seq := g.turnSeq[attendee]
+	time.AfterFunc(d, func() {
+		g.mu.RLock()
+		unchanged := !g.closed &&
+			g.turnsInFlight[attendee] == 0 &&
+			g.turnSeq[attendee] == seq &&
+			g.suspendTimers[attendee] == nil &&
+			g.suspendsInFlight[attendee] == 0
+		g.mu.RUnlock()
+		if unchanged {
+			if v, ok := g.board.View(attendee); ok && v.Activity == types.ActivityExecuting {
+				g.board.SetActivity(attendee, types.ActivityIdle)
+			}
+		}
+	})
 }
 
 // suspendAfterTurnLocked suspends the attendee's actor right away when
@@ -176,6 +252,9 @@ func (g *Gateway) suspendActor(attendee string) {
 		g.suspendsInFlight[attendee]--
 		if g.suspendsInFlight[attendee] <= 0 {
 			delete(g.suspendsInFlight, attendee)
+			if g.turnsInFlight[attendee] == 0 && g.suspendTimers[attendee] == nil {
+				delete(g.turnSeq, attendee)
+			}
 		}
 		g.mu.Unlock()
 	}()
@@ -204,6 +283,18 @@ func (g *Gateway) suspendActor(attendee string) {
 		return
 	}
 
+	if g.board != nil && g.maxActors > actorstate.HyperFleetThreshold {
+		if v, ok := g.board.View(attendee); ok {
+			if v.State == types.StateSuspended && v.WorkerPod == "" {
+				return
+			}
+			if v.State == types.StateResuming && v.WorkerPod == "" {
+				g.scheduleSuspendRetry(attendee)
+				return
+			}
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(g.suspendCtx, 30*time.Second)
 	defer cancel()
 	if g.board != nil {
@@ -217,15 +308,37 @@ func (g *Gateway) suspendActor(attendee string) {
 		if g.suspendCtx.Err() != nil {
 			return // the gateway's suspend drain window ended
 		}
-		if strings.Contains(err.Error(), "status 429") ||
-			strings.Contains(err.Error(), "ResourceExhausted") ||
-			strings.Contains(err.Error(), "preparing storage credentials") {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "ACTOR_STATE_SUSPENDED") {
+			if g.board != nil {
+				g.board.FinishHyperSuspend(attendee, true)
+			}
+			return
+		}
+		if strings.Contains(errMsg, "ACTOR_STATE_SUSPENDING") {
+			return
+		}
+		if strings.Contains(errMsg, "ACTOR_STATE_CRASHED") {
+			revErr := g.control.Revert(ctx, attendee)
+			if revErr == nil || strings.Contains(revErr.Error(), "ACTOR_STATE_SUSPENDED") {
+				if g.board != nil {
+					g.board.FinishHyperSuspend(attendee, true)
+				}
+				return
+			}
+		}
+		if strings.Contains(errMsg, "status 429") ||
+			strings.Contains(errMsg, "ResourceExhausted") ||
+			strings.Contains(errMsg, "preparing storage credentials") {
 			g.noteSuspendRateLimit()
 			g.scheduleSuspendRetry(attendee)
 			return
 		}
-		if strings.Contains(err.Error(), "another operation is in progress") ||
-			strings.Contains(err.Error(), "Aborted") {
+		if strings.Contains(errMsg, "another operation is in progress") ||
+			strings.Contains(errMsg, "Aborted") ||
+			strings.Contains(errMsg, "ACTOR_STATE_RESUMING") ||
+			strings.Contains(errMsg, "ACTOR_STATE_REVERTING") ||
+			strings.Contains(errMsg, "DeadlineExceeded") {
 			g.scheduleSuspendRetry(attendee)
 			return
 		}
@@ -405,6 +518,9 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 	}
 	for name, v := range views {
 		if v.State == types.StateRunning && !g.isBusyLocked(name) {
+			if g.maxActors > actorstate.HyperFleetThreshold && (v.WorkerPod == "" || (v.Activity != types.ActivityIdle && v.Activity != "")) {
+				continue
+			}
 			candidates = append(candidates, name)
 		}
 	}
@@ -412,6 +528,22 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 	g.mu.RUnlock()
 	if len(candidates) == 0 && !hasTracked {
 		return
+	}
+
+	if g.maxActors > actorstate.HyperFleetThreshold && len(candidates) > 0 {
+		if sr := g.SimulationRunner(); sr != nil {
+			remaining := candidates[:0]
+			for _, name := range candidates {
+				if !g.IsLeased(name) && (g.proxy == nil || g.proxy.PendingApproval(name) == nil) && sr.AdoptSeatedActor(name) {
+					continue
+				}
+				remaining = append(remaining, name)
+			}
+			candidates = remaining
+			if len(candidates) == 0 && !hasTracked {
+				return
+			}
+		}
 	}
 
 	var toSuspend []idleTarget
@@ -452,6 +584,9 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 		go func() {
 			defer g.suspendWG.Done()
 			if g.maxActors > actorstate.HyperFleetThreshold && !g.IsLeased(t.name) && (g.proxy == nil || g.proxy.PendingApproval(t.name) == nil) {
+				if sr := g.SimulationRunner(); sr != nil && sr.AdoptSeatedActor(t.name) {
+					return
+				}
 				g.reconcileOrphanedHyperRunningActor(t.name, t.seq)
 				return
 			}
@@ -476,6 +611,9 @@ func (g *Gateway) reconcileOrphanedHyperRunningActor(attendee string, seq uint64
 		g.suspendsInFlight[attendee]--
 		if g.suspendsInFlight[attendee] <= 0 {
 			delete(g.suspendsInFlight, attendee)
+			if g.turnsInFlight[attendee] == 0 && g.suspendTimers[attendee] == nil {
+				delete(g.turnSeq, attendee)
+			}
 		}
 		g.mu.Unlock()
 	}()

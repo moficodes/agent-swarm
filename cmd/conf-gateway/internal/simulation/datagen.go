@@ -508,7 +508,7 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		now := time.Now()
 		dispatched := 0
-		const hyperBatchFanout = 2
+		const hyperBatchFanout = 8
 	fanoutLoop:
 		for range hyperBatchFanout {
 			if s.turnSem != nil {

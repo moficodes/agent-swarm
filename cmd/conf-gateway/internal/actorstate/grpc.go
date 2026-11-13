@@ -355,16 +355,28 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 	var occupied []occupiedWorker
 	var pageToken string
 	for {
-		listClient, err := g.getClient(ctx)
-		if err != nil {
-			return nil, err
+		var (
+			resp *ateapi.ListWorkersResponse
+			err  error
+		)
+		for attempt := 0; attempt < 3; attempt++ {
+			listClient, cErr := g.getClient(ctx)
+			if cErr != nil {
+				err = cErr
+				break
+			}
+			callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			resp, err = listClient.ListWorkers(callCtx, &ateapi.ListWorkersRequest{
+				Options: &ateapi.ListOptions{
+					PageSize:  1000,
+					PageToken: pageToken,
+				},
+			})
+			cancel()
+			if err == nil || ctx.Err() != nil {
+				break
+			}
 		}
-		resp, err := listClient.ListWorkers(ctx, &ateapi.ListWorkersRequest{
-			Options: &ateapi.ListOptions{
-				PageSize:  1000,
-				PageToken: pageToken,
-			},
-		})
 		if err != nil {
 			return nil, fmt.Errorf("ListWorkers: %w", err)
 		}
@@ -397,48 +409,70 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 	}
 	close(workerCh)
 
-	concurrency := min(len(occupied), 96)
+	concurrency := min(len(occupied), 64)
 	var (
-		resMu    sync.Mutex
-		out      []Status
-		firstErr error
-		wg       sync.WaitGroup
+		resMu            sync.Mutex
+		out              []Status
+		firstErr         error
+		completedWorkers int
+		wg               sync.WaitGroup
 	)
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for ow := range workerCh {
-				c, cErr := g.getClient(ctx)
-				if cErr != nil {
+				if ctx.Err() != nil {
 					resMu.Lock()
 					if firstErr == nil {
-						firstErr = cErr
+						firstErr = ctx.Err()
 					}
 					resMu.Unlock()
 					return
 				}
 				var tok string
 				var local []Status
+				workerFailed := false
 				for {
-					aResp, aErr := c.ListWorkerActorAssignments(ctx, &ateapi.ListWorkerActorAssignmentsRequest{
-						Worker: &ateapi.ObjectRef{Name: ow.name},
-						Options: &ateapi.ListOptions{
-							PageSize:  1000,
-							PageToken: tok,
-						},
-					})
+					var (
+						aResp *ateapi.ListWorkerActorAssignmentsResponse
+						aErr  error
+					)
+					for attempt := 0; attempt < 2; attempt++ {
+						c, cErr := g.getClient(ctx)
+						if cErr != nil {
+							aErr = cErr
+							break
+						}
+						timeout := 3 * time.Second
+						if attempt > 0 {
+							timeout = 2 * time.Second
+						}
+						callCtx, cancel := context.WithTimeout(ctx, timeout)
+						aResp, aErr = c.ListWorkerActorAssignments(callCtx, &ateapi.ListWorkerActorAssignmentsRequest{
+							Worker: &ateapi.ObjectRef{Name: ow.name},
+							Options: &ateapi.ListOptions{
+								PageSize:  1000,
+								PageToken: tok,
+							},
+						})
+						cancel()
+						if aErr == nil || strings.Contains(aErr.Error(), "NotFound") || ctx.Err() != nil {
+							break
+						}
+					}
 					if aErr != nil {
 						// A worker pod terminating mid-poll returns NotFound; skip it cleanly.
 						if strings.Contains(aErr.Error(), "NotFound") {
 							break
 						}
+						workerFailed = true
 						resMu.Lock()
 						if firstErr == nil {
 							firstErr = fmt.Errorf("ListWorkerActorAssignments(%s): %w", ow.name, aErr)
 						}
 						resMu.Unlock()
-						return
+						break
 					}
 					for _, asgn := range aResp.GetActorAssignments() {
 						if asgn.GetActor().GetAtespace() != g.atespace {
@@ -459,16 +493,21 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 						break
 					}
 				}
-				if len(local) > 0 {
+				if !workerFailed {
 					resMu.Lock()
-					out = append(out, local...)
+					completedWorkers++
+					if len(local) > 0 {
+						out = append(out, local...)
+					}
 					resMu.Unlock()
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	if firstErr != nil {
+	missedWorkers := len(occupied) - completedWorkers
+	maxToleratedFailures := max(8, len(occupied)/40)
+	if firstErr != nil && (ctx.Err() != nil || len(out) == 0 || missedWorkers > maxToleratedFailures) {
 		return nil, firstErr
 	}
 	return out, nil
@@ -559,7 +598,7 @@ func (g *GRPCControl) HydrateCheckpointed(ctx context.Context, maxActors int, on
 	}
 	close(shardCh)
 
-	concurrency := min(len(shards), 16)
+	concurrency := min(len(shards), 6)
 	var (
 		errMu    sync.Mutex
 		firstErr error

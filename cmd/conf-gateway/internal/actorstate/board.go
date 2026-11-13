@@ -42,6 +42,7 @@ const (
 	compactActMask      byte = 0x03 << compactActShift
 	compactMockSource   byte = 1 << 3
 	compactUnavailable  byte = 1 << 4
+	compactSeated       byte = 1 << 5
 )
 
 func encodeCompactActivity(a types.Activity) byte {
@@ -217,6 +218,11 @@ func (b *Board) syncCompactFromViewLocked(idx int, v types.ActorView) {
 		b.hasUnavailable = true
 	} else {
 		cb &^= compactUnavailable
+	}
+	if isSeatedView(v) {
+		cb |= compactSeated
+	} else {
+		cb &^= compactSeated
 	}
 	b.compact[idx-1] = cb
 }
@@ -518,12 +524,10 @@ func (b *Board) SetActivity(actor string, a types.Activity) {
 	b.update([]string{actor}, func(v *types.ActorView) {
 		if b.hyperCount > 0 {
 			delete(b.hyperResuming, actor)
-			if v.State == types.StateResuming {
-				if a == types.ActivityIdle && v.WorkerPod == "" {
-					v.State = types.StateSuspended
-				} else {
-					v.State = types.StateRunning
-				}
+			if (v.State == types.StateResuming || v.State == types.StateRunning) && a == types.ActivityIdle && v.WorkerPod == "" {
+				v.State = types.StateSuspended
+			} else if v.State == types.StateResuming {
+				v.State = types.StateRunning
 			}
 		}
 		v.Activity = a
@@ -590,9 +594,6 @@ func (b *Board) BeginHyperSuspend(actor string) {
 	}
 	b.update([]string{actor}, func(v *types.ActorView) {
 		delete(b.hyperResuming, actor)
-		if v.Activity == types.ActivityExecuting {
-			v.Activity = types.ActivityIdle
-		}
 		if v.State == types.StateSuspended && v.WorkerPod == "" {
 			return
 		}
@@ -609,10 +610,10 @@ func (b *Board) FinishHyperSuspend(actor string, succeeded bool) {
 	}
 	b.update([]string{actor}, func(v *types.ActorView) {
 		delete(b.hyperSuspending, actor)
-		if v.Activity == types.ActivityExecuting {
-			v.Activity = types.ActivityIdle
-		}
 		if succeeded {
+			if v.Activity == types.ActivityExecuting {
+				v.Activity = types.ActivityIdle
+			}
 			v.State = types.StateSuspended
 			v.StateDetail = ""
 			v.WorkerPod = ""
@@ -623,6 +624,9 @@ func (b *Board) FinishHyperSuspend(actor string, succeeded bool) {
 			if v.WorkerPod != "" {
 				v.State = types.StateRunning
 			} else {
+				if v.Activity == types.ActivityExecuting {
+					v.Activity = types.ActivityIdle
+				}
 				v.State = types.StateSuspended
 			}
 		}
@@ -767,6 +771,8 @@ func EncodeBadgeCode(v types.ActorView, leased bool) byte {
 	switch v.State {
 	case types.StateCrashed, types.StateUnavailable:
 		code = 8
+	case types.StateSuspending:
+		code = 3
 	default:
 		switch v.Activity {
 		case types.ActivityExecuting:
@@ -785,8 +791,6 @@ func EncodeBadgeCode(v types.ActorView, leased bool) byte {
 				}
 			case types.StateResuming:
 				code = 2
-			case types.StateSuspending:
-				code = 3
 			case types.StateRunning:
 				code = 4
 			default:
@@ -1220,6 +1224,21 @@ func (b *Board) IsCheckpointedIndex(idx int) bool {
 		return false
 	}
 	return (b.compact[idx-1] & compactCheckpointed) != 0
+}
+
+// IsSeatedIndex reports whether the 1-based actor index is currently occupying
+// or transitioning on a worker pod seat.
+func (b *Board) IsSeatedIndex(idx int) bool {
+	if idx <= 0 {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.hyperCount == 0 || idx > len(b.compact) {
+		v, ok := b.views[fmt.Sprintf("attendee-%02d", idx)]
+		return ok && isSeatedView(v)
+	}
+	return (b.compact[idx-1] & compactSeated) != 0
 }
 
 // MarkCheckpointedBatch marks a batch of 1-based actor indices as having a
