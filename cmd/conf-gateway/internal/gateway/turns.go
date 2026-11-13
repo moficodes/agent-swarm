@@ -97,17 +97,17 @@ func (g *Gateway) endTurnWithOpts(attendee string, useMock, isApprove bool) {
 	}
 
 	if !isApprove {
-		if !belowSeatFloor && pendingSuspends < 384 {
+		if !belowSeatFloor && pendingSuspends < 2048 {
 			g.suspendAfterTurnLocked(attendee)
 		}
 		return
 	}
 
-	if !belowSeatFloor && pendingSuspends < 1536 {
+	if !belowSeatFloor && pendingSuspends < 8192 {
 		g.suspendAfterTurnLocked(attendee)
 		return
 	}
-	g.schedulePostExecActivityHoldLocked(attendee, 36*time.Second)
+	g.schedulePostExecActivityHoldLocked(attendee, 6*time.Second)
 }
 
 func (g *Gateway) schedulePostExecActivityHoldLocked(attendee string, d time.Duration) {
@@ -150,8 +150,16 @@ func (g *Gateway) suspendAfterTurnLocked(attendee string) {
 		g.wg.Done()
 	}
 	g.wg.Add(1)
+	delay := g.suspendAfter
+	if g.maxActors > actorstate.HyperFleetThreshold && delay > 500*time.Millisecond {
+		exp, hasLease := g.leasedUntil[attendee]
+		isLeased := hasLease && time.Now().Before(exp)
+		if !isLeased && !isReservedHumanSlotID(attendee, g.maxActors, g.HumanSlotStride()) {
+			delay = 500 * time.Millisecond
+		}
+	}
 	var t *time.Timer
-	t = time.AfterFunc(g.suspendAfter, func() {
+	t = time.AfterFunc(delay, func() {
 		defer g.wg.Done()
 		g.mu.Lock()
 		if g.closed {
@@ -198,7 +206,7 @@ func (g *Gateway) paceAutomatedSuspend(ctx context.Context, attendee string) boo
 	if next <= now {
 		return true
 	}
-	const stepNs = int64(1 * time.Millisecond)
+	const stepNs = int64(250 * time.Microsecond)
 	var wait time.Duration
 	for {
 		prev := g.suspendNextUnixNano.Load()

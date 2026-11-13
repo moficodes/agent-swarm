@@ -60,12 +60,12 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 		if freeSeats <= 0 {
 			return false
 		}
-		maxUnseatedInFlight := min(1536, max(128, freeSeats/2))
+		maxUnseatedInFlight := min(6144, max(512, freeSeats))
 		if int(g.unseatedSimInFlight.Load()) >= maxUnseatedInFlight {
 			return false
 		}
-		maxSimRouterInFlight = 16384
-		if parked, ok := g.scopedParking(); ok && parked > 3072 {
+		maxSimRouterInFlight = 24576
+		if parked, ok := g.scopedParking(); ok && parked > 8192 {
 			return false
 		}
 	}
@@ -112,14 +112,14 @@ func (g *Gateway) CanAcquireSimulatedApproveSeat() bool {
 	if freeSeats <= 0 {
 		return false
 	}
-	maxUnseatedInFlight := min(1536, max(128, freeSeats/2))
+	maxUnseatedInFlight := min(6144, max(512, freeSeats))
 	if int(g.unseatedSimInFlight.Load()) >= maxUnseatedInFlight {
 		return false
 	}
-	if g.proxy != nil && g.proxy.SimRouterInFlight() >= 16384 {
+	if g.proxy != nil && g.proxy.SimRouterInFlight() >= 24576 {
 		return false
 	}
-	if parked, ok := g.scopedParking(); ok && parked > 3072 {
+	if parked, ok := g.scopedParking(); ok && parked > 8192 {
 		return false
 	}
 	return true
@@ -131,9 +131,9 @@ func (g *Gateway) CanRunSeatedSimulatedTurn() bool {
 	if g.maxActors <= actorstate.HyperFleetThreshold {
 		return true
 	}
-	maxInFlight := 12288
+	maxInFlight := 16384
 	if g.board != nil && g.board.ActiveSeatCount() < 225000 {
-		maxInFlight = 4096
+		maxInFlight = 6144
 	}
 	if g.proxy != nil && g.proxy.SimRouterInFlight() >= maxInFlight {
 		return false
@@ -182,7 +182,7 @@ func (g *Gateway) TryScheduleSimulatedSuspend(attendeeID string, slotIndex int) 
 	if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && activeSeats < 225000 {
 		return false
 	}
-	maxPending := 1536
+	maxPending := 8192
 
 	g.mu.Lock()
 	defer g.mu.Unlock()

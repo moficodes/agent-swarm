@@ -323,7 +323,7 @@ func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID str
 		}
 		rawHold := g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
 		if g.maxActors > actorstate.HyperFleetThreshold && rawHold > time.Second && execState != nil && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) {
-			targetHold := rawHold*2 + 6*time.Second
+			targetHold := 2500*time.Millisecond + time.Duration(rand.Int64N(int64(2000*time.Millisecond)))
 			if !execState.startedAt.IsZero() {
 				targetHold -= time.Since(execState.startedAt)
 			}

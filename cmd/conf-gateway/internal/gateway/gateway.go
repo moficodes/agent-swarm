@@ -465,8 +465,8 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 			gw.humanSlotStride = 16
 		}
 	}
-	if gw.maxActors > actorstate.HyperFleetThreshold && cap(gw.suspendSem) < 4096 {
-		gw.suspendSem = make(chan struct{}, 4096)
+	if gw.maxActors > actorstate.HyperFleetThreshold && cap(gw.suspendSem) < 8192 {
+		gw.suspendSem = make(chan struct{}, 8192)
 	}
 	if gw.maxActors > 262144 && gw.pollInterval == time.Second {
 		gw.pollInterval = 1500 * time.Millisecond

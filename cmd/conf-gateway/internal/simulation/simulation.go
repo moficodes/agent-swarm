@@ -352,7 +352,7 @@ func (s *SimulationRunner) AdoptSeatedActor(attendeeID string) bool {
 	if st.phase == phaseIdle && !st.inSeatedQueue {
 		nowMs := time.Now().UnixMilli()
 		if st.readyAtUnixMs <= nowMs {
-			st.readyAtUnixMs = nowMs + int64((idx*137)%16000)
+			st.readyAtUnixMs = nowMs + int64((idx*137)%4000)
 		}
 		st.inSeatedQueue = true
 		s.seatedIdleQueue = append(s.seatedIdleQueue, idx)
@@ -648,7 +648,7 @@ func (s *SimulationRunner) claimSeatedIdleSlotLocked(now time.Time, totalCount i
 				continue
 			}
 			if hsc.TryScheduleSimulatedSuspend(attendeeID, idx) {
-				st.readyAtUnixMs = nowMs + 15000
+				st.readyAtUnixMs = nowMs + 4000
 				continue
 			}
 		}
@@ -743,7 +743,7 @@ func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireChatSeat, canA
 			return s.claimIdleChatSlotLocked(now, totalCount)
 		}
 
-		if canAcquireChatSeat && s.dispatchSeq%3 == 0 {
+		if canAcquireChatSeat && s.dispatchSeq%2 == 0 {
 			if idx, ph, appID, ok := s.claimIdleChatSlotLocked(now, totalCount); ok {
 				return idx, ph, appID, true
 			}
@@ -835,7 +835,7 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 				st.hasContainerApproval = false
 				nextDelay := idleDelay
 				if remainSeated && len(s.slots)-1 > 65536 {
-					nextDelay = 38 * time.Second
+					nextDelay = 6 * time.Second
 				}
 				st.readyAtUnixMs = time.Now().Add(nextDelay).UnixMilli()
 				if remainSeated && !st.inSeatedQueue {
@@ -861,11 +861,11 @@ func (s *SimulationRunner) runClaimedTurn(ctx context.Context, slotIndex int, ph
 		if err == nil && chatMsg != nil && chatMsg.Approval != nil && chatMsg.Approval.ApprovalID != "" {
 			readyDelay := reviewDelay
 			if len(s.slots)-1 > 65536 && reviewDelay >= time.Second {
-				thinkHold := time.Duration(25000+rand.Intn(8000))*time.Millisecond - chatElapsed
+				thinkHold := 4500*time.Millisecond - chatElapsed
 				if thinkHold < 0 {
 					thinkHold = 0
 				}
-				readyDelay = reviewDelay*3 + thinkHold
+				readyDelay = 3*time.Second + time.Duration(rand.Intn(3000))*time.Millisecond + thinkHold
 			}
 			s.slots[slotIndex].phase = phaseAwaitingApproval
 			s.slots[slotIndex].approveRetries = 0
