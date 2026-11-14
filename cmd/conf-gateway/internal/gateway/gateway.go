@@ -361,6 +361,8 @@ type Gateway struct {
 	statePollMs          atomic.Int64
 	firstActivePollDone  atomic.Bool
 	unseatedSimInFlight  atomic.Int64
+	activeTurnsCount     atomic.Int64
+	leasedCountAtomic    atomic.Int64
 	lastActionSampleNano atomic.Int64
 
 	mux         *http.ServeMux
@@ -383,6 +385,8 @@ type Gateway struct {
 	simulationTurnURL string
 	// suspendSem bounds concurrent SuspendActor RPCs to ate-api-server.
 	suspendSem chan struct{}
+	// revertSem bounds concurrent background RevertActor RPCs for unseated actors that failed to wake.
+	revertSem chan struct{}
 	// suspendNextUnixNano paces automated hyper-mode SuspendActor RPCs so
 	// checkpoint uploads stay below GCP's project-wide 100 QPS STS token-exchange limit.
 	suspendNextUnixNano atomic.Int64
@@ -444,6 +448,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		sampledActions:       make(map[string]bool),
 		recentEvents:         make([]string, 0),
 		suspendSem:           make(chan struct{}, 256),
+		revertSem:            make(chan struct{}, 256),
 		suspendTimers:        make(map[string]*time.Timer),
 		suspendsInFlight:     make(map[string]int),
 		suspendingSince:      make(map[string]time.Time),
@@ -515,9 +520,11 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		OnActorError: func(attendeeID string) {
 			if gw.proxy != nil && gw.proxy.PendingApproval(attendeeID) != nil {
 				gw.setActivity(attendeeID, types.ActivityAwaitingApproval)
+				gw.scheduleUnseatedRevert(attendeeID)
 				return
 			}
 			gw.setActivity(attendeeID, types.ActivityIdle)
+			gw.scheduleUnseatedRevert(attendeeID)
 		},
 		OnReply:            gw.onActorReply,
 		OnReplyWithContext: gw.onActorReplyWithContext,

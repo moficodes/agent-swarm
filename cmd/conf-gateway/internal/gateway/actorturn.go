@@ -310,6 +310,7 @@ func (g *Gateway) onProxyError(attendeeID string, err error) {
 	} else {
 		g.setActivity(attendeeID, types.ActivityIdle)
 	}
+	g.scheduleUnseatedRevert(attendeeID)
 	g.mu.Lock()
 	g.addEventLocked(fmt.Sprintf("Router proxy error for %s: %v", attendeeID, err))
 	g.mu.Unlock()

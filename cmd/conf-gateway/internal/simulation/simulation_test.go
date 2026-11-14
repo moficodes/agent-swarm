@@ -449,3 +449,40 @@ func TestRunner_PrioritizesNeverStartedBeforeCheckpointedSlots(t *testing.T) {
 		t.Fatalf("chats = %v, want [attendee-07] (the only NeverStarted slot)", target.chats)
 	}
 }
+
+func TestRunner_AllCheckpointedFullPeriodWithoutAliasing(t *testing.T) {
+	// Mark all 512 slots as already checkpointed and verify that claimIdleChatSlotLocked
+	// visits all 480 non-human-reserved slots in 480 calls instead of aliasing to a
+	// 1/128th subset when fallback slots are claimed.
+	checkpointed := make(map[int]bool, 512)
+	for i := 1; i <= 512; i++ {
+		checkpointed[i] = true
+	}
+	target := &oversubFakeTarget{
+		approvalFakeTarget: approvalFakeTarget{ctx: context.Background()},
+		canAcquireSeat:     true,
+		checkpointed:       checkpointed,
+	}
+	r := NewRunner(target)
+	r.initSlotsLocked(512)
+
+	now := time.Now()
+	seen := make(map[int]bool, 480)
+	r.slotMu.Lock()
+	for i := 0; i < 480; i++ {
+		idx, ph, _, ok := r.claimIdleChatSlotLocked(now, 512)
+		if !ok || ph != phaseChatInFlight {
+			r.slotMu.Unlock()
+			t.Fatalf("call %d: claimIdleChatSlotLocked = (%d, %v, %v), want ok", i, idx, ph, ok)
+		}
+		if seen[idx] {
+			r.slotMu.Unlock()
+			t.Fatalf("call %d: duplicate slot %d claimed before full ring traversal", i, idx)
+		}
+		seen[idx] = true
+	}
+	r.slotMu.Unlock()
+	if len(seen) != 480 {
+		t.Fatalf("unique slots claimed = %d, want 480", len(seen))
+	}
+}

@@ -254,6 +254,7 @@ type SimulationRunner struct {
 	seatedIdleQueue    []int
 	readyScanCursor    uint64
 	seatedScanCursor   uint64
+	unstartedCursor    uint64
 	turnCursor         uint64
 	dispatchSeq        uint64
 
@@ -295,8 +296,10 @@ func (s *SimulationRunner) initSlotsLocked(count int) {
 	s.readyScanCursor = 0
 	s.seatedScanCursor = 0
 	if count > 65536 {
+		s.unstartedCursor = uint64(rand.Intn(count))
 		s.turnCursor = uint64(rand.Intn(count))
 	} else {
+		s.unstartedCursor = 0
 		s.turnCursor = 0
 	}
 	s.dispatchSeq = 0
@@ -311,6 +314,7 @@ func (s *SimulationRunner) clearSlotsLocked() {
 	s.seatedIdleQueue = nil
 	s.readyScanCursor = 0
 	s.seatedScanCursor = 0
+	s.unstartedCursor = 0
 	s.turnCursor = 0
 	s.dispatchSeq = 0
 }
@@ -571,7 +575,11 @@ func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount 
 	}
 	nowMs := now.UnixMilli()
 	hsc, hasHSC := s.target.(HyperSeatCoordinator)
-	scanLimit := min(qLen, 4096)
+	maxScan := 4096
+	if totalCount > 65536 {
+		maxScan = 256
+	}
+	scanLimit := min(qLen, maxScan)
 	for inspected := 0; inspected < scanLimit && len(s.readyQueue) > 0; inspected++ {
 		qLen = len(s.readyQueue)
 		pos := int(s.readyScanCursor % uint64(qLen))
@@ -592,17 +600,13 @@ func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount 
 			continue
 		}
 		if totalCount > 65536 && hasHSC && !st.awaitingObservedUnseated {
-			attendeeID := fmt.Sprintf("attendee-%02d", idx)
-			if hsc.IsSeatedActorIndex(idx) || hsc.HasPendingSuspend(attendeeID) {
-				if hsc.IsSeatedActorIndex(idx) && !hsc.HasPendingSuspend(attendeeID) {
-					hsc.TryScheduleSimulatedSuspend(attendeeID, idx)
-				}
-				st.readyAtUnixMs = nowMs + 1000
+			if hsc.IsSeatedActorIndex(idx) {
+				st.readyAtUnixMs = nowMs + 2000
 				s.readyScanCursor++
 				continue
 			}
 			st.awaitingObservedUnseated = true
-			st.readyAtUnixMs = nowMs + int64(3000+rand.Intn(9000))
+			st.readyAtUnixMs = nowMs + int64(15000+rand.Intn(30000))
 			s.readyScanCursor++
 			continue
 		}
@@ -681,10 +685,44 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 	nowMs := now.UnixMilli()
 	hStride := s.humanStrideLocked(totalCount)
 	stride := coprimeStrideForTotal(totalCount)
-	probes := min(totalCount, 128)
 	cc, hasCheckpointedChecker := s.target.(CheckpointedChecker)
 	hsc, hasHSC := s.target.(HyperSeatCoordinator)
-	fallbackIdx := 0
+	if hasCheckpointedChecker {
+		unstartedProbes := min(totalCount, 128)
+		if totalCount > 65536 {
+			unstartedProbes = 16
+		}
+		for p := 0; p < unstartedProbes; p++ {
+			step := s.unstartedCursor
+			s.unstartedCursor++
+			idx := int((step*stride)%uint64(totalCount)) + 1
+			if cc.IsCheckpointedActorIndex(idx) {
+				continue
+			}
+			if hStride > 1 && idx%hStride == 0 {
+				continue
+			}
+			st := &s.slots[idx]
+			if st.phase != phaseIdle || st.inSeatedQueue || nowMs < st.readyAtUnixMs {
+				continue
+			}
+			if hasHSC && hsc.IsSeatedActorIndex(idx) {
+				continue
+			}
+			attendeeID := fmt.Sprintf("attendee-%02d", idx)
+			if s.isReserved(attendeeID, idx) {
+				continue
+			}
+			if hasHSC && hsc.HasPendingSuspend(attendeeID) {
+				continue
+			}
+			st.phase = phaseChatInFlight
+			st.hasContainerApproval = false
+			st.approveRetries = 0
+			return idx, phaseChatInFlight, "", true
+		}
+	}
+	probes := min(totalCount, 64)
 	for p := 0; p < probes; p++ {
 		step := s.turnCursor
 		s.turnCursor++
@@ -706,23 +744,10 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 		if hasHSC && hsc.HasPendingSuspend(attendeeID) {
 			continue
 		}
-		if hasCheckpointedChecker && cc.IsCheckpointedActorIndex(idx) {
-			if fallbackIdx == 0 {
-				fallbackIdx = idx
-			}
-			continue
-		}
 		st.phase = phaseChatInFlight
 		st.hasContainerApproval = false
 		st.approveRetries = 0
 		return idx, phaseChatInFlight, "", true
-	}
-	if fallbackIdx > 0 {
-		st := &s.slots[fallbackIdx]
-		st.phase = phaseChatInFlight
-		st.hasContainerApproval = false
-		st.approveRetries = 0
-		return fallbackIdx, phaseChatInFlight, "", true
 	}
 	return 0, phaseIdle, "", false
 }

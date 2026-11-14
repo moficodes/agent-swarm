@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
@@ -125,15 +126,20 @@ func isSeatedView(v types.ActorView) bool {
 type Board struct {
 	publish func(types.ActorView)
 
-	mu              sync.Mutex
-	views           map[string]types.ActorView
-	activeSeatCount int
-	hyperCount      int
-	compact         []byte
-	hyperResuming   map[string]types.Activity
-	hyperSuspending map[string]bool
-	unavailableMsg  string
-	hasUnavailable  bool
+	mu                      sync.Mutex
+	views                   map[string]types.ActorView
+	activeSeatCount         int
+	activeSeatsAtomic       atomic.Int64
+	checkpointedCountAtomic atomic.Int64
+	hyperCount              int
+	compact                 []byte
+	seatedBits              []atomic.Uint32
+	checkpointedBits        []atomic.Uint32
+	compactCodeCounts       [10]int
+	hyperResuming           map[string]types.Activity
+	hyperSuspending         map[string]bool
+	unavailableMsg          string
+	hasUnavailable          bool
 
 	// pubMu serializes publish calls in commit order. It is acquired while
 	// mu is still held, so the order in which updates commit their views is
@@ -161,10 +167,59 @@ func NewBoardWithCapacity(publish func(types.ActorView), maxActors int) *Board {
 	if maxActors > HyperFleetThreshold {
 		b.hyperCount = maxActors
 		b.compact = make([]byte, maxActors)
+		words := (maxActors + 31) / 32
+		b.seatedBits = make([]atomic.Uint32, words)
+		b.checkpointedBits = make([]atomic.Uint32, words)
+		b.compactCodeCounts[0] = maxActors
 		b.hyperResuming = make(map[string]types.Activity)
 		b.hyperSuspending = make(map[string]bool)
 	}
 	return b
+}
+
+func (b *Board) setActiveSeatCountLocked(n int) {
+	if n < 0 {
+		n = 0
+	}
+	b.activeSeatCount = n
+	b.activeSeatsAtomic.Store(int64(n))
+}
+
+func (b *Board) setCompactByteLocked(idx0 int, cb byte) {
+	if idx0 < 0 || idx0 >= len(b.compact) {
+		return
+	}
+	oldCB := b.compact[idx0]
+	if oldCB == cb {
+		return
+	}
+	oldCode := compactByteToBadgeCode(oldCB)
+	newCode := compactByteToBadgeCode(cb)
+	if oldCode != newCode {
+		b.compactCodeCounts[oldCode]--
+		b.compactCodeCounts[newCode]++
+	}
+	b.compact[idx0] = cb
+	wordIdx := idx0 >> 5
+	mask := uint32(1) << uint(idx0&31)
+	if ((oldCB ^ cb) & compactCheckpointed) != 0 {
+		w := b.checkpointedBits[wordIdx].Load()
+		if (cb & compactCheckpointed) != 0 {
+			b.checkpointedBits[wordIdx].Store(w | mask)
+			b.checkpointedCountAtomic.Add(1)
+		} else {
+			b.checkpointedBits[wordIdx].Store(w &^ mask)
+			b.checkpointedCountAtomic.Add(-1)
+		}
+	}
+	if ((oldCB ^ cb) & compactSeated) != 0 {
+		w := b.seatedBits[wordIdx].Load()
+		if (cb & compactSeated) != 0 {
+			b.seatedBits[wordIdx].Store(w | mask)
+		} else {
+			b.seatedBits[wordIdx].Store(w &^ mask)
+		}
+	}
 }
 
 // IsHyperMode reports whether this Board uses compact byte-array storage.
@@ -224,7 +279,7 @@ func (b *Board) syncCompactFromViewLocked(idx int, v types.ActorView) {
 	} else {
 		cb &^= compactSeated
 	}
-	b.compact[idx-1] = cb
+	b.setCompactByteLocked(idx-1, cb)
 }
 
 func (b *Board) shouldRetainInHyperMap(v types.ActorView) bool {
@@ -255,14 +310,14 @@ func (b *Board) update(names []string, fn func(*types.ActorView)) {
 					if b.shouldRetainInHyperMap(v) {
 						b.views[name] = v
 						if !wasSeated && nowSeated {
-							b.activeSeatCount++
+							b.setActiveSeatCountLocked(b.activeSeatCount + 1)
 						} else if wasSeated && !nowSeated {
-							b.activeSeatCount--
+							b.setActiveSeatCountLocked(b.activeSeatCount - 1)
 						}
 					} else if wasInMap {
 						delete(b.views, name)
 						if wasSeated {
-							b.activeSeatCount--
+							b.setActiveSeatCountLocked(b.activeSeatCount - 1)
 						}
 					}
 					changed = append(changed, v)
@@ -282,9 +337,9 @@ func (b *Board) update(names []string, fn func(*types.ActorView)) {
 			b.views[name] = v
 			nowSeated := isSeatedView(v)
 			if !wasSeated && nowSeated {
-				b.activeSeatCount++
+				b.setActiveSeatCountLocked(b.activeSeatCount + 1)
 			} else if wasSeated && !nowSeated {
-				b.activeSeatCount--
+				b.setActiveSeatCountLocked(b.activeSeatCount - 1)
 			}
 			changed = append(changed, v)
 		}
@@ -357,7 +412,7 @@ func (b *Board) SetStatuses(statuses []Status) {
 			activeSeats++
 		}
 	}
-	b.activeSeatCount = activeSeats
+	b.setActiveSeatCountLocked(activeSeats)
 	slices.SortFunc(changed, func(a, b types.ActorView) int {
 		return strings.Compare(a.ActorID, b.ActorID)
 	})
@@ -390,7 +445,7 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 		b.unavailableMsg = ""
 		b.hasUnavailable = false
 		for i := range b.compact {
-			b.compact[i] &^= compactUnavailable
+			b.setCompactByteLocked(i, b.compact[i]&^compactUnavailable)
 		}
 	}
 
@@ -430,7 +485,7 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 		}
 		v.NeverStarted = false
 		if validIdx {
-			b.compact[idx-1] |= compactCheckpointed
+			b.setCompactByteLocked(idx-1, b.compact[idx-1]|compactCheckpointed)
 			b.syncCompactFromViewLocked(idx, v)
 		}
 		if !existed || v != old {
@@ -469,7 +524,7 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 		}
 		if idx, validIdx := ParseAttendeeIndex(name, b.hyperCount); validIdx {
 			if !v.NeverStarted {
-				b.compact[idx-1] |= compactCheckpointed
+				b.setCompactByteLocked(idx-1, b.compact[idx-1]|compactCheckpointed)
 			}
 			b.syncCompactFromViewLocked(idx, v)
 		}
@@ -489,7 +544,7 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 			activeSeats++
 		}
 	}
-	b.activeSeatCount = activeSeats
+	b.setActiveSeatCountLocked(activeSeats)
 	b.pubMu.Lock()
 	b.mu.Unlock()
 	for _, v := range changed {
@@ -505,7 +560,7 @@ func (b *Board) SetUnavailable(reason string) {
 		b.unavailableMsg = reason
 		b.hasUnavailable = true
 		for i := range b.compact {
-			b.compact[i] |= compactUnavailable
+			b.setCompactByteLocked(i, b.compact[i]|compactUnavailable)
 		}
 		var changed []types.ActorView
 		for name, old := range b.views {
@@ -516,7 +571,7 @@ func (b *Board) SetUnavailable(reason string) {
 				changed = append(changed, v)
 			}
 		}
-		b.activeSeatCount = 0
+		b.setActiveSeatCountLocked(0)
 		b.pubMu.Lock()
 		b.mu.Unlock()
 		for _, v := range changed {
@@ -659,7 +714,7 @@ func (b *Board) Reset() {
 		clear(b.hyperResuming)
 		clear(b.hyperSuspending)
 		for i := range b.compact {
-			b.compact[i] &^= (compactActMask | compactMockSource)
+			b.setCompactByteLocked(i, b.compact[i]&^(compactActMask|compactMockSource))
 		}
 		names := slices.Collect(maps.Keys(b.views))
 		b.mu.Unlock()
@@ -708,7 +763,7 @@ func (b *Board) ClearUnleasedActivityIndices(protectedIndices map[int]bool, isLe
 			if protectedIndices == nil && isLeased != nil && isLeased(fmt.Sprintf("attendee-%02d", idx)) {
 				continue
 			}
-			b.compact[i] &^= compactActMask
+			b.setCompactByteLocked(i, b.compact[i]&^compactActMask)
 		}
 		var targetNames []string
 		for name, v := range b.views {
@@ -778,9 +833,13 @@ func (b *Board) Views() map[string]types.ActorView {
 // ActiveSeatCount returns the number of actors currently occupying or
 // transitioning on a worker pod seat according to the board's latest view.
 func (b *Board) ActiveSeatCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.activeSeatCount
+	return int(b.activeSeatsAtomic.Load())
+}
+
+// CheckpointedCount returns the number of actors with a completed actor-owned
+// checkpoint in hyper mode.
+func (b *Board) CheckpointedCount() int {
+	return int(b.checkpointedCountAtomic.Load())
 }
 
 // EncodeBadgeCode maps an ActorView and lease status to a 5-bit compact code:
@@ -848,21 +907,31 @@ func (b *Board) TelemetrySnapshotOptions(maxActors int, isLeased func(string) bo
 		var buf []byte
 		if includeCompact {
 			buf = make([]byte, maxActors)
-		}
-		for i := 0; i < n; i++ {
-			code := compactByteToBadgeCode(b.compact[i])
-			if buf != nil {
+			for i := 0; i < n; i++ {
+				code := compactByteToBadgeCode(b.compact[i])
 				buf[i] = '@' + code
+				if code == 1 {
+					snapshottedCount++
+				} else if code >= 2 && code <= 8 {
+					activeCohortCount++
+				}
 			}
-			if code == 1 {
-				snapshottedCount++
-			} else if code >= 2 && code <= 8 {
-				activeCohortCount++
-			}
-		}
-		if buf != nil {
 			for i := n; i < maxActors; i++ {
 				buf[i] = '@' + 9
+			}
+		} else if n == len(b.compact) {
+			snapshottedCount = b.compactCodeCounts[1]
+			for c := 2; c <= 8; c++ {
+				activeCohortCount += b.compactCodeCounts[c]
+			}
+		} else {
+			for i := 0; i < n; i++ {
+				code := compactByteToBadgeCode(b.compact[i])
+				if code == 1 {
+					snapshottedCount++
+				} else if code >= 2 && code <= 8 {
+					activeCohortCount++
+				}
 			}
 		}
 
@@ -1121,12 +1190,19 @@ func (b *Board) HyperWorkerTelemetrySnapshot(maxActors, seatsPerWorker int, isLe
 	}
 
 	n := min(maxActors, len(b.compact))
-	for i := 0; i < n; i++ {
-		code := compactByteToBadgeCode(b.compact[i])
-		if code == 1 {
-			snapshottedCount++
-		} else if code >= 2 && code <= 8 {
-			activeCohortCount++
+	if n == len(b.compact) {
+		snapshottedCount = b.compactCodeCounts[1]
+		for c := 2; c <= 8; c++ {
+			activeCohortCount += b.compactCodeCounts[c]
+		}
+	} else {
+		for i := 0; i < n; i++ {
+			code := compactByteToBadgeCode(b.compact[i])
+			if code == 1 {
+				snapshottedCount++
+			} else if code >= 2 && code <= 8 {
+				activeCohortCount++
+			}
 		}
 	}
 
@@ -1237,12 +1313,13 @@ func (b *Board) IsCheckpointedIndex(idx int) bool {
 	if idx <= 0 {
 		return false
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.hyperCount == 0 || idx > len(b.compact) {
-		return false
+	if b.hyperCount > 0 {
+		if idx > b.hyperCount {
+			return false
+		}
+		return (b.checkpointedBits[(idx-1)>>5].Load() & (uint32(1) << uint((idx-1)&31))) != 0
 	}
-	return (b.compact[idx-1] & compactCheckpointed) != 0
+	return false
 }
 
 // IsSeatedIndex reports whether the 1-based actor index is currently occupying
@@ -1251,13 +1328,16 @@ func (b *Board) IsSeatedIndex(idx int) bool {
 	if idx <= 0 {
 		return false
 	}
+	if b.hyperCount > 0 {
+		if idx > b.hyperCount {
+			return false
+		}
+		return (b.seatedBits[(idx-1)>>5].Load() & (uint32(1) << uint((idx-1)&31))) != 0
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.hyperCount == 0 || idx > len(b.compact) {
-		v, ok := b.views[fmt.Sprintf("attendee-%02d", idx)]
-		return ok && isSeatedView(v)
-	}
-	return (b.compact[idx-1] & compactSeated) != 0
+	v, ok := b.views[fmt.Sprintf("attendee-%02d", idx)]
+	return ok && isSeatedView(v)
 }
 
 // MarkCheckpointedBatch marks a batch of 1-based actor indices as having a
@@ -1273,7 +1353,7 @@ func (b *Board) MarkCheckpointedBatch(indices []int) {
 	}
 	for _, idx := range indices {
 		if idx >= 1 && idx <= len(b.compact) {
-			b.compact[idx-1] |= compactCheckpointed
+			b.setCompactByteLocked(idx-1, b.compact[idx-1]|compactCheckpointed)
 		}
 	}
 }

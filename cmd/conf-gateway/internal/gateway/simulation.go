@@ -76,16 +76,18 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 		return false
 	}
 
-	g.mu.RLock()
-	inFlightTurns := len(g.turnsInFlight)
-	localCommitted := inFlightTurns + len(g.suspendTimers) + len(g.suspendsInFlight)
-	g.mu.RUnlock()
 	if g.maxActors > actorstate.HyperFleetThreshold {
+		inFlightTurns := int(g.activeTurnsCount.Load())
 		if inFlightTurns >= maxSimSeats || activeSeats >= maxSimSeats {
 			return false
 		}
 		return true
 	}
+
+	g.mu.RLock()
+	inFlightTurns := len(g.turnsInFlight)
+	localCommitted := inFlightTurns + len(g.suspendTimers) + len(g.suspendsInFlight)
+	g.mu.RUnlock()
 	if localCommitted >= maxSimSeats {
 		return false
 	}
@@ -167,12 +169,12 @@ func (g *Gateway) IsSeatedActorIndex(slotIndex int) bool {
 	return g.board.IsSeatedIndex(slotIndex)
 }
 
-// HasPendingSuspend reports whether attendeeID has a pending suspend timer or
-// an in-flight SuspendActor RPC.
+// HasPendingSuspend reports whether attendeeID has an active turn, a pending
+// suspend timer, or an in-flight SuspendActor RPC.
 func (g *Gateway) HasPendingSuspend(attendeeID string) bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.suspendTimers[attendeeID] != nil || g.suspendsInFlight[attendeeID] > 0
+	return g.turnsInFlight[attendeeID] > 0 || g.suspendTimers[attendeeID] != nil || g.suspendsInFlight[attendeeID] > 0
 }
 
 // TryScheduleSimulatedSuspend schedules a post-execution SuspendActor timer for

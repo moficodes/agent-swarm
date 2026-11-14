@@ -31,6 +31,9 @@ import (
 func (g *Gateway) beginTurn(attendee string) uint64 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.turnsInFlight[attendee] == 0 {
+		g.activeTurnsCount.Add(1)
+	}
 	g.turnsInFlight[attendee]++
 	g.nextTurnSeq++
 	seq := g.nextTurnSeq
@@ -60,7 +63,40 @@ func (g *Gateway) endTurnWithOpts(attendee string, _, _ bool) {
 		return
 	}
 	delete(g.turnsInFlight, attendee)
+	g.activeTurnsCount.Add(-1)
 	g.suspendAfterTurnLocked(attendee)
+}
+
+// scheduleUnseatedRevert runs a background RevertActor RPC when an unseated
+// hyper-mode actor fails its HTTP turn (for example because the actor was left
+// in ACTOR_STATE_CRASHED after an interrupted wake or node disruption).
+func (g *Gateway) scheduleUnseatedRevert(attendee string) {
+	if g.control == nil || g.board == nil || g.maxActors <= actorstate.HyperFleetThreshold || g.revertSem == nil {
+		return
+	}
+	if g.suspendCtx == nil || g.suspendCtx.Err() != nil {
+		return
+	}
+	idx, ok := actorstate.ParseAttendeeIndex(attendee, g.maxActors)
+	if !ok || g.board.IsSeatedIndex(idx) {
+		return
+	}
+	select {
+	case g.revertSem <- struct{}{}:
+	default:
+		return
+	}
+	g.suspendWG.Add(1)
+	go func() {
+		defer g.suspendWG.Done()
+		defer func() { <-g.revertSem }()
+		if g.suspendCtx.Err() != nil || g.board.IsSeatedIndex(idx) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(g.suspendCtx, 15*time.Second)
+		defer cancel()
+		_ = g.control.Revert(ctx, attendee)
+	}()
 }
 
 // suspendAfterTurnLocked suspends the attendee's actor right away when

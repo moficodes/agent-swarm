@@ -85,11 +85,15 @@ func (g *Gateway) LeaseAttendee(attendeeID string) {
 	}
 	g.mu.Lock()
 	g.leasedUntil[attendeeID] = time.Now().Add(attendeeLeaseTTL)
+	g.leasedCountAtomic.Store(int64(len(g.leasedUntil)))
 	g.mu.Unlock()
 }
 
 // IsLeased reports whether an attendee slot currently holds an active human lease.
 func (g *Gateway) IsLeased(attendeeID string) bool {
+	if g.leasedCountAtomic.Load() == 0 {
+		return false
+	}
 	g.mu.RLock()
 	until, ok := g.leasedUntil[attendeeID]
 	g.mu.RUnlock()
