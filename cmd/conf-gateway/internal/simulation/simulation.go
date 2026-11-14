@@ -744,7 +744,7 @@ func (s *SimulationRunner) claimNextSlot(now time.Time, canAcquireChatSeat, canA
 
 	s.dispatchSeq++
 	if hasHSC && totalCount > 65536 {
-		preferApprove := s.dispatchSeq%2 == 0 || len(s.readyQueue) > 32768
+		preferApprove := s.dispatchSeq%2 == 0 || (len(s.readyQueue) > 32768 && s.dispatchSeq%4 != 0)
 		if preferApprove {
 			if idx, ph, appID, ok := s.claimMaturedApprovalLocked(now, totalCount, canAcquireApproveSeat); ok {
 				return idx, ph, appID, true

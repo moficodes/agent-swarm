@@ -175,13 +175,6 @@ func (g *Gateway) TryScheduleSimulatedSuspend(attendeeID string, slotIndex int) 
 	if g.control == nil || g.suspendAfter <= 0 || g.maxActors <= actorstate.HyperFleetThreshold {
 		return false
 	}
-	activeSeats := 0
-	if g.board != nil {
-		activeSeats = g.board.ActiveSeatCount()
-	}
-	if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && activeSeats < 225000 {
-		return false
-	}
 	maxPending := 8192
 
 	g.mu.Lock()

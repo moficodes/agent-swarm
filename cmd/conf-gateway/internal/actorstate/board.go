@@ -414,7 +414,7 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 			v.State, v.StateDetail, v.WorkerPod = s.State, "", s.WorkerPod
 			if pendAct, wasResuming := b.hyperResuming[name]; wasResuming {
 				delete(b.hyperResuming, name)
-				if v.Activity == types.ActivityIdle && pendAct != types.ActivityIdle {
+				if (v.Activity == types.ActivityIdle || v.Activity == "") && pendAct != types.ActivityIdle {
 					v.Activity = pendAct
 				}
 			}
@@ -446,6 +446,9 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 			continue
 		}
 		if _, resuming := b.hyperResuming[name]; resuming {
+			continue
+		}
+		if old.WorkerPod == "" && !b.hyperSuspending[name] {
 			continue
 		}
 		delete(b.hyperSuspending, name)
@@ -525,11 +528,16 @@ func (b *Board) SetUnavailable(reason string) {
 func (b *Board) SetActivity(actor string, a types.Activity) {
 	b.update([]string{actor}, func(v *types.ActorView) {
 		if b.hyperCount > 0 {
-			delete(b.hyperResuming, actor)
 			if (v.State == types.StateResuming || v.State == types.StateRunning) && a == types.ActivityIdle && v.WorkerPod == "" {
+				delete(b.hyperResuming, actor)
 				v.State = types.StateSuspended
 			} else if v.State == types.StateResuming {
 				v.State = types.StateRunning
+			}
+			if v.WorkerPod != "" || a == types.ActivityIdle || v.State == types.StateSuspended {
+				delete(b.hyperResuming, actor)
+			} else if _, wasResuming := b.hyperResuming[actor]; wasResuming {
+				b.hyperResuming[actor] = a
 			}
 		}
 		v.Activity = a
@@ -578,7 +586,9 @@ func (b *Board) PromoteHyperResume(actor string) {
 		if !ok {
 			return
 		}
-		delete(b.hyperResuming, actor)
+		if v.WorkerPod != "" {
+			delete(b.hyperResuming, actor)
+		}
 		if v.State == types.StateResuming {
 			v.State = types.StateRunning
 		}

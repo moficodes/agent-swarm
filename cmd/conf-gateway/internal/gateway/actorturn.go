@@ -23,6 +23,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorproxy"
@@ -201,10 +202,14 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 				sameTurn := !g.closed && g.turnSeq[attendeeID] == turnSeq
 				g.mu.RUnlock()
 				if !isApproveTurn && sameTurn && (g.ctx == nil || g.ctx.Err() == nil) {
-					if sr := g.SimulationRunner(); sr == nil {
-						g.setActivity(attendeeID, types.ActivityAwaitingApproval)
-					} else if running, _ := sr.Status(); running {
-						g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+					isHyperAutoWait := g.control != nil && g.suspendAfter > 0 && g.board != nil && g.board.IsHyperMode() &&
+						useMock && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride())
+					if !isHyperAutoWait {
+						if sr := g.SimulationRunner(); sr == nil {
+							g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+						} else if running, _ := sr.Status(); running {
+							g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+						}
 					}
 				}
 				g.endTurnWithOpts(attendeeID, useMock, isApproveTurn)
@@ -225,7 +230,17 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(context.WithValue(r.Context(), turnStartCtxKey{}, execState))
 	if wasUnseatedSim {
 		g.unseatedSimInFlight.Add(1)
-		defer g.unseatedSimInFlight.Add(-1)
+		var releaseOnce sync.Once
+		releaseUnseated := func() {
+			releaseOnce.Do(func() {
+				g.unseatedSimInFlight.Add(-1)
+			})
+		}
+		wakeTimer := time.AfterFunc(2500*time.Millisecond, releaseUnseated)
+		defer func() {
+			wakeTimer.Stop()
+			releaseUnseated()
+		}()
 	}
 	g.proxy.ServeHTTP(w, actorproxy.WithMock(actorproxy.WithAttendee(r, attendeeID), useMock))
 }
@@ -389,7 +404,14 @@ func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID str
 	if hasChatMsg {
 		g.board.SetSource(attendeeID, chatMsg.Source)
 		if isWaitingForApproval {
-			if execState == nil || execState.asyncThinkHold <= 0 {
+			isHyperAutoWait := g.control != nil && g.suspendAfter > 0 && g.board != nil && g.board.IsHyperMode() &&
+				chatMsg.Source == types.SourceMock && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride())
+			if isHyperAutoWait {
+				// Keep ActivityThinking visible while on the worker seat until
+				// FinishHyperSuspend / SetActiveStatuses transitions the actor to
+				// ActivityAwaitingApproval in GCS.
+				g.setActivity(attendeeID, types.ActivityThinking)
+			} else if execState == nil || execState.asyncThinkHold <= 0 {
 				g.setActivity(attendeeID, types.ActivityAwaitingApproval)
 			}
 		} else if chatMsg.Execution != nil && g.control != nil && g.suspendAfter > 0 && g.board != nil && g.board.IsHyperMode() {

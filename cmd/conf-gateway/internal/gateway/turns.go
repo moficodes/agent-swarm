@@ -59,15 +59,7 @@ func (g *Gateway) endTurn(attendee string) {
 }
 
 // endTurnWithOpts marks a turn finished and schedules the actor's suspend.
-func (g *Gateway) endTurnWithOpts(attendee string, useMock, _ bool) {
-	isHyperMock := useMock && g.maxActors > actorstate.HyperFleetThreshold && !isReservedHumanSlotID(attendee, g.maxActors, g.HumanSlotStride())
-	isUnseatedSuspended := false
-	if isHyperMock && g.board != nil {
-		if v, ok := g.board.View(attendee); ok && v.State == types.StateSuspended && v.WorkerPod == "" {
-			isUnseatedSuspended = true
-		}
-	}
-
+func (g *Gateway) endTurnWithOpts(attendee string, _, _ bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.turnsInFlight[attendee]--
@@ -75,12 +67,6 @@ func (g *Gateway) endTurnWithOpts(attendee string, useMock, _ bool) {
 		return
 	}
 	delete(g.turnsInFlight, attendee)
-
-	exp, hasLease := g.leasedUntil[attendee]
-	isLeased := hasLease && time.Now().Before(exp)
-	if isHyperMock && !isLeased && isUnseatedSuspended {
-		return
-	}
 	g.suspendAfterTurnLocked(attendee)
 }
 
@@ -225,7 +211,7 @@ func (g *Gateway) suspendActor(attendee string) {
 		if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && g.board.ActiveSeatCount() < 208000 {
 			if sr := g.SimulationRunner(); sr != nil {
 				if simRunning, _ := sr.Status(); simRunning {
-					if v, ok := g.board.View(attendee); ok && v.Activity != types.ActivityAwaitingApproval {
+					if v, ok := g.board.View(attendee); ok && v.Activity != types.ActivityAwaitingApproval && v.Activity != types.ActivityThinking {
 						g.scheduleSuspendRetry(attendee)
 						return
 					}
@@ -524,6 +510,17 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 	if g.maxActors > actorstate.HyperFleetThreshold && threshold > 5*time.Second {
 		threshold = 5 * time.Second
 	}
+	maxSweep := 4096
+	if g.maxActors > 262144 {
+		if g.board != nil && g.board.ActiveSeatCount() < 205000 {
+			maxSweep = 0
+		} else if g.suspendSem != nil {
+			spare := cap(g.suspendSem)/2 - len(g.suspendSem)
+			maxSweep = min(2048, max(0, spare))
+		} else {
+			maxSweep = 2048
+		}
+	}
 	for _, name := range candidates {
 		v, ok := views[name]
 		if !ok || v.State != types.StateRunning || g.isBusyLocked(name) {
@@ -537,7 +534,7 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 		if now.Sub(since) < threshold {
 			continue
 		}
-		if g.maxActors > 262144 && len(toSuspend) >= 4096 {
+		if g.maxActors > 262144 && len(toSuspend) >= maxSweep {
 			break
 		}
 		g.runningIdleSince[name] = now
