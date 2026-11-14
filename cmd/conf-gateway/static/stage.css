@@ -2046,6 +2046,10 @@ html, body {
   user-select: none;
 }
 
+.btn-fleet-zoom[hidden] {
+  display: none !important;
+}
+
 .btn-fleet-zoom:hover {
   color: var(--text-primary);
   background: rgba(0, 255, 204, 0.1);

@@ -59,6 +59,8 @@
     btnZoomP2: document.getElementById('btn-zoom-p2'),
     btnZoomP3: document.getElementById('btn-zoom-p3'),
     btnZoomP4: document.getElementById('btn-zoom-p4'),
+    btnZoomP5: document.getElementById('btn-zoom-p5'),
+    btnZoomP6: document.getElementById('btn-zoom-p6'),
     btnFleetZoomOut: document.getElementById('btn-fleet-zoom-out'),
     btnFleetZoomIn: document.getElementById('btn-fleet-zoom-in'),
     fleetZoomReadout: document.getElementById('fleet-zoom-readout'),
@@ -1522,7 +1524,7 @@
   }
 
   function maxFleetZoom() {
-    return latestActorCount > 65536 ? 512 : 32;
+    return latestActorCount > 65536 ? 1024 : 32;
   }
 
   let lastSyncedPresetHyper = null;
@@ -1537,12 +1539,16 @@
       if (el.btnZoomP1) { el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (All 16,777,216 actors)'; }
       if (el.btnZoomP2) { el.btnZoomP2.dataset.zoom = '16'; el.btnZoomP2.textContent = '16×'; el.btnZoomP2.title = '16× Sub-Fleet Sector (~65,536 actors)'; }
       if (el.btnZoomP3) { el.btnZoomP3.dataset.zoom = '128'; el.btnZoomP3.textContent = '128×'; el.btnZoomP3.title = '128× Cohort Tiles (~1,024 actors with Pod & QR markers)'; }
-      if (el.btnZoomP4) { el.btnZoomP4.dataset.zoom = '256'; el.btnZoomP4.textContent = '256×'; el.btnZoomP4.title = '256× Inspector Mini-Cards (~256 actors with ID, State & Pod)'; }
+      if (el.btnZoomP4) { el.btnZoomP4.dataset.zoom = '256'; el.btnZoomP4.textContent = '256×'; el.btnZoomP4.title = '256× Cohort Tiles (~256 actors)'; }
+      if (el.btnZoomP5) { el.btnZoomP5.hidden = false; el.btnZoomP5.dataset.zoom = '512'; el.btnZoomP5.textContent = '512×'; el.btnZoomP5.title = '512× Actor Number Cards (~64 actors)'; }
+      if (el.btnZoomP6) { el.btnZoomP6.hidden = false; el.btnZoomP6.dataset.zoom = '1024'; el.btnZoomP6.textContent = '1024×'; el.btnZoomP6.title = '1024× Detailed Actor Cards (~16 actors with State, Pod & GCS info)'; }
     } else {
       if (el.btnZoomP1) { el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (All 65,536 actors)'; }
       if (el.btnZoomP2) { el.btnZoomP2.dataset.zoom = '4'; el.btnZoomP2.textContent = '4×'; el.btnZoomP2.title = '4× Cohort Tiles (~4,096 actors)'; }
       if (el.btnZoomP3) { el.btnZoomP3.dataset.zoom = '16'; el.btnZoomP3.textContent = '16×'; el.btnZoomP3.title = '16× Inspector Mini-Cards (~256 actors)'; }
       if (el.btnZoomP4) { el.btnZoomP4.dataset.zoom = '32'; el.btnZoomP4.textContent = '32×'; el.btnZoomP4.title = '32× Detailed Actor Cards (~64 actors)'; }
+      if (el.btnZoomP5) { el.btnZoomP5.hidden = true; }
+      if (el.btnZoomP6) { el.btnZoomP6.hidden = true; }
     }
   }
 
@@ -1624,7 +1630,7 @@
     const idx0 = idx1 - 1;
     const row = Math.floor(idx0 / canvasCols);
     const col = idx0 % canvasCols;
-    const defaultCardZoom = total > 65536 ? 256 : 16;
+    const defaultCardZoom = total > 65536 ? 512 : 16;
     const desiredZoom = targetZoom && targetZoom > 16 ? targetZoom : defaultCardZoom;
     fleetZoom = Math.max(desiredZoom, fleetZoom >= desiredZoom ? fleetZoom : desiredZoom);
     fleetPanX = ((col + 0.5) / canvasCols) - 0.5 / fleetZoom;
@@ -2127,7 +2133,11 @@
     const startRow = Math.max(0, Math.floor(fleetPanY * canvasRows));
     const endRow = Math.min(canvasRows - 1, Math.ceil((fleetPanY + 1 / fleetZoom) * canvasRows));
 
-    const isCardTier = cssCellW >= 26 && cssCellH >= 20;
+    const isHyperFleet = total > 65536;
+    const isCardTier = isHyperFleet
+      ? (fleetZoom >= 450 || (cssCellW >= 48 && cssCellH >= 24))
+      : (cssCellW >= 26 && cssCellH >= 20);
+    const isNumberOnlyCard = isHyperFleet && fleetZoom < 900;
     const isTileTier = !isCardTier && cssCellW >= 5.5;
     const gapX = isCardTier ? Math.max(2 * dpr, cellW * 0.08) : (cellW >= 3 ? Math.min(2.2 * dpr, Math.max(0.65 * dpr, cellW * 0.1)) : 0);
     const gapY = isCardTier ? Math.max(2 * dpr, cellH * 0.08) : (cellH >= 3 ? Math.min(2.2 * dpr, Math.max(0.65 * dpr, cellH * 0.1)) : 0);
@@ -2189,45 +2199,104 @@
             ctx.clip();
             ctx.textBaseline = 'top';
 
-            const idFontPx = Math.round(Math.max(7.0, Math.min(11.5, Math.min(cssCellW * 0.19, cssCellH * 0.30))) * dpr);
-            ctx.font = '800 ' + idFontPx + 'px "JetBrains Mono", monospace';
-            ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
-            ctx.fillText('#' + idx1, x + 3.5 * dpr, y + barH + 1.5 * dpr);
+            if (isNumberOnlyCard) {
+              // At 512x zoom on 16.8M grid: render ONLY the actor number (#idx1) to prevent any text overlap
+              const availH = Math.max(8 * dpr, dotH - barH);
+              const idFontPx = Math.round(Math.max(7.0 * dpr, Math.min(12.0 * dpr, Math.min(dotW * 0.14, availH * 0.54))));
+              ctx.font = '800 ' + idFontPx + 'px "JetBrains Mono", monospace';
+              ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
+              const textY = y + barH + Math.max(1 * dpr, Math.floor((availH - idFontPx) * 0.5));
+              ctx.fillText('#' + idx1, x + 4 * dpr, textY);
 
-            if (leased || isQRSlot) {
-              const badgeColor = leased ? '#f59e0b' : (isLight ? '#0284c7' : '#00ffcc');
-              if (cssCellW >= 52) {
-                ctx.font = '800 ' + Math.round(7.5 * dpr) + 'px "JetBrains Mono", monospace';
-                ctx.fillStyle = badgeColor;
-                const bTxt = leased ? 'LIVE' : 'QR';
-                const tw = ctx.measureText(bTxt).width;
-                ctx.fillText(bTxt, x + dotW - tw - 3.5 * dpr, y + barH + 2 * dpr);
-              } else {
+              if (leased || isQRSlot) {
+                const badgeColor = leased ? '#f59e0b' : (isLight ? '#0284c7' : '#00ffcc');
                 const pip = Math.max(3, Math.round(4 * dpr));
                 ctx.fillStyle = badgeColor;
-                ctx.fillRect(x + dotW - pip - 2 * dpr, y + barH + 2 * dpr, pip, pip);
+                ctx.fillRect(x + dotW - pip - 2.5 * dpr, y + barH + 2.5 * dpr, pip, pip);
               }
-            }
+            } else {
+              // At 1024x zoom (or 16x/32x on 65k grid): render full multi-line actor inspector card
+              const idFontPx = Math.round(Math.max(7.0, Math.min(12.0, Math.min(cssCellW * 0.18, cssCellH * 0.24))) * dpr);
+              ctx.font = '800 ' + idFontPx + 'px "JetBrains Mono", monospace';
+              ctx.fillStyle = isLight ? '#0f172a' : '#f8fafc';
+              const idHeaderText = cssCellW >= 185 ? ('#' + idx1 + ' · ' + actorId) : ('#' + idx1);
+              ctx.fillText(idHeaderText, x + 4 * dpr, y + barH + 2 * dpr);
 
-            const stateFontPx = Math.round(Math.max(6.5, Math.min(10.0, Math.min(cssCellW * 0.17, cssCellH * 0.25))) * dpr);
-            ctx.font = '800 ' + stateFontPx + 'px "JetBrains Mono", monospace';
-            ctx.fillStyle = color;
-            const stLabel = cssCellW >= 54 ? (STATE_FULL_LABELS[code] || 'ACTIVE') : (STATE_SHORT_LABELS[code] || 'ACT');
-            ctx.fillText(stLabel, x + 3.5 * dpr, y + barH + idFontPx + 2.5 * dpr);
+              if (leased || isQRSlot || (cssCellW >= 150 && (onPod || code === 1 || code === 6))) {
+                const badgeColor = leased
+                  ? '#f59e0b'
+                  : (onPod
+                      ? (isLight ? '#059669' : '#10b981')
+                      : (code === 1 || code === 6
+                          ? (isLight ? '#0284c7' : '#38bdf8')
+                          : (isLight ? '#0284c7' : '#00ffcc')));
+                if (cssCellW >= 52) {
+                  ctx.font = '800 ' + Math.round(7.5 * dpr) + 'px "JetBrains Mono", monospace';
+                  ctx.fillStyle = badgeColor;
+                  const bTxt = leased
+                    ? (cssCellW >= 150 ? 'LIVE LEASE' : 'LIVE')
+                    : (onPod && cssCellW >= 150
+                        ? 'ON POD'
+                        : ((code === 1 || code === 6) && cssCellW >= 150
+                            ? 'GCS SNAP'
+                            : (isQRSlot ? (cssCellW >= 150 ? 'QR SLOT' : 'QR') : '')));
+                  if (bTxt) {
+                    const tw = ctx.measureText(bTxt).width;
+                    ctx.fillText(bTxt, x + dotW - tw - 4 * dpr, y + barH + 2.5 * dpr);
+                  }
+                } else {
+                  const pip = Math.max(3, Math.round(4 * dpr));
+                  ctx.fillStyle = badgeColor;
+                  ctx.fillRect(x + dotW - pip - 2 * dpr, y + barH + 2 * dpr, pip, pip);
+                }
+              }
 
-            if (cssCellH >= 34) {
-              const metaFontPx = Math.round(Math.max(6.5, Math.min(9.5, cssCellW * 0.15)) * dpr);
-              ctx.font = '700 ' + metaFontPx + 'px "JetBrains Mono", monospace';
-              const metaY = y + dotH - metaFontPx - 3 * dpr;
-              if (sPod) {
-                ctx.fillStyle = isLight ? '#0369a1' : '#38bdf8';
-                ctx.fillText(sPod, x + 3.5 * dpr, metaY);
-              } else if (code === 6 || code === 1) {
-                ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
-                ctx.fillText(cssCellW >= 52 ? 'gcs://snap' : 'GCS', x + 3.5 * dpr, metaY);
-              } else if (isQRSlot) {
-                ctx.fillStyle = isLight ? '#0284c7' : '#00ffcc';
-                ctx.fillText('QR ' + latestHumanSlotStride + 'x', x + 3.5 * dpr, metaY);
+              const stateFontPx = Math.round(Math.max(6.5, Math.min(10.5, Math.min(cssCellW * 0.16, cssCellH * 0.21))) * dpr);
+              ctx.font = '800 ' + stateFontPx + 'px "JetBrains Mono", monospace';
+              ctx.fillStyle = color;
+              let stLabel = cssCellW >= 54 ? (STATE_FULL_LABELS[code] || 'ACTIVE') : (STATE_SHORT_LABELS[code] || 'ACT');
+              if (cssCellW >= 165) {
+                if (code === 5) stLabel = 'THINKING · Gemini Turn';
+                else if (code === 7) stLabel = 'EXECUTING · Tool Call';
+                else if (code === 6) stLabel = 'AWAITING · Approval (GCS)';
+                else if (code === 4) stLabel = 'RUNNING · Active Seat';
+                else if (code === 2) stLabel = 'RESUMING · Hydrating GCS';
+                else if (code === 3) stLabel = 'SUSPENDING · Saving GCS';
+                else if (code === 1) stLabel = 'GCS SNAP · Suspended (0 RAM)';
+                else if (code === 0) stLabel = 'READY · Never Started';
+                else if (code === 8) stLabel = 'CRASHED · Faulted';
+              }
+              const stateY = y + barH + idFontPx + 3.5 * dpr;
+              ctx.fillText(stLabel, x + 4 * dpr, stateY);
+
+              if (cssCellH >= 34) {
+                const metaFontPx = Math.round(Math.max(6.5, Math.min(9.5, cssCellW * 0.14)) * dpr);
+                const metaY = y + dotH - metaFontPx - 3.5 * dpr;
+                if (metaY >= stateY + stateFontPx + 2.5 * dpr) {
+                  ctx.font = '700 ' + metaFontPx + 'px "JetBrains Mono", monospace';
+                  if (sPod) {
+                    ctx.fillStyle = isLight ? '#0369a1' : '#38bdf8';
+                    const podDetail = (cssCellW >= 180 && podName)
+                      ? ('Pod: ' + podName + (seatInfo && seatInfo.seatIndex ? (' · Seat ' + seatInfo.seatIndex + '/' + latestSeatsPerWorker) : ''))
+                      : sPod;
+                    ctx.fillText(podDetail, x + 4 * dpr, metaY);
+                  } else if (onPod) {
+                    ctx.fillStyle = isLight ? '#0369a1' : '#38bdf8';
+                    ctx.fillText(cssCellW >= 160 ? 'Active worker seat · Click for Spotlight' : 'ON POD', x + 4 * dpr, metaY);
+                  } else if (code === 6 || code === 1) {
+                    ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+                    const gcsLabel = cssCellW >= 180
+                      ? ('gcs://snapshots/' + actorId + '.tar.zst')
+                      : (cssCellW >= 52 ? 'gcs://snap' : 'GCS');
+                    ctx.fillText(gcsLabel, x + 4 * dpr, metaY);
+                  } else if (isQRSlot) {
+                    ctx.fillStyle = isLight ? '#0284c7' : '#00ffcc';
+                    ctx.fillText(cssCellW >= 160 ? ('QR Slot (1/' + latestHumanSlotStride + ') · Reserved for scan') : ('QR ' + latestHumanSlotStride + 'x'), x + 4 * dpr, metaY);
+                  } else if (cssCellW >= 170) {
+                    ctx.fillStyle = isLight ? '#64748b' : '#94a3b8';
+                    ctx.fillText('0 B footprint · Click to inspect', x + 4 * dpr, metaY);
+                  }
+                }
               }
             }
             ctx.restore();
@@ -2299,7 +2368,7 @@
 
     if (el.fleetSub) {
       const visibleActors = (endCol - startCol + 1) * (endRow - startRow + 1);
-      const zoomPresetsHint = total > 65536 ? '16×/128×/256×' : '4×/16×/32×';
+      const zoomPresetsHint = total > 65536 ? '16×/128×/256×/512×/1024×' : '4×/16×/32×';
       const zoomNote = fleetZoom > 1.02
         ? (' · viewing ' + visibleActors.toLocaleString() + ' at ' + (fleetZoom < 10 ? fleetZoom.toFixed(1).replace(/\.0$/, '') : Math.round(fleetZoom)) + '× (drag to pan)')
         : (total > 65536 ? (' · zoom ' + zoomPresetsHint) : (' · scroll or click ' + zoomPresetsHint + ' to zoom'));
@@ -3230,7 +3299,7 @@
       el.fleetJumpInput.focus();
       return;
     }
-    focusActorOnFleetCanvas(num, total > 65536 ? 256 : 16);
+    focusActorOnFleetCanvas(num, total > 65536 ? 512 : 16);
   }
 
   function initControls() {
@@ -3477,7 +3546,7 @@
               setStagePaneLayout('split');
             }
             switchViewMode('grid');
-            focusActorOnFleetCanvas(actorId, latestActorCount > 65536 ? 256 : 16);
+            focusActorOnFleetCanvas(actorId, latestActorCount > 65536 ? 512 : 16);
           }
           return;
         }
@@ -3503,7 +3572,7 @@
         if (podActorCard) {
           const actorId = podActorCard.dataset.actor;
           if (actorId) {
-            const minCardZoom = latestActorCount > 65536 ? 256 : 16;
+            const minCardZoom = latestActorCount > 65536 ? 512 : 16;
             focusActorOnFleetCanvas(actorId, Math.max(fleetZoom, minCardZoom));
             openSpotlightDrawer(actorId);
           }
@@ -3583,7 +3652,7 @@
     }
     if (el.btnFleetZoomIn) {
       el.btnFleetZoomIn.addEventListener('click', function() {
-        const steps = latestActorCount > 65536 ? [2, 4, 8, 16, 32, 64, 128, 256, 512] : [2, 4, 8, 16, 32];
+        const steps = latestActorCount > 65536 ? [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] : [2, 4, 8, 16, 32];
         let next = steps[steps.length - 1];
         for (let i = 0; i < steps.length; i++) {
           if (fleetZoom < steps[i] - 0.05) {
@@ -3596,7 +3665,7 @@
     }
     if (el.btnFleetZoomOut) {
       el.btnFleetZoomOut.addEventListener('click', function() {
-        const steps = latestActorCount > 65536 ? [1, 2, 4, 8, 16, 32, 64, 128, 256] : [1, 2, 4, 8, 16];
+        const steps = latestActorCount > 65536 ? [1, 2, 4, 8, 16, 32, 64, 128, 256, 512] : [1, 2, 4, 8, 16];
         let prev = 1;
         for (let i = steps.length - 1; i >= 0; i--) {
           if (fleetZoom > steps[i] + 0.05) {
@@ -3725,7 +3794,7 @@
         const uvY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
         let nextZoom;
         if (latestActorCount > 65536) {
-          nextZoom = fleetZoom < 12 ? 16 : (fleetZoom < 96 ? 128 : (fleetZoom < 220 ? 256 : 1));
+          nextZoom = fleetZoom < 12 ? 16 : (fleetZoom < 96 ? 128 : (fleetZoom < 380 ? 512 : (fleetZoom < 900 ? 1024 : 1)));
         } else {
           nextZoom = fleetZoom < 3.5 ? 4 : (fleetZoom < 14 ? 16 : (fleetZoom < 28 ? 32 : 1));
         }
