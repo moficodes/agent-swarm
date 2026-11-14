@@ -448,22 +448,29 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 		if _, resuming := b.hyperResuming[name]; resuming {
 			continue
 		}
-		if old.WorkerPod == "" && !b.hyperSuspending[name] {
+		if old.State == types.StateSuspended && old.WorkerPod == "" && !b.hyperSuspending[name] {
 			continue
 		}
+		wasSeatedOrSuspending := old.WorkerPod != "" || b.hyperSuspending[name] || !old.NeverStarted
 		delete(b.hyperSuspending, name)
 		v := old
 		v.State = types.StateSuspended
 		v.StateDetail = ""
 		v.WorkerPod = ""
-		v.NeverStarted = false
-		if v.Activity == types.ActivityExecuting {
+		if wasSeatedOrSuspending {
+			v.NeverStarted = false
+			if v.Activity == types.ActivityExecuting {
+				v.Activity = types.ActivityIdle
+			} else if v.Activity == types.ActivityThinking {
+				v.Activity = types.ActivityAwaitingApproval
+			}
+		} else {
 			v.Activity = types.ActivityIdle
-		} else if v.Activity == types.ActivityThinking {
-			v.Activity = types.ActivityAwaitingApproval
 		}
 		if idx, validIdx := ParseAttendeeIndex(name, b.hyperCount); validIdx {
-			b.compact[idx-1] |= compactCheckpointed
+			if !v.NeverStarted {
+				b.compact[idx-1] |= compactCheckpointed
+			}
 			b.syncCompactFromViewLocked(idx, v)
 		}
 		if b.shouldRetainInHyperMap(v) {
@@ -531,7 +538,7 @@ func (b *Board) SetActivity(actor string, a types.Activity) {
 			if (v.State == types.StateResuming || v.State == types.StateRunning) && a == types.ActivityIdle && v.WorkerPod == "" {
 				delete(b.hyperResuming, actor)
 				v.State = types.StateSuspended
-			} else if v.State == types.StateResuming {
+			} else if v.State == types.StateResuming && v.WorkerPod != "" {
 				v.State = types.StateRunning
 			}
 			if v.WorkerPod != "" || a == types.ActivityIdle || v.State == types.StateSuspended {
@@ -586,10 +593,8 @@ func (b *Board) PromoteHyperResume(actor string) {
 		if !ok {
 			return
 		}
-		if v.WorkerPod != "" {
-			delete(b.hyperResuming, actor)
-		}
-		if v.State == types.StateResuming {
+		delete(b.hyperResuming, actor)
+		if v.WorkerPod != "" && v.State == types.StateResuming {
 			v.State = types.StateRunning
 		}
 		if v.Activity == types.ActivityIdle && pendAct != types.ActivityIdle {
@@ -638,7 +643,7 @@ func (b *Board) FinishHyperSuspend(actor string, succeeded bool) {
 			if v.WorkerPod != "" {
 				v.State = types.StateRunning
 			} else {
-				if v.Activity == types.ActivityExecuting {
+				if v.Activity == types.ActivityExecuting || v.Activity == types.ActivityThinking {
 					v.Activity = types.ActivityIdle
 				}
 				v.State = types.StateSuspended

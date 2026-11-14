@@ -359,7 +359,9 @@ type Gateway struct {
 	mockThinkMin         time.Duration
 	mockThinkMax         time.Duration
 	statePollMs          atomic.Int64
+	firstActivePollDone  atomic.Bool
 	unseatedSimInFlight  atomic.Int64
+	lastActionSampleNano atomic.Int64
 
 	mux         *http.ServeMux
 	proxy       *actorproxy.Proxy
@@ -488,7 +490,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 			simOpts = append(simOpts, WithDataGeneratorExecutor(gw.dataGeneratorURL, gw.simulationTurnURL, gw.presenterKey))
 		}
 		if gw.maxActors > actorstate.HyperFleetThreshold {
-			simOpts = append(simOpts, WithSimulationMaxConcurrentTurns(300000))
+			simOpts = append(simOpts, WithSimulationMaxConcurrentTurns(32768))
 			if gw.maxSimulationMPS > 0 {
 				simOpts = append(simOpts, WithSimulationMaxTargetMPS(gw.maxSimulationMPS))
 			}
@@ -579,6 +581,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 			actorstate.Poll(ctx, gw.control, gw.pollInterval, gw.board, func(d time.Duration, err error) {
 				gw.statePollMs.Store(d.Milliseconds())
 				if err == nil {
+					gw.firstActivePollDone.Store(true)
 					now := time.Now()
 					if gw.maxActors > actorstate.HyperFleetThreshold {
 						if !lastReconcile.IsZero() && now.Sub(lastReconcile) < 5*time.Second {

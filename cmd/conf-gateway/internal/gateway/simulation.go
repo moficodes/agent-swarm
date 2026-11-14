@@ -33,6 +33,9 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 	if g.maxActors <= 256 {
 		return true
 	}
+	if g.maxActors > actorstate.HyperFleetThreshold && g.control != nil && !g.firstActivePollDone.Load() {
+		return false
+	}
 	totalSeats := 4096
 	if g.maxActors > actorstate.HyperFleetThreshold {
 		totalSeats = 262144
@@ -97,6 +100,9 @@ func (g *Gateway) CanAcquireSimulatedSeat() bool {
 func (g *Gateway) CanAcquireSimulatedApproveSeat() bool {
 	if g.maxActors <= actorstate.HyperFleetThreshold {
 		return g.CanAcquireSimulatedSeat()
+	}
+	if g.control != nil && !g.firstActivePollDone.Load() {
+		return false
 	}
 	totalSeats := 262144
 	if p := g.workerPods.Load(); p != nil && p.Available && p.Current > 0 && g.seatsPerWorker > 0 {

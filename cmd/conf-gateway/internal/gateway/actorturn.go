@@ -257,6 +257,22 @@ func (g *Gateway) shouldRecordAction(attendeeID, actionID string, isStart bool) 
 	if g.maxActors <= 256 || attendeeID == "attendee-01" || g.IsLeased(attendeeID) {
 		return true
 	}
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		if !isStart {
+			g.mu.RLock()
+			ok := g.sampledActions[actionID]
+			g.mu.RUnlock()
+			return ok
+		}
+		nowNano := time.Now().UnixNano()
+		last := g.lastActionSampleNano.Load()
+		if nowNano-last < int64(80*time.Millisecond) {
+			return false
+		}
+		if !g.lastActionSampleNano.CompareAndSwap(last, nowNano) {
+			return false
+		}
+	}
 	g.mu.RLock()
 	sc := g.simController
 	g.mu.RUnlock()
@@ -276,7 +292,7 @@ func (g *Gateway) shouldRecordAction(attendeeID, actionID string, isStart bool) 
 		return false
 	}
 	now := time.Now()
-	if now.Sub(g.lastActionSample) < 80*time.Millisecond {
+	if g.maxActors <= actorstate.HyperFleetThreshold && now.Sub(g.lastActionSample) < 80*time.Millisecond {
 		return false
 	}
 	g.lastActionSample = now

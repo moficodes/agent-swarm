@@ -34,13 +34,6 @@ func (g *Gateway) beginTurn(attendee string) uint64 {
 	g.turnsInFlight[attendee]++
 	g.nextTurnSeq++
 	seq := g.nextTurnSeq
-	if g.maxActors > actorstate.HyperFleetThreshold && len(g.turnSeq) >= 65536 {
-		for k := range g.turnSeq {
-			if g.turnsInFlight[k] == 0 && g.suspendTimers[k] == nil && g.suspendsInFlight[k] == 0 {
-				delete(g.turnSeq, k)
-			}
-		}
-	}
 	g.turnSeq[attendee] = seq
 	delete(g.runningIdleSince, attendee)
 	if t, ok := g.suspendTimers[attendee]; ok {
@@ -74,6 +67,9 @@ func (g *Gateway) endTurnWithOpts(attendee string, _, _ bool) {
 // suspendAfter is zero, or after suspendAfter of idleness. g.mu must be held.
 func (g *Gateway) suspendAfterTurnLocked(attendee string) {
 	if g.control == nil || g.closed {
+		if g.turnsInFlight[attendee] == 0 && g.suspendTimers[attendee] == nil && g.suspendsInFlight[attendee] == 0 {
+			delete(g.turnSeq, attendee)
+		}
 		return
 	}
 	seq := g.turnSeq[attendee]
@@ -207,18 +203,6 @@ func (g *Gateway) suspendActor(attendee string) {
 	}()
 
 	isHyperAutomated := g.maxActors > actorstate.HyperFleetThreshold && !g.IsLeased(attendee) && !isReservedHumanSlotID(attendee, g.maxActors, g.HumanSlotStride())
-	if isHyperAutomated && g.board != nil {
-		if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && g.board.ActiveSeatCount() < 208000 {
-			if sr := g.SimulationRunner(); sr != nil {
-				if simRunning, _ := sr.Status(); simRunning {
-					if v, ok := g.board.View(attendee); ok && v.Activity != types.ActivityAwaitingApproval && v.Activity != types.ActivityThinking {
-						g.scheduleSuspendRetry(attendee)
-						return
-					}
-				}
-			}
-		}
-	}
 
 	if !g.paceAutomatedSuspend(g.suspendCtx, attendee) {
 		return
@@ -510,16 +494,10 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 	if g.maxActors > actorstate.HyperFleetThreshold && threshold > 5*time.Second {
 		threshold = 5 * time.Second
 	}
-	maxSweep := 4096
-	if g.maxActors > 262144 {
-		if g.board != nil && g.board.ActiveSeatCount() < 205000 {
-			maxSweep = 0
-		} else if g.suspendSem != nil {
-			spare := cap(g.suspendSem)/2 - len(g.suspendSem)
-			maxSweep = min(2048, max(0, spare))
-		} else {
-			maxSweep = 2048
-		}
+	maxSweep := 8192
+	if g.maxActors > 262144 && g.suspendSem != nil {
+		spare := cap(g.suspendSem) - len(g.suspendSem)
+		maxSweep = min(8192, max(0, spare))
 	}
 	for _, name := range candidates {
 		v, ok := views[name]
