@@ -45,7 +45,16 @@ const (
 	canaryLabelKey     = "podcert.ate.dev/canarying"
 	canaryLabelLive    = "live"
 	controlConnPoolLen = 32
+	activeConnPoolLen  = 16
 )
+
+type cachedWorkerAssignments struct {
+	version         int64
+	allocatedActors int32
+	pod             string
+	statuses        []Status
+	fetchedAt       time.Time
+}
 
 // GRPCControl implements ActorControl directly over gRPC to ate-api-server,
 // caching the minted ate-client bearer token and reusing persistent HTTP/2
@@ -56,14 +65,20 @@ type GRPCControl struct {
 	atespace  string
 	caFile    string
 
-	mu          sync.Mutex
-	listConn    *grpc.ClientConn
-	listClient  ateapi.ControlClient
-	conns       []*grpc.ClientConn
-	clients     []ateapi.ControlClient
-	rrSeq       atomic.Uint64
-	cachedToken string
-	tokenExpiry time.Time
+	mu            sync.Mutex
+	listConn      *grpc.ClientConn
+	listClient    ateapi.ControlClient
+	activeConns   []*grpc.ClientConn
+	activeClients []ateapi.ControlClient
+	activeRRSeq   atomic.Uint64
+	conns         []*grpc.ClientConn
+	clients       []ateapi.ControlClient
+	rrSeq         atomic.Uint64
+	cachedToken   string
+	tokenExpiry   time.Time
+
+	workerCacheMu sync.Mutex
+	workerCache   map[string]cachedWorkerAssignments
 }
 
 // NewGRPCControl returns a persistent gRPC ActorControl client.
@@ -78,10 +93,11 @@ func NewGRPCControl(k8sClient kubernetes.Interface, endpoint, atespace, caFile s
 		atespace = "default"
 	}
 	return &GRPCControl{
-		k8sClient: k8sClient,
-		endpoint:  endpoint,
-		atespace:  atespace,
-		caFile:    caFile,
+		k8sClient:   k8sClient,
+		endpoint:    endpoint,
+		atespace:    atespace,
+		caFile:      caFile,
+		workerCache: make(map[string]cachedWorkerAssignments),
 	}, nil
 }
 
@@ -97,6 +113,15 @@ func (g *GRPCControl) Close() error {
 		g.listConn = nil
 		g.listClient = nil
 	}
+	for _, conn := range g.activeConns {
+		if conn != nil {
+			if err := conn.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	g.activeConns = nil
+	g.activeClients = nil
 	for _, conn := range g.conns {
 		if conn != nil {
 			if err := conn.Close(); err != nil && firstErr == nil {
@@ -291,6 +316,53 @@ func (g *GRPCControl) getClient(ctx context.Context) (ateapi.ControlClient, erro
 	return c, nil
 }
 
+func (g *GRPCControl) getActiveClient(ctx context.Context) (ateapi.ControlClient, error) {
+	g.mu.Lock()
+	if len(g.activeClients) > 0 {
+		idx := int(g.activeRRSeq.Add(1) % uint64(len(g.activeClients)))
+		c := g.activeClients[idx]
+		g.mu.Unlock()
+		return c, nil
+	}
+	g.mu.Unlock()
+
+	pool, err := g.loadCertPool(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	conns := make([]*grpc.ClientConn, 0, activeConnPoolLen)
+	clients := make([]ateapi.ControlClient, 0, activeConnPoolLen)
+	for i := 0; i < activeConnPoolLen; i++ {
+		conn, dialErr := g.dialConn(pool)
+		if dialErr != nil {
+			for _, c := range conns {
+				_ = c.Close()
+			}
+			return nil, dialErr
+		}
+		conns = append(conns, conn)
+		clients = append(clients, ateapi.NewControlClient(conn))
+	}
+
+	g.mu.Lock()
+	if len(g.activeClients) > 0 {
+		idx := int(g.activeRRSeq.Add(1) % uint64(len(g.activeClients)))
+		c := g.activeClients[idx]
+		g.mu.Unlock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+		return c, nil
+	}
+	g.activeConns = conns
+	g.activeClients = clients
+	idx := int(g.activeRRSeq.Add(1) % uint64(len(g.activeClients)))
+	c := g.activeClients[idx]
+	g.mu.Unlock()
+	return c, nil
+}
+
 // List returns every actor in the atespace by paging ListActors over gRPC.
 func (g *GRPCControl) List(ctx context.Context) ([]Status, error) {
 	client, err := g.getListClient(ctx)
@@ -347,16 +419,21 @@ func (g *GRPCControl) Get(ctx context.Context, name string) (Status, error) {
 
 // ListActiveSeats lists only actors currently assigned to worker pods in the
 // target atespace by querying ListWorkers (~5 pages at 4,096 pods) and fanning
-// out ListWorkerActorAssignments across occupied workers. This avoids paging
-// 16,777,216 idle suspended actors on every poll tick.
+// out ListWorkerActorAssignments across occupied workers whose version or seat
+// count changed since the previous poll. This avoids paging 16,777,216 idle
+// suspended actors on every poll tick and prevents straggler workers from
+// blocking or failing active seat discovery.
 func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
-	if _, err := g.getClient(ctx); err != nil {
+	if _, err := g.getActiveClient(ctx); err != nil {
 		return nil, err
 	}
 
 	type occupiedWorker struct {
-		name string
-		pod  string
+		name            string
+		pod             string
+		version         int64
+		allocatedActors int32
+		fallback        []Status
 	}
 	var occupied []occupiedWorker
 	var pageToken string
@@ -366,7 +443,7 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 			err  error
 		)
 		for attempt := 0; attempt < 3; attempt++ {
-			listClient, cErr := g.getClient(ctx)
+			listClient, cErr := g.getActiveClient(ctx)
 			if cErr != nil {
 				err = cErr
 				break
@@ -395,8 +472,10 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 				continue
 			}
 			occupied = append(occupied, occupiedWorker{
-				name: w.GetMetadata().GetName(),
-				pod:  w.GetWorkerPod(),
+				name:            w.GetMetadata().GetName(),
+				pod:             w.GetWorkerPod(),
+				version:         w.GetMetadata().GetVersion(),
+				allocatedActors: alloc.GetActors(),
 			})
 		}
 		pageToken = resp.GetNextPageToken()
@@ -405,20 +484,52 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 		}
 	}
 
-	if len(occupied) == 0 {
-		return nil, nil
+	now := time.Now()
+	occupiedSet := make(map[string]struct{}, len(occupied))
+	toFetch := make([]occupiedWorker, 0, len(occupied))
+	var out []Status
+
+	g.workerCacheMu.Lock()
+	for _, ow := range occupied {
+		occupiedSet[ow.name] = struct{}{}
+		if cached, ok := g.workerCache[ow.name]; ok {
+			if cached.version > 0 &&
+				cached.version == ow.version &&
+				cached.allocatedActors == ow.allocatedActors &&
+				cached.pod == ow.pod &&
+				now.Sub(cached.fetchedAt) < 25*time.Second {
+				out = append(out, cached.statuses...)
+				continue
+			}
+			if ow.allocatedActors > 0 && len(cached.statuses) > 0 {
+				ow.fallback = cached.statuses
+			}
+		}
+		toFetch = append(toFetch, ow)
+	}
+	for name := range g.workerCache {
+		if _, ok := occupiedSet[name]; !ok {
+			delete(g.workerCache, name)
+		}
+	}
+	g.workerCacheMu.Unlock()
+
+	if len(toFetch) == 0 {
+		return out, nil
 	}
 
-	workerCh := make(chan occupiedWorker, len(occupied))
-	for _, ow := range occupied {
+	fanoutCtx, cancelFanout := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelFanout()
+
+	workerCh := make(chan occupiedWorker, len(toFetch))
+	for _, ow := range toFetch {
 		workerCh <- ow
 	}
 	close(workerCh)
 
-	concurrency := min(len(occupied), 64)
+	concurrency := min(len(toFetch), 64)
 	var (
 		resMu            sync.Mutex
-		out              []Status
 		firstErr         error
 		completedWorkers int
 		wg               sync.WaitGroup
@@ -428,13 +539,16 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 		go func() {
 			defer wg.Done()
 			for ow := range workerCh {
-				if ctx.Err() != nil {
+				if fanoutCtx.Err() != nil {
 					resMu.Lock()
 					if firstErr == nil {
-						firstErr = ctx.Err()
+						firstErr = fanoutCtx.Err()
+					}
+					if len(ow.fallback) > 0 {
+						out = append(out, ow.fallback...)
 					}
 					resMu.Unlock()
-					return
+					continue
 				}
 				var tok string
 				var local []Status
@@ -445,16 +559,16 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 						aErr  error
 					)
 					for attempt := 0; attempt < 2; attempt++ {
-						c, cErr := g.getClient(ctx)
+						c, cErr := g.getActiveClient(fanoutCtx)
 						if cErr != nil {
 							aErr = cErr
 							break
 						}
-						timeout := 3 * time.Second
+						timeout := 2500 * time.Millisecond
 						if attempt > 0 {
-							timeout = 2 * time.Second
+							timeout = 1500 * time.Millisecond
 						}
-						callCtx, cancel := context.WithTimeout(ctx, timeout)
+						callCtx, cancel := context.WithTimeout(fanoutCtx, timeout)
 						aResp, aErr = c.ListWorkerActorAssignments(callCtx, &ateapi.ListWorkerActorAssignmentsRequest{
 							Worker: &ateapi.ObjectRef{Name: ow.name},
 							Options: &ateapi.ListOptions{
@@ -463,7 +577,7 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 							},
 						})
 						cancel()
-						if aErr == nil || strings.Contains(aErr.Error(), "NotFound") || ctx.Err() != nil {
+						if aErr == nil || strings.Contains(aErr.Error(), "NotFound") || fanoutCtx.Err() != nil {
 							break
 						}
 					}
@@ -500,20 +614,32 @@ func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
 					}
 				}
 				if !workerFailed {
+					g.workerCacheMu.Lock()
+					g.workerCache[ow.name] = cachedWorkerAssignments{
+						version:         ow.version,
+						allocatedActors: ow.allocatedActors,
+						pod:             ow.pod,
+						statuses:        local,
+						fetchedAt:       now,
+					}
+					g.workerCacheMu.Unlock()
+
 					resMu.Lock()
 					completedWorkers++
 					if len(local) > 0 {
 						out = append(out, local...)
 					}
 					resMu.Unlock()
+				} else if len(ow.fallback) > 0 {
+					resMu.Lock()
+					out = append(out, ow.fallback...)
+					resMu.Unlock()
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	missedWorkers := len(occupied) - completedWorkers
-	maxToleratedFailures := max(8, len(occupied)/40)
-	if firstErr != nil && (ctx.Err() != nil || len(out) == 0 || missedWorkers > maxToleratedFailures) {
+	if firstErr != nil && (ctx.Err() != nil || (len(out) == 0 && completedWorkers == 0)) {
 		return nil, firstErr
 	}
 	return out, nil
