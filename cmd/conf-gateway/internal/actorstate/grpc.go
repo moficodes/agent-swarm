@@ -30,6 +30,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
+	_ "google.golang.org/grpc/balancer/roundrobin"
 	"google.golang.org/grpc/credentials"
 	authv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -194,10 +195,15 @@ func (g *GRPCControl) dialConn(pool *x509.CertPool) (*grpc.ClientConn, error) {
 		ServerName: ateAPIAudience,
 		MinVersion: tls.VersionTLS12,
 	}
+	target := g.endpoint
+	if !strings.Contains(target, "://") {
+		target = "dns:///" + target
+	}
 	conn, err := grpc.NewClient(
-		g.endpoint,
+		target,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 		grpc.WithPerRPCCredentials(dynamicTokenAuth{control: g}),
+		grpc.WithDefaultServiceConfig(`{"loadBalancingConfig":[{"round_robin":{}}]}`),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(32*1024*1024)),
 	)
 	if err != nil {

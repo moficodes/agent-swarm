@@ -58,15 +58,11 @@ func (g *Gateway) endTurn(attendee string) {
 	g.endTurnWithOpts(attendee, false, false)
 }
 
-// endTurnWithOpts marks a turn finished and schedules the actor's suspend
-// (or in hyper mode keeps seated simulated actors cycling when the GCS
-// checkpoint pipeline is saturated).
-func (g *Gateway) endTurnWithOpts(attendee string, useMock, isApprove bool) {
+// endTurnWithOpts marks a turn finished and schedules the actor's suspend.
+func (g *Gateway) endTurnWithOpts(attendee string, useMock, _ bool) {
 	isHyperMock := useMock && g.maxActors > actorstate.HyperFleetThreshold && !isReservedHumanSlotID(attendee, g.maxActors, g.HumanSlotStride())
-	activeSeats := 0
 	isUnseatedSuspended := false
 	if isHyperMock && g.board != nil {
-		activeSeats = g.board.ActiveSeatCount()
 		if v, ok := g.board.View(attendee); ok && v.State == types.StateSuspended && v.WorkerPod == "" {
 			isUnseatedSuspended = true
 		}
@@ -82,53 +78,10 @@ func (g *Gateway) endTurnWithOpts(attendee string, useMock, isApprove bool) {
 
 	exp, hasLease := g.leasedUntil[attendee]
 	isLeased := hasLease && time.Now().Before(exp)
-	if !isHyperMock || isLeased {
-		g.suspendAfterTurnLocked(attendee)
+	if isHyperMock && !isLeased && isUnseatedSuspended {
 		return
 	}
-	if isUnseatedSuspended {
-		return
-	}
-
-	pendingSuspends := len(g.suspendTimers) + len(g.suspendsInFlight)
-	belowSeatFloor := false
-	if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && activeSeats < 225000 {
-		belowSeatFloor = true
-	}
-
-	if !isApprove {
-		if !belowSeatFloor && pendingSuspends < 2048 {
-			g.suspendAfterTurnLocked(attendee)
-		}
-		return
-	}
-
-	if !belowSeatFloor && pendingSuspends < 8192 {
-		g.suspendAfterTurnLocked(attendee)
-		return
-	}
-	g.schedulePostExecActivityHoldLocked(attendee, 6*time.Second)
-}
-
-func (g *Gateway) schedulePostExecActivityHoldLocked(attendee string, d time.Duration) {
-	if g.closed || g.board == nil {
-		return
-	}
-	seq := g.turnSeq[attendee]
-	time.AfterFunc(d, func() {
-		g.mu.RLock()
-		unchanged := !g.closed &&
-			g.turnsInFlight[attendee] == 0 &&
-			g.turnSeq[attendee] == seq &&
-			g.suspendTimers[attendee] == nil &&
-			g.suspendsInFlight[attendee] == 0
-		g.mu.RUnlock()
-		if unchanged {
-			if v, ok := g.board.View(attendee); ok && v.Activity == types.ActivityExecuting {
-				g.board.SetActivity(attendee, types.ActivityIdle)
-			}
-		}
-	})
+	g.suspendAfterTurnLocked(attendee)
 }
 
 // suspendAfterTurnLocked suspends the attendee's actor right away when
@@ -267,6 +220,20 @@ func (g *Gateway) suspendActor(attendee string) {
 		g.mu.Unlock()
 	}()
 
+	isHyperAutomated := g.maxActors > actorstate.HyperFleetThreshold && !g.IsLeased(attendee) && !isReservedHumanSlotID(attendee, g.maxActors, g.HumanSlotStride())
+	if isHyperAutomated && g.board != nil {
+		if p := g.workerPods.Load(); p != nil && p.Available && p.Current >= 1024 && g.board.ActiveSeatCount() < 208000 {
+			if sr := g.SimulationRunner(); sr != nil {
+				if simRunning, _ := sr.Status(); simRunning {
+					if v, ok := g.board.View(attendee); ok && v.Activity != types.ActivityAwaitingApproval {
+						g.scheduleSuspendRetry(attendee)
+						return
+					}
+				}
+			}
+		}
+	}
+
 	if !g.paceAutomatedSuspend(g.suspendCtx, attendee) {
 		return
 	}
@@ -275,6 +242,10 @@ func (g *Gateway) suspendActor(attendee string) {
 		case g.suspendSem <- struct{}{}:
 			defer func() { <-g.suspendSem }()
 		default:
+			if isHyperAutomated {
+				g.scheduleSuspendRetry(attendee)
+				return
+			}
 			select {
 			case g.suspendSem <- struct{}{}:
 				defer func() { <-g.suspendSem }()
@@ -526,7 +497,7 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 	}
 	for name, v := range views {
 		if v.State == types.StateRunning && !g.isBusyLocked(name) {
-			if g.maxActors > actorstate.HyperFleetThreshold && (v.WorkerPod == "" || (v.Activity != types.ActivityIdle && v.Activity != "")) {
+			if g.maxActors > actorstate.HyperFleetThreshold && (v.WorkerPod == "" || (v.Activity != types.ActivityIdle && v.Activity != "" && v.Activity != types.ActivityAwaitingApproval)) {
 				continue
 			}
 			candidates = append(candidates, name)
@@ -536,22 +507,6 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 	g.mu.RUnlock()
 	if len(candidates) == 0 && !hasTracked {
 		return
-	}
-
-	if g.maxActors > actorstate.HyperFleetThreshold && len(candidates) > 0 {
-		if sr := g.SimulationRunner(); sr != nil {
-			remaining := candidates[:0]
-			for _, name := range candidates {
-				if !g.IsLeased(name) && (g.proxy == nil || g.proxy.PendingApproval(name) == nil) && sr.AdoptSeatedActor(name) {
-					continue
-				}
-				remaining = append(remaining, name)
-			}
-			candidates = remaining
-			if len(candidates) == 0 && !hasTracked {
-				return
-			}
-		}
 	}
 
 	var toSuspend []idleTarget
@@ -566,6 +521,9 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 		}
 	}
 	threshold := max(g.stuckRunningAfter, g.suspendAfter)
+	if g.maxActors > actorstate.HyperFleetThreshold && threshold > 5*time.Second {
+		threshold = 5 * time.Second
+	}
 	for _, name := range candidates {
 		v, ok := views[name]
 		if !ok || v.State != types.StateRunning || g.isBusyLocked(name) {
@@ -579,7 +537,7 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 		if now.Sub(since) < threshold {
 			continue
 		}
-		if g.maxActors > 262144 && len(toSuspend) >= 1024 {
+		if g.maxActors > 262144 && len(toSuspend) >= 4096 {
 			break
 		}
 		g.runningIdleSince[name] = now
@@ -591,68 +549,10 @@ func (g *Gateway) reconcileStuckRunningWithViews(now time.Time, views map[string
 	for _, t := range toSuspend {
 		go func() {
 			defer g.suspendWG.Done()
-			if g.maxActors > actorstate.HyperFleetThreshold && !g.IsLeased(t.name) && (g.proxy == nil || g.proxy.PendingApproval(t.name) == nil) {
-				if sr := g.SimulationRunner(); sr != nil && sr.AdoptSeatedActor(t.name) {
-					return
-				}
-				g.reconcileOrphanedHyperRunningActor(t.name, t.seq)
-				return
+			if g.maxActors <= actorstate.HyperFleetThreshold {
+				log.Printf("[gateway] suspending orphaned RUNNING actor %s", t.name)
 			}
-			log.Printf("[gateway] suspending orphaned RUNNING actor %s", t.name)
 			g.suspendIfIdle(t.name, t.seq)
 		}()
 	}
-}
-
-func (g *Gateway) reconcileOrphanedHyperRunningActor(attendee string, seq uint64) {
-	g.mu.Lock()
-	busy := g.turnsInFlight[attendee] > 0 || g.turnSeq[attendee] != seq
-	if !busy {
-		g.suspendsInFlight[attendee]++
-	}
-	g.mu.Unlock()
-	if busy {
-		return
-	}
-	defer func() {
-		g.mu.Lock()
-		g.suspendsInFlight[attendee]--
-		if g.suspendsInFlight[attendee] <= 0 {
-			delete(g.suspendsInFlight, attendee)
-			if g.turnsInFlight[attendee] == 0 && g.suspendTimers[attendee] == nil {
-				delete(g.turnSeq, attendee)
-			}
-		}
-		g.mu.Unlock()
-	}()
-
-	if g.suspendSem != nil {
-		select {
-		case g.suspendSem <- struct{}{}:
-			defer func() { <-g.suspendSem }()
-		default:
-			select {
-			case g.suspendSem <- struct{}{}:
-				defer func() { <-g.suspendSem }()
-			case <-g.suspendCtx.Done():
-				return
-			}
-		}
-	}
-	ctx, cancel := context.WithTimeout(g.suspendCtx, 20*time.Second)
-	defer cancel()
-	err := g.control.Revert(ctx, attendee)
-	if err == nil {
-		if g.board != nil {
-			g.board.FinishHyperSuspend(attendee, true)
-		}
-		return
-	}
-	if strings.Contains(err.Error(), "ACTOR_STATE_SUSPENDED") {
-		if g.board != nil {
-			g.board.FinishHyperSuspend(attendee, true)
-		}
-		return
-	}
-	g.suspendIfIdle(attendee, seq)
 }

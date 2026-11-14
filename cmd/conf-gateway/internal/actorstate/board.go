@@ -456,6 +456,8 @@ func (b *Board) SetActiveStatuses(statuses []Status) {
 		v.NeverStarted = false
 		if v.Activity == types.ActivityExecuting {
 			v.Activity = types.ActivityIdle
+		} else if v.Activity == types.ActivityThinking {
+			v.Activity = types.ActivityAwaitingApproval
 		}
 		if idx, validIdx := ParseAttendeeIndex(name, b.hyperCount); validIdx {
 			b.compact[idx-1] |= compactCheckpointed
@@ -613,6 +615,8 @@ func (b *Board) FinishHyperSuspend(actor string, succeeded bool) {
 		if succeeded {
 			if v.Activity == types.ActivityExecuting {
 				v.Activity = types.ActivityIdle
+			} else if v.Activity == types.ActivityThinking {
+				v.Activity = types.ActivityAwaitingApproval
 			}
 			v.State = types.StateSuspended
 			v.StateDetail = ""

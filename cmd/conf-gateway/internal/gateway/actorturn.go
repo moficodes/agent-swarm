@@ -200,7 +200,7 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 				g.mu.RLock()
 				sameTurn := !g.closed && g.turnSeq[attendeeID] == turnSeq
 				g.mu.RUnlock()
-				if sameTurn && (g.ctx == nil || g.ctx.Err() == nil) {
+				if !isApproveTurn && sameTurn && (g.ctx == nil || g.ctx.Err() == nil) {
 					if sr := g.SimulationRunner(); sr == nil {
 						g.setActivity(attendeeID, types.ActivityAwaitingApproval)
 					} else if running, _ := sr.Status(); running {
@@ -284,6 +284,23 @@ func (g *Gateway) onProxyError(attendeeID string, err error) {
 	g.mu.Unlock()
 }
 
+func (g *Gateway) hyperActiveTurnHold() time.Duration {
+	activeSeats := 0
+	if g.board != nil {
+		activeSeats = g.board.ActiveSeatCount()
+	}
+	switch {
+	case activeSeats < 210000:
+		return 24*time.Second + time.Duration(rand.Int64N(int64(12*time.Second)))
+	case activeSeats < 225000:
+		return 10*time.Second + time.Duration(rand.Int64N(int64(8*time.Second)))
+	case activeSeats < 238000:
+		return 4*time.Second + time.Duration(rand.Int64N(int64(4*time.Second)))
+	default:
+		return 1500*time.Millisecond + time.Duration(rand.Int64N(int64(1500*time.Millisecond)))
+	}
+}
+
 func (g *Gateway) mockTurnDelay(minD, maxD time.Duration) time.Duration {
 	if maxD <= 0 {
 		return 0
@@ -323,7 +340,7 @@ func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID str
 		}
 		rawHold := g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
 		if g.maxActors > actorstate.HyperFleetThreshold && rawHold > time.Second && execState != nil && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) {
-			targetHold := 2500*time.Millisecond + time.Duration(rand.Int64N(int64(2000*time.Millisecond)))
+			targetHold := g.hyperActiveTurnHold()
 			if !execState.startedAt.IsZero() {
 				targetHold -= time.Since(execState.startedAt)
 			}
@@ -354,6 +371,17 @@ func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID str
 				case <-gwDone:
 					timer.Stop()
 				}
+			}
+		}
+	} else if hasChatMsg && chatMsg.Source == types.SourceMock && chatMsg.Execution != nil {
+		rawHold := g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
+		if g.maxActors > actorstate.HyperFleetThreshold && rawHold > time.Second && execState != nil && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) {
+			targetHold := g.hyperActiveTurnHold()
+			if !execState.startedAt.IsZero() {
+				targetHold -= time.Since(execState.startedAt)
+			}
+			if targetHold > 0 {
+				execState.asyncThinkHold = targetHold
 			}
 		}
 	}
