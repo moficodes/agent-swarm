@@ -79,6 +79,10 @@ deploy-hyperswarm:
 undeploy:
 	bash hack/deploy.sh down $(DEPLOY_FLAGS)
 
+.PHONY: undeploy-swarm
+undeploy-swarm:
+	bash hack/deploy.sh down --profile=swarm $(DEPLOY_FLAGS)
+
 .PHONY: undeploy-megaswarm
 undeploy-megaswarm:
 	bash hack/deploy.sh down --profile=megaswarm $(DEPLOY_FLAGS)
@@ -86,6 +90,18 @@ undeploy-megaswarm:
 .PHONY: undeploy-hyperswarm
 undeploy-hyperswarm:
 	bash hack/deploy.sh down --profile=hyperswarm $(DEPLOY_FLAGS)
+
+.PHONY: create-cluster-swarm
+create-cluster-swarm:
+	bash hack/create-cluster.sh --profile=swarm $(CLUSTER_FLAGS)
+
+.PHONY: create-cluster-megaswarm
+create-cluster-megaswarm:
+	bash hack/create-cluster.sh --profile=megaswarm $(CLUSTER_FLAGS)
+
+.PHONY: create-cluster-hyperswarm
+create-cluster-hyperswarm:
+	bash hack/create-cluster.sh --profile=hyperswarm $(CLUSTER_FLAGS)
 
 .PHONY: e2e
 e2e:

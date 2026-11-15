@@ -904,6 +904,14 @@ conf_check_substrate() {
     esac
     exit 1
   fi
+  if [[ -n "${ATE_OBJECTSTORE_PLUGIN_IMAGE:-}" && "${pin}" == "v1.0.0" ]]; then
+    log_step "Overriding ate-api-server objectstore-plugin image with PR #3150 build (${ATE_OBJECTSTORE_PLUGIN_IMAGE})..."
+    run_kubectl_fatal set image deployment/ate-api-server -n ate-system \
+      objectstore-plugin="${ATE_OBJECTSTORE_PLUGIN_IMAGE}"
+    run_kubectl_fatal rollout status deployment/ate-api-server -n ate-system --timeout=300s
+  elif [[ -n "${ATE_OBJECTSTORE_PLUGIN_IMAGE:-}" ]]; then
+    log_step "Notice: Substrate pin is ${pin} (contains upstream PR #3150); ignoring temporary ATE_OBJECTSTORE_PLUGIN_IMAGE override."
+  fi
 }
 
 # conf_gke_cluster_name prints the cluster name from a GKE kubeconfig
@@ -1069,8 +1077,12 @@ conf_deploy() {
     run_kubectl_fatal rollout status deployment/data-generator-worker -n "${ns}" --timeout=180s
   fi
 
-  log_step "Building conf-gateway image..."
-  DEMO_CONF_GATEWAY_IMAGE="$(conf_build_gateway)"
+  if [[ -n "${DEMO_CONF_GATEWAY_IMAGE:-}" ]]; then
+    log_step "Reusing prebuilt conf-gateway image: ${DEMO_CONF_GATEWAY_IMAGE}"
+  else
+    log_step "Building conf-gateway image..."
+    DEMO_CONF_GATEWAY_IMAGE="$(conf_build_gateway)"
+  fi
   conf_ensure_secret
   conf_render manifests/gateway.yaml.tmpl | run_kubectl_fatal apply -f -
   if [[ -n "${DEMO_DOMAIN:-}" ]]; then
@@ -1195,7 +1207,7 @@ conf_main() {
       echo "  --profile=swarm|megaswarm|hyperswarm select deployment preset (default: DEMO_CONF_PROFILE=swarm):"
       echo "                             swarm      : 50 actors, 2-5 workers, 4 seats/worker, 1 CPU / 512 MiB per actor, Filestore auto-detect"
       echo "                             megaswarm  : 65,536 actors (16^4), 256 workers, 16 seats/worker, 100m CPU / 128 MiB per actor, GCS + /tmp/workspace"
-      echo "                             hyperswarm : 16,777,216 actors (64^4), 4,096 workers across 64 nodes, 64 seats/worker, 20m CPU / 128 MiB per actor"
+      echo "                             hyperswarm : 16,777,216 actors (64^4), 4,096 workers across 64 nodes, 64 seats/worker, 500m CPU / 512 MiB per actor"
       echo "  --patch-router           patch atenet-router's timeouts, max parked requests and grace period instead of failing"
       echo "  Required env: KO_DOCKER_REPO"
       echo "  Optional env: DEMO_CONF_PROFILE (default swarm; 'swarm', 'megaswarm', or 'hyperswarm'),"
@@ -1204,12 +1216,15 @@ conf_main() {
       echo "                DEMO_CONF_NAMESPACE (default ate-demo-conf; isolates namespace, atespace, worker pool and template),"
       echo "                DEMO_CONF_WORKER_POOL, DEMO_CONF_WORKLOAD_LABEL, DEMO_CONF_TEMPLATE_NAME, DEMO_CONF_EXTERNAL_METRIC,"
       echo "                CHAT_RATE_LIMIT_RPM (default 10), SESSION_RATE_LIMIT_RPM (default 10),"
-      echo "                DEMO_CONF_ACTORS (default 50 for swarm, 65536 for megaswarm), SUBSTRATE_REPO, BUCKET_NAME, SNAPSHOT_LOCATION,"
+      echo "                DEMO_CONF_ACTORS (default 50 for swarm, 65536 for megaswarm),"
       echo "                DEMO_CONF_MIN_WORKERS (default 2 for swarm, 256 for megaswarm),"
       echo "                DEMO_CONF_MAX_WORKERS (default 5 for swarm, 256 for megaswarm),"
       echo "                DEMO_CONF_ACTORS_PER_WORKER (default 4 for swarm, 16 for megaswarm),"
       echo "                DEMO_CONF_STORAGE_CLASS (external volume StorageClass; auto-detects substrate-volumepool-sc on swarm, defaults to 'none' on megaswarm),"
       echo "                DATA_GENERATOR_REPO, DEMO_CONF_DATAGEN_ORCHESTRATOR_IMAGE, DEMO_CONF_DATAGEN_WORKER_IMAGE (optional in-cluster data-generator fleet),"
+      echo "                DEMO_CONF_GATEWAY_IMAGE (reuse prebuilt gateway image instead of building with buildx),"
+      echo "                ATE_OBJECTSTORE_PLUGIN_IMAGE (optional PR #3150 build of objectstore-plugin while pin is v1.0.0),"
+      echo "                SUBSTRATE_REPO, BUCKET_NAME, SNAPSHOT_LOCATION,"
       echo "                KUBECTL_CONTEXT (defaults to the current kube context),"
       echo "                DEMO_CONF_CLUSTER (dashboard cluster label; defaults to the GKE context's cluster),"
       echo "                DEMO_CONF_ALLOW_DIRTY_SUBSTRATE (accept a cluster labeled <pin>-dirty),"

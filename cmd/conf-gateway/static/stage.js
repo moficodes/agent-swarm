@@ -129,7 +129,7 @@
   let latestActiveCohortActors = 0;
   let latestSnapshottedActors = 0;
   let latestLeasedActors = 0;
-  let useBinaryFleetMode = false;
+  let useBinaryFleetMode = true;
   let rafRedrawPending = false;
   let podHoverDirectory = {};
   let seatedActorPodMap = {};
@@ -504,47 +504,25 @@
     if (isTelemetryFetching) return;
     isTelemetryFetching = true;
     try {
-      if (useBinaryFleetMode) {
-        const [telResp, binResp] = await Promise.all([
-          fetch('/api/stage/telemetry?compact=0', { cache: 'no-store' }),
-          fetch('/api/stage/fleet.bin', { cache: 'no-store' })
-        ]);
-        if (!telResp.ok) return;
-        const data = await telResp.json();
-        if (binResp && binResp.ok) {
-          const ab = await binResp.arrayBuffer();
-          const parsedBin = parseFleetBinaryBuffer(ab);
-          if (parsedBin) {
-            latestFleetBytes = parsedBin.bytes;
-            latestActiveCohortActors = parsedBin.activeCohort;
-            latestSnapshottedActors = parsedBin.snapshotted;
-            latestLeasedActors = parsedBin.leased;
-            fleetTextureDirty = true;
-          }
+      const [telResp, binResp] = await Promise.all([
+        fetch('/api/stage/telemetry?compact=0', { cache: 'no-store' }),
+        fetch('/api/stage/fleet.bin', { cache: 'no-store' }).catch(() => null)
+      ]);
+      if (!telResp.ok) return;
+      const data = await telResp.json();
+      if (binResp && binResp.ok) {
+        const ab = await binResp.arrayBuffer();
+        const parsedBin = parseFleetBinaryBuffer(ab);
+        if (parsedBin) {
+          latestFleetBytes = parsedBin.bytes;
+          latestActiveCohortActors = parsedBin.activeCohort;
+          latestSnapshottedActors = parsedBin.snapshotted;
+          latestLeasedActors = parsedBin.leased;
+          fleetTextureDirty = true;
+          data.fleet_compact = '';
         }
-        updateDashboard(data);
-      } else {
-        const resp = await fetch('/api/stage/telemetry?compact=auto', { cache: 'no-store' });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        if (data && data.actor_count > 65536) {
-          useBinaryFleetMode = true;
-          const binResp = await fetch('/api/stage/fleet.bin', { cache: 'no-store' }).catch(() => null);
-          if (binResp && binResp.ok) {
-            const ab = await binResp.arrayBuffer();
-            const parsedBin = parseFleetBinaryBuffer(ab);
-            if (parsedBin) {
-              latestFleetBytes = parsedBin.bytes;
-              latestActiveCohortActors = parsedBin.activeCohort;
-              latestSnapshottedActors = parsedBin.snapshotted;
-              latestLeasedActors = parsedBin.leased;
-              fleetTextureDirty = true;
-              data.fleet_compact = '';
-            }
-          }
-        }
-        updateDashboard(data);
       }
+      updateDashboard(data);
       if (currentSpotlightActorId && el.spotlightDrawer && el.spotlightDrawer.classList.contains('open')) {
         refreshSpotlightDrawer(currentSpotlightActorId);
       }
@@ -817,8 +795,8 @@
   }
 
   function hasCompactFleetData() {
-    return (latestFleetBytes && latestFleetBytes.length > 256) ||
-      (latestFleetCompact && latestFleetCompact.length > 256);
+    return (latestFleetBytes && latestFleetBytes.length > 0) ||
+      (latestFleetCompact && latestFleetCompact.length > 0);
   }
 
   function getCompactFleetLength() {
@@ -884,7 +862,8 @@
     const isHighlighted = topoHighlightPod && topoHighlightPod === podName;
     const nAttr = nodeName ? ` data-node="${escapeHTML(nodeName)}"` : '';
     const is8x8 = seats > 16;
-    const gridCls = is8x8 ? 'seat-grid-8x8' : 'seat-grid-4x4';
+    const is2x2 = seats <= 4;
+    const gridCls = is8x8 ? 'seat-grid-8x8' : (is2x2 ? 'seat-grid-2x2' : 'seat-grid-4x4');
     const cells = [];
     for (let i = 0; i < seats; i++) {
       const wa = actors[i];
@@ -923,9 +902,10 @@
     const pods = nodeGroup.pods || [];
     const nodeName = nodeGroup.nodeName || ('node-' + String(nodeIdx + 1).padStart(2, '0'));
     const nodeLabel = nodeGroup.nodeLabel || ('node-' + String(nodeIdx + 1).padStart(2, '0'));
-    const podSlots = pods.length > 16 ? 64 : 16;
+    const podSlots = pods.length > 16 ? 64 : (pods.length > 5 ? 16 : (seatsPerPod <= 4 ? 5 : 16));
     const is8x8 = podSlots > 16;
-    const gridCls = is8x8 ? 'seat-grid-8x8' : 'seat-grid-4x4';
+    const isSwarm = seatsPerPod <= 4 && podSlots <= 5;
+    const gridCls = is8x8 ? 'seat-grid-8x8' : (isSwarm ? 'seat-grid-swarm-pods' : 'seat-grid-4x4');
     const totalNodeSeats = pods.length * seatsPerPod;
     let busyNodeSeats = 0;
     const cells = [];
@@ -1021,13 +1001,19 @@
       return;
     }
 
-    const nodeCount = latestNodeGroups.length || 16;
-    const podsPerNode = (latestNodeGroups[0] && latestNodeGroups[0].pods && latestNodeGroups[0].pods.length) || 16;
+    const nodeCount = latestNodeGroups.length || 1;
+    const podsPerNode = (latestNodeGroups[0] && latestNodeGroups[0].pods && latestNodeGroups[0].pods.length) || (seatsPerPod > 16 ? 64 : (seatsPerPod > 4 ? 16 : 5));
 
     if (!topoSelectedNode && !topoSelectedPod) {
-      el.workerTopoNav.innerHTML = `
-        <span class="topo-hint-pill">${nodeCount} Nodes × ${podsPerNode} Pods × ${seatsPerPod} Seats · Click any node corner to zoom into its ${podsPerNode} pods</span>
-      `;
+      if (nodeCount === 1) {
+        el.workerTopoNav.innerHTML = `
+          <span class="topo-hint-pill">1 Node · ${podsPerNode} Pods × ${seatsPerPod} Seats · Click node to zoom into pods</span>
+        `;
+      } else {
+        el.workerTopoNav.innerHTML = `
+          <span class="topo-hint-pill">${nodeCount} Nodes × ${podsPerNode} Pods × ${seatsPerPod} Seats · Click any node corner to zoom into its ${podsPerNode} pods</span>
+        `;
+      }
       return;
     }
 
@@ -1036,17 +1022,22 @@
       const pods = activeNode.pods || [];
       const totalNodeSeats = pods.length * seatsPerPod;
       const busyNodeSeats = pods.reduce((sum, p) => sum + ((p.actors || []).length), 0);
+      const rootText = nodeCount === 1 ? 'Node Overview' : ('All ' + nodeCount + ' Nodes');
+      const stepButtons = nodeCount > 1
+        ? `
+        <span class="topo-step-group" role="group" aria-label="Cycle GKE nodes">
+          <button type="button" class="topo-step-btn" data-topo-action="prev-node" title="Previous GKE Node" aria-label="Previous GKE Node">‹</button>
+          <button type="button" class="topo-step-btn" data-topo-action="next-node" title="Next GKE Node" aria-label="Next GKE Node">›</button>
+        </span>`
+        : '';
       el.workerTopoNav.innerHTML = `
-        <button type="button" class="topo-crumb-btn" data-topo-action="all-nodes">${BACK_ARROW_ICON_SVG}<span>All ${nodeCount} Nodes</span></button>
+        <button type="button" class="topo-crumb-btn" data-topo-action="all-nodes">${BACK_ARROW_ICON_SVG}<span>${rootText}</span></button>
         <span class="topo-crumb-sep">▸</span>
         <span class="topo-crumb-active" title="GKE Node: ${escapeHTML(activeNode.nodeName)}">
           <span>${escapeHTML(activeNode.nodeLabel)}</span>
           <span class="topo-crumb-meta">${pods.length} Pods · ${busyNodeSeats}/${totalNodeSeats} Seats</span>
         </span>
-        <span class="topo-step-group" role="group" aria-label="Cycle GKE nodes">
-          <button type="button" class="topo-step-btn" data-topo-action="prev-node" title="Previous GKE Node" aria-label="Previous GKE Node">‹</button>
-          <button type="button" class="topo-step-btn" data-topo-action="next-node" title="Next GKE Node" aria-label="Next GKE Node">›</button>
-        </span>
+        ${stepButtons}
         <span class="topo-hint-pill">Click any pod to see all ${seatsPerPod} actors in that pod</span>
       `;
       return;
@@ -1057,11 +1048,11 @@
       const podActors = (podInfo && podInfo.actors) ? podInfo.actors : [];
       const nodeForPod = activeNode || latestNodeGroups.find((g) => (g.pods || []).some((p) => p.pod_name === topoSelectedPod)) || null;
       const nodePodsLen = (nodeForPod && nodeForPod.pods) ? nodeForPod.pods.length : podsPerNode;
-      const nodeCrumb = (multiNodeMode && nodeForPod)
+      const nodeCrumb = (nodeForPod && (nodeCount > 1 || topoSelectedNode))
         ? `<button type="button" class="topo-crumb-btn" data-topo-action="zoom-node" data-node="${escapeHTML(nodeForPod.nodeName)}">${escapeHTML(nodeForPod.nodeLabel)} (${nodePodsLen} Pods)</button><span class="topo-crumb-sep">▸</span>`
         : '';
-      const rootLabel = multiNodeMode ? ('All ' + nodeCount + ' Nodes') : 'All Pods';
-      const matrixShortLabel = latestActorCount >= 1000000 ? '16M ⌖' : '65k ⌖';
+      const rootLabel = nodeCount === 1 ? 'Node Overview' : ('All ' + nodeCount + ' Nodes');
+      const matrixShortLabel = latestActorCount >= 1000000 ? '16M ⌖' : (latestActorCount > 256 ? '65k ⌖' : 'Fleet ⌖');
       el.workerTopoNav.innerHTML = `
         <button type="button" class="topo-crumb-btn" data-topo-action="all-nodes">${BACK_ARROW_ICON_SVG}<span>${rootLabel}</span></button>
         <span class="topo-crumb-sep">▸</span>
@@ -1285,136 +1276,114 @@
       }
     }
 
-    // 16-Node x 16-Pod x 16-Seat high-scale cluster mode (> 16 worker pods):
-    if (list.length > 16) {
-      const byNode = new Map();
-      const unassigned = [];
-      for (let i = 0; i < list.length; i++) {
-        const w = list[i];
-        const nName = podNodes[w.pod_name];
-        if (nName) {
-          if (!byNode.has(nName)) byNode.set(nName, []);
-          byNode.get(nName).push(w);
-        } else {
-          unassigned.push(w);
-        }
+    // Unified Hardware Topology (Node -> Pod -> Actor Seat) across swarm, megaswarm, and hyperswarm:
+    const byNode = new Map();
+    const unassigned = [];
+    for (let i = 0; i < list.length; i++) {
+      const w = list[i];
+      const nName = podNodes[w.pod_name];
+      if (nName) {
+        if (!byNode.has(nName)) byNode.set(nName, []);
+        byNode.get(nName).push(w);
+      } else {
+        unassigned.push(w);
       }
-      const nodeNames = Array.from(byNode.keys()).sort();
-      const nodeGroups = nodeNames.map((nName) => ({ nodeName: nName, pods: byNode.get(nName) }));
-      const chunkSize = seats > 16 ? 64 : 16;
-      while (unassigned.length > 0) {
-        const chunk = unassigned.splice(0, chunkSize);
-        nodeGroups.push({
-          nodeName: 'node-' + String(nodeGroups.length + 1).padStart(2, '0'),
-          pods: chunk
-        });
-      }
-      latestNodeGroups = nodeGroups.slice(0, 64).map((g, i) => ({
-        nodeName: g.nodeName,
-        nodeLabel: 'node-' + String(i + 1).padStart(2, '0'),
-        nodeIndex: i,
-        pods: g.pods || []
-      }));
+    }
+    const nodeNames = Array.from(byNode.keys()).sort();
+    const nodeGroups = nodeNames.map((nName) => ({ nodeName: nName, pods: byNode.get(nName) }));
+    const chunkSize = seats > 16 ? 64 : (seats > 4 ? 16 : 5);
+    while (unassigned.length > 0) {
+      const chunk = unassigned.splice(0, chunkSize);
+      nodeGroups.push({
+        nodeName: 'node-' + String(nodeGroups.length + 1).padStart(2, '0'),
+        pods: chunk
+      });
+    }
+    if (nodeGroups.length === 0) {
+      nodeGroups.push({
+        nodeName: 'node-01',
+        pods: []
+      });
+    }
+    latestNodeGroups = nodeGroups.slice(0, 64).map((g, i) => ({
+      nodeName: g.nodeName,
+      nodeLabel: 'node-' + String(i + 1).padStart(2, '0'),
+      nodeIndex: i,
+      pods: g.pods || []
+    }));
 
-      // Backfill assigned nodeName/nodeLabel onto podHoverDirectory & seatedActorPodMap
-      for (let nIdx = 0; nIdx < latestNodeGroups.length; nIdx++) {
-        const ng = latestNodeGroups[nIdx];
-        for (let pIdx = 0; pIdx < ng.pods.length; pIdx++) {
-          const pw = ng.pods[pIdx];
-          if (podHoverDirectory[pw.pod_name]) {
-            podHoverDirectory[pw.pod_name].nodeName = ng.nodeName;
-            podHoverDirectory[pw.pod_name].nodeLabel = ng.nodeLabel;
+    // Backfill assigned nodeName/nodeLabel onto podHoverDirectory & seatedActorPodMap
+    for (let nIdx = 0; nIdx < latestNodeGroups.length; nIdx++) {
+      const ng = latestNodeGroups[nIdx];
+      for (let pIdx = 0; pIdx < ng.pods.length; pIdx++) {
+        const pw = ng.pods[pIdx];
+        if (podHoverDirectory[pw.pod_name]) {
+          podHoverDirectory[pw.pod_name].nodeName = ng.nodeName;
+          podHoverDirectory[pw.pod_name].nodeLabel = ng.nodeLabel;
+        }
+        const pActors = pw.actors || [];
+        for (let aIdx = 0; aIdx < pActors.length; aIdx++) {
+          const wa = pActors[aIdx];
+          if (wa && wa.actor_id && seatedActorPodMap[wa.actor_id]) {
+            seatedActorPodMap[wa.actor_id].nodeName = ng.nodeName;
+            seatedActorPodMap[wa.actor_id].nodeLabel = ng.nodeLabel;
           }
-          const pActors = pw.actors || [];
-          for (let aIdx = 0; aIdx < pActors.length; aIdx++) {
-            const wa = pActors[aIdx];
-            if (wa && wa.actor_id && seatedActorPodMap[wa.actor_id]) {
-              seatedActorPodMap[wa.actor_id].nodeName = ng.nodeName;
-              seatedActorPodMap[wa.actor_id].nodeLabel = ng.nodeLabel;
-            }
-          }
         }
       }
+    }
 
-      if (topoSelectedPod && !podHoverDirectory[topoSelectedPod]) {
-        topoSelectedPod = null;
-      }
-      if (topoSelectedNode && !latestNodeGroups.some((g) => g.nodeName === topoSelectedNode)) {
-        topoSelectedNode = null;
-      }
-      if (topoSelectedPod && !topoSelectedNode) {
-        const ownerNode = latestNodeGroups.find((g) => g.pods.some((p) => p.pod_name === topoSelectedPod));
-        if (ownerNode) topoSelectedNode = ownerNode.nodeName;
-      }
+    if (topoSelectedPod && !podHoverDirectory[topoSelectedPod]) {
+      topoSelectedPod = null;
+    }
+    if (topoSelectedNode && !latestNodeGroups.some((g) => g.nodeName === topoSelectedNode)) {
+      topoSelectedNode = null;
+    }
+    if (topoSelectedPod && !topoSelectedNode) {
+      const ownerNode = latestNodeGroups.find((g) => g.pods.some((p) => p.pod_name === topoSelectedPod));
+      if (ownerNode) topoSelectedNode = ownerNode.nodeName;
+    }
 
-      renderWorkerTopoNav(seats, true);
-      el.workerList.classList.add('compact', 'node-matrix-grid');
-      el.workerList.classList.toggle('hyper-node-grid', latestNodeGroups.length > 16 || seats > 16);
+    renderWorkerTopoNav(seats, true);
+    el.workerList.classList.add('compact', 'node-matrix-grid');
+    el.workerList.classList.toggle('hyper-node-grid', latestNodeGroups.length > 16 || seats > 16);
 
-      // Level 2 Drill-Down: Single Pod -> Actor Seat Cards (8x8 for 64 seats, 8x2 for 16 seats)
-      if (topoSelectedPod) {
-        const ownerNode = latestNodeGroups.find((g) => g.pods.some((p) => p.pod_name === topoSelectedPod)) || null;
-        const activePod = (ownerNode && ownerNode.pods.find((p) => p.pod_name === topoSelectedPod)) ||
-          list.find((p) => p.pod_name === topoSelectedPod) ||
-          { pod_name: topoSelectedPod, actors: [] };
-        el.workerList.style.gridTemplateColumns = 'repeat(8, minmax(0, 1fr))';
-        const seatCards = [];
-        for (let sIdx = 0; sIdx < seats; sIdx++) {
-          seatCards.push(renderPodActorSeatDetailCardHTML(activePod, sIdx, seats, ownerNode));
-        }
-        el.workerList.innerHTML = seatCards.join('');
-        return;
+    // Level 2 Drill-Down: Single Pod -> Actor Seat Cards (4 cards in swarm, 16 in megaswarm, 64 in hyperswarm)
+    if (topoSelectedPod) {
+      const ownerNode = latestNodeGroups.find((g) => g.pods.some((p) => p.pod_name === topoSelectedPod)) || null;
+      const activePod = (ownerNode && ownerNode.pods.find((p) => p.pod_name === topoSelectedPod)) ||
+        list.find((p) => p.pod_name === topoSelectedPod) ||
+        { pod_name: topoSelectedPod, actors: [] };
+      const seatCols = seats > 16 ? 8 : (seats > 4 ? 8 : Math.min(4, Math.max(2, seats)));
+      el.workerList.style.gridTemplateColumns = 'repeat(' + seatCols + ', minmax(0, 1fr))';
+      const seatCards = [];
+      for (let sIdx = 0; sIdx < seats; sIdx++) {
+        seatCards.push(renderPodActorSeatDetailCardHTML(activePod, sIdx, seats, ownerNode));
       }
+      el.workerList.innerHTML = seatCards.join('');
+      return;
+    }
 
-      // Level 1 Drill-Down: Single Node -> Pod Cards (64 pods in 8x8 on hyperswarm, 16 pods in 8x2 on megaswarm)
-      if (topoSelectedNode) {
-        const activeNode = latestNodeGroups.find((g) => g.nodeName === topoSelectedNode) || latestNodeGroups[0];
-        const maxPodsPerNode = seats > 16 ? 64 : 16;
-        const nodePods = (activeNode && activeNode.pods) ? activeNode.pods.slice(0, maxPodsPerNode) : [];
-        const cols = Math.min(8, Math.max(4, Math.ceil(Math.max(1, nodePods.length) / 2)));
-        el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
-        el.workerList.innerHTML = nodePods.map((w) => render4x4SeatWorkerCardHTML(w, seats, activeNode.nodeName)).join('');
-        return;
-      }
+    // Level 1 Drill-Down: Single Node -> Pod Cards (up to 5 pods in swarm, 16 in megaswarm, 64 in hyperswarm)
+    if (topoSelectedNode) {
+      const activeNode = latestNodeGroups.find((g) => g.nodeName === topoSelectedNode) || latestNodeGroups[0];
+      const maxPodsPerNode = seats > 16 ? 64 : (seats > 4 ? 16 : 5);
+      const nodePods = (activeNode && activeNode.pods) ? activeNode.pods.slice(0, maxPodsPerNode) : [];
+      const cols = seats <= 4
+        ? Math.min(5, Math.max(1, nodePods.length))
+        : Math.min(8, Math.max(4, Math.ceil(Math.max(1, nodePods.length) / 2)));
+      el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+      el.workerList.innerHTML = nodePods.map((w) => render4x4SeatWorkerCardHTML(w, seats, activeNode.nodeName)).join('');
+      return;
+    }
 
-      // Level 0 Overview: All Nodes (64 nodes in 8x8 on hyperswarm, 16 nodes in 8x2 on megaswarm)
+    // Level 0 Overview: All Nodes (1 node for swarm, 16 nodes for megaswarm, 64 nodes for hyperswarm)
+    if (latestNodeGroups.length === 1) {
+      el.workerList.style.gridTemplateColumns = 'minmax(280px, 460px)';
+    } else {
       const cols = Math.min(8, Math.max(4, Math.ceil(latestNodeGroups.length / 2)));
       el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
-      el.workerList.innerHTML = latestNodeGroups.map((g, i) => renderNodeMatrixCardHTML(g, i, seats)).join('');
-      return;
     }
-
-    // Up to 16 worker pods, each with 16 actor seats (4x4 seat matrix per pod card):
-    latestNodeGroups = [];
-    if (seats === 16) {
-      if (topoSelectedPod && !podHoverDirectory[topoSelectedPod]) {
-        topoSelectedPod = null;
-      }
-      renderWorkerTopoNav(seats, false);
-      el.workerList.classList.add('compact', 'node-matrix-grid');
-      if (topoSelectedPod) {
-        const activePod = list.find((p) => p.pod_name === topoSelectedPod) || { pod_name: topoSelectedPod, actors: [] };
-        el.workerList.style.gridTemplateColumns = 'repeat(8, minmax(0, 1fr))';
-        const seatCards = [];
-        for (let sIdx = 0; sIdx < seats; sIdx++) {
-          seatCards.push(renderPodActorSeatDetailCardHTML(activePod, sIdx, seats, null));
-        }
-        el.workerList.innerHTML = seatCards.join('');
-        return;
-      }
-      const cols = list.length > 8 ? 8 : list.length;
-      el.workerList.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
-      el.workerList.innerHTML = list.map((w) => render4x4SeatWorkerCardHTML(w, seats, '')).join('');
-      return;
-    }
-
-    // Standard mode (2..16 worker pods with list-based seat rows):
-    renderWorkerTopoNav(seats, false);
-    const compact = list.length > 2;
-    el.workerList.classList.remove('node-matrix-grid');
-    el.workerList.classList.toggle('compact', compact);
-    el.workerList.style.gridTemplateColumns = 'repeat(' + list.length + ', minmax(0, 1fr))';
-    el.workerList.innerHTML = list.map((w) => renderWorkerCardHTML(w, seats, compact)).join('');
+    el.workerList.innerHTML = latestNodeGroups.map((g, i) => renderNodeMatrixCardHTML(g, i, seats)).join('');
   }
 
   function formatActorName(id) {
@@ -1511,6 +1480,9 @@
   ]);
 
   function computeCanvasDims(total) {
+    if (total <= 50) {
+      return { cols: 10, rows: 5 };
+    }
     if (total === 65536) {
       return { cols: 512, rows: 128 };
     }
@@ -1518,37 +1490,44 @@
       // Exact 2^12 x 2^12 = 16,777,216 (1 texel = 1 actor), guaranteed <= MAX_TEXTURE_SIZE everywhere.
       return { cols: 4096, rows: 4096 };
     }
-    const cols = Math.max(32, Math.ceil(Math.sqrt(total * 3.5)));
-    const rows = Math.max(8, Math.ceil(total / cols));
+    const cols = Math.max(10, Math.ceil(Math.sqrt(total * 3.5)));
+    const rows = Math.max(5, Math.ceil(total / cols));
     return { cols: cols, rows: rows };
   }
 
   function maxFleetZoom() {
-    return latestActorCount > 65536 ? 1024 : 32;
+    return latestActorCount > 65536 ? 1024 : (latestActorCount > 256 ? 32 : 4);
   }
 
-  let lastSyncedPresetHyper = null;
+  let lastSyncedPresetScale = null;
   function syncZoomPresetButtonsForScale() {
-    const isHyper = latestActorCount > 65536;
-    if (lastSyncedPresetHyper === isHyper) return;
-    lastSyncedPresetHyper = isHyper;
-    if (el.minimapTitle) {
-      el.minimapTitle.textContent = isHyper ? '16.8M NAVIGATOR' : '65K NAVIGATOR';
-    }
-    if (isHyper) {
-      if (el.btnZoomP1) { el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (All 16,777,216 actors)'; }
-      if (el.btnZoomP2) { el.btnZoomP2.dataset.zoom = '16'; el.btnZoomP2.textContent = '16×'; el.btnZoomP2.title = '16× Sub-Fleet Sector (~65,536 actors)'; }
-      if (el.btnZoomP3) { el.btnZoomP3.dataset.zoom = '128'; el.btnZoomP3.textContent = '128×'; el.btnZoomP3.title = '128× Cohort Tiles (~1,024 actors with Pod & QR markers)'; }
-      if (el.btnZoomP4) { el.btnZoomP4.dataset.zoom = '256'; el.btnZoomP4.textContent = '256×'; el.btnZoomP4.title = '256× Cohort Tiles (~256 actors)'; }
+    const scale = latestActorCount > 65536 ? 'hyper' : (latestActorCount > 256 ? 'mega' : 'swarm');
+    if (lastSyncedPresetScale === scale) return;
+    lastSyncedPresetScale = scale;
+    if (scale === 'hyper') {
+      if (el.minimapTitle) el.minimapTitle.textContent = '16.8M NAVIGATOR';
+      if (el.btnZoomP1) { el.btnZoomP1.hidden = false; el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (All 16,777,216 actors)'; }
+      if (el.btnZoomP2) { el.btnZoomP2.hidden = false; el.btnZoomP2.dataset.zoom = '16'; el.btnZoomP2.textContent = '16×'; el.btnZoomP2.title = '16× Sub-Fleet Sector (~65,536 actors)'; }
+      if (el.btnZoomP3) { el.btnZoomP3.hidden = false; el.btnZoomP3.dataset.zoom = '128'; el.btnZoomP3.textContent = '128×'; el.btnZoomP3.title = '128× Cohort Tiles (~1,024 actors with Pod & QR markers)'; }
+      if (el.btnZoomP4) { el.btnZoomP4.hidden = false; el.btnZoomP4.dataset.zoom = '256'; el.btnZoomP4.textContent = '256×'; el.btnZoomP4.title = '256× Cohort Tiles (~256 actors)'; }
       if (el.btnZoomP5) { el.btnZoomP5.hidden = false; el.btnZoomP5.dataset.zoom = '512'; el.btnZoomP5.textContent = '512×'; el.btnZoomP5.title = '512× Actor Number Cards (~64 actors)'; }
       if (el.btnZoomP6) { el.btnZoomP6.hidden = false; el.btnZoomP6.dataset.zoom = '1024'; el.btnZoomP6.textContent = '1024×'; el.btnZoomP6.title = '1024× Detailed Actor Cards (~16 actors with State, Pod & GCS info)'; }
+    } else if (scale === 'mega') {
+      if (el.minimapTitle) el.minimapTitle.textContent = '65K NAVIGATOR';
+      if (el.btnZoomP1) { el.btnZoomP1.hidden = false; el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (All 65,536 actors)'; }
+      if (el.btnZoomP2) { el.btnZoomP2.hidden = false; el.btnZoomP2.dataset.zoom = '4'; el.btnZoomP2.textContent = '4×'; el.btnZoomP2.title = '4× Cohort Tiles (~4,096 actors)'; }
+      if (el.btnZoomP3) { el.btnZoomP3.hidden = false; el.btnZoomP3.dataset.zoom = '16'; el.btnZoomP3.textContent = '16×'; el.btnZoomP3.title = '16× Inspector Mini-Cards (~256 actors)'; }
+      if (el.btnZoomP4) { el.btnZoomP4.hidden = false; el.btnZoomP4.dataset.zoom = '32'; el.btnZoomP4.textContent = '32×'; el.btnZoomP4.title = '32× Detailed Actor Cards (~64 actors)'; }
+      if (el.btnZoomP5) el.btnZoomP5.hidden = true;
+      if (el.btnZoomP6) el.btnZoomP6.hidden = true;
     } else {
-      if (el.btnZoomP1) { el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (All 65,536 actors)'; }
-      if (el.btnZoomP2) { el.btnZoomP2.dataset.zoom = '4'; el.btnZoomP2.textContent = '4×'; el.btnZoomP2.title = '4× Cohort Tiles (~4,096 actors)'; }
-      if (el.btnZoomP3) { el.btnZoomP3.dataset.zoom = '16'; el.btnZoomP3.textContent = '16×'; el.btnZoomP3.title = '16× Inspector Mini-Cards (~256 actors)'; }
-      if (el.btnZoomP4) { el.btnZoomP4.dataset.zoom = '32'; el.btnZoomP4.textContent = '32×'; el.btnZoomP4.title = '32× Detailed Actor Cards (~64 actors)'; }
-      if (el.btnZoomP5) { el.btnZoomP5.hidden = true; }
-      if (el.btnZoomP6) { el.btnZoomP6.hidden = true; }
+      if (el.minimapTitle) el.minimapTitle.textContent = 'SWARM NAVIGATOR';
+      if (el.btnZoomP1) { el.btnZoomP1.hidden = false; el.btnZoomP1.dataset.zoom = '1'; el.btnZoomP1.textContent = '1× All'; el.btnZoomP1.title = '1× Macro Overview (50 actors)'; }
+      if (el.btnZoomP2) { el.btnZoomP2.hidden = false; el.btnZoomP2.dataset.zoom = '2'; el.btnZoomP2.textContent = '2×'; el.btnZoomP2.title = '2× Overview (~25 actors)'; }
+      if (el.btnZoomP3) { el.btnZoomP3.hidden = false; el.btnZoomP3.dataset.zoom = '4'; el.btnZoomP3.textContent = '4×'; el.btnZoomP3.title = '4× Detailed Actor Cards (~12 actors)'; }
+      if (el.btnZoomP4) el.btnZoomP4.hidden = true;
+      if (el.btnZoomP5) el.btnZoomP5.hidden = true;
+      if (el.btnZoomP6) el.btnZoomP6.hidden = true;
     }
   }
 
@@ -2145,7 +2124,7 @@
     const dotH = Math.max(1, cellH - gapY);
 
     let renderedViaGPUOrBlit = false;
-    if (!isCardTier && total > 65536) {
+    if (!isCardTier) {
       if (renderFleetWebGL2(targetW, targetH, canvasCols, canvasRows, isLight)) {
         renderedViaGPUOrBlit = true;
       } else {

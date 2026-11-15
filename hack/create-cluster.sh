@@ -56,7 +56,7 @@ cc_node_machine_type() {
   elif [[ "$(cc_profile)" == "megaswarm" ]]; then
     echo "c3-standard-8"
   else
-    echo "c3-standard-4"
+    echo "c3-standard-8"
   fi
 }
 
@@ -83,6 +83,16 @@ cc_node_disk_size() {
   fi
 }
 
+cc_logging() {
+  if [[ -n "${CC_LOGGING:-}" ]]; then
+    echo "${CC_LOGGING}"
+  elif [[ "$(cc_profile)" == "hyperswarm" ]]; then
+    echo "NONE"
+  else
+    echo ""
+  fi
+}
+
 cc_node_count() {
   if [[ -n "${NODE_COUNT:-}" ]]; then
     echo "${NODE_COUNT}"
@@ -100,7 +110,7 @@ cc_node_count() {
   elif [[ "$(cc_profile)" == "megaswarm" ]]; then
     echo "16"
   else
-    echo "2"
+    echo "1"
   fi
 }
 
@@ -150,9 +160,10 @@ cc_resolve_version() {
 # cc_create_args prints the `gcloud beta container clusters create` arguments
 # for VERSION, one per line.
 cc_create_args() {
-  local version="$1" disk_type disk_size
+  local version="$1" disk_type disk_size logging
   disk_type="$(cc_node_disk_type)"
   disk_size="$(cc_node_disk_size)"
+  logging="$(cc_logging)"
   printf '%s\n' \
     "${CLUSTER_NAME}" \
     --project "${PROJECT_ID}" \
@@ -171,6 +182,9 @@ cc_create_args() {
   fi
   if [[ -n "${disk_size}" ]]; then
     printf '%s\n' --disk-size "${disk_size}"
+  fi
+  if [[ -n "${logging}" ]]; then
+    printf '%s\n' --logging "${logging}"
   fi
   if [[ -n "${NODE_LOCATIONS:-}" ]]; then
     printf '%s\n' --node-locations "${NODE_LOCATIONS}"
@@ -221,7 +235,7 @@ cc_ensure_system_pools() {
   fi
   local pg_mt="${POSTGRES_MACHINE_TYPE:-c4-highmem-96}"
   local pg_dt="${POSTGRES_DISK_TYPE:-hyperdisk-balanced}"
-  local pg_ds="${POSTGRES_DISK_SIZE:-200}"
+  local pg_ds="${POSTGRES_DISK_SIZE:-500}"
   local infra_mt="${INFRA_MACHINE_TYPE:-n4-standard-32}"
   local infra_dt="${INFRA_DISK_TYPE:-hyperdisk-balanced}"
   local infra_ds="${INFRA_DISK_SIZE:-200}"
@@ -319,6 +333,16 @@ cc_main() {
         DEMO_CONF_PROFILE="$2"
         shift
         ;;
+      --logging=*) CC_LOGGING="${1#--logging=}" ;;
+      --logging)
+        if (($# < 2)); then
+          echo "error: --logging requires an argument (e.g. NONE, SYSTEM, WORKLOAD)" >&2
+          cc_usage
+          return 1
+        fi
+        CC_LOGGING="$2"
+        shift
+        ;;
       -h | --help) cc_usage; return 0 ;;
       *) echo "error: unknown argument $1" >&2; cc_usage; return 1 ;;
     esac
@@ -341,22 +365,25 @@ cc_main() {
 }
 
 cc_usage() {
-  echo "Usage: $0 [--profile=swarm|megaswarm|hyperswarm] [--dry-run]"
+  echo "Usage: $0 [--profile=swarm|megaswarm|hyperswarm] [--logging=LOGGING] [--dry-run]"
   echo "  Creates a GKE cluster for Substrate on the newest GKE_MINOR_VERSION release, with a"
   echo "  maintenance exclusion against node upgrades. On an existing cluster it adds the"
   echo "  exclusion if missing and leaves the version alone. --dry-run prints the gcloud"
   echo "  commands that change anything."
   echo "  --profile=swarm|megaswarm|hyperswarm select cluster size preset (default: DEMO_CONF_PROFILE=swarm):"
-  echo "                             swarm      : 2 x c3-standard-4 nodes"
+  echo "                             swarm      : 1 x c3-standard-8 node"
   echo "                             megaswarm  : 16 x c3-standard-8 nodes"
   echo "                             hyperswarm : 64 x n4-highmem-64 worker nodes + size10 Postgres & infra pools"
+  echo "  --logging=LOGGING        set GKE logging components (default: NONE on hyperswarm, GKE default on others)"
   echo "  Required env: PROJECT_ID, CLUSTER_NAME"
   echo "  Optional env: DEMO_CONF_PROFILE (default swarm; 'swarm', 'megaswarm', or 'hyperswarm'),"
   echo "                CLUSTER_LOCATION (default us-west1-c), NODE_LOCATIONS (optional comma-separated zones),"
   echo "                NETWORK, SUBNETWORK (default default),"
-  echo "                NODE_MACHINE_TYPE (default c3-standard-4 / c3-standard-8 / n4-highmem-64),"
-  echo "                NODE_COUNT (default 2 / 16 / 64 across NODE_LOCATIONS),"
+  echo "                NODE_MACHINE_TYPE (default c3-standard-8 / c3-standard-8 / n4-highmem-64),"
+  echo "                NODE_COUNT (default 1 / 16 / 64 across NODE_LOCATIONS),"
   echo "                NODE_DISK_TYPE, NODE_DISK_SIZE, CC_SYSTEM_NODE_POOLS (default true on hyperswarm),"
+  echo "                POSTGRES_DISK_SIZE (default 500 on hyperswarm),"
+  echo "                CC_LOGGING (default NONE on hyperswarm),"
   echo "                GKE_RELEASE_CHANNEL (default rapid), GKE_MINOR_VERSION (default 1.37)"
   echo "  substrate-gke's .ate-dev-env.sh sets these names; source it or export them yourself."
 }

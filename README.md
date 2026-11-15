@@ -145,8 +145,8 @@ prometheus-adapter serves the sum as the external metric
 `conf_worker_demand`, and an HPA writes the WorkerPool's replicas
 (`manifests/autoscaling.yaml.tmpl`). The pool grows within about 20s of a
 burst and shrinks 5 minutes after it ends. At the maximum, 5 workers run
-up to 20 actors at once. Five workers fit on two c3-standard-4 nodes, so no
-node autoscaling is involved.
+up to 20 actors at once. Five workers fit comfortably alongside ate-system on
+a single c3-standard-8 node (8 vCPU / 32 GiB RAM), so no node autoscaling is involved.
 
 A worker's seats come from its CPU limit, which `hack/deploy.sh` sets to
 `DEMO_CONF_ACTORS_PER_WORKER` CPUs plus 500m, so it fits that many 1-CPU
@@ -261,6 +261,31 @@ make deploy-megaswarm DEPLOY_FLAGS=--patch-router
 # "hyperswarm" profile (16,777,216 actors = 64^4, 4,096 workers across 64 nodes, 64 seats/worker, 64x oversubscription):
 make deploy-hyperswarm DEPLOY_FLAGS=--patch-router
 ```
+
+### Profile comparison
+
+| Profile | Actors | Worker Pods | Pods / Node | Seats / Pod | Total Seats | Oversubscription | Cluster Topology | Stage UI Mode |
+|---|---|---|---|---|---|---|---|---|
+| `swarm` (default) | 50 | 2–5 (HPA) | Up to 5 | 4 | 8–20 | 2.5×–6.25× | 1 × `c3-standard-8` (8 vCPU / 32 GiB) | Binary `fleet.bin` + WebGL2 / 10×5 matrix + 1-node topology drill-down |
+| `megaswarm` | 65,536 ($16^4$) | 256 (static) | 16 | 16 | 4,096 | 16× | 16 × `c3-standard-8` (128 vCPU / 512 GiB) | Binary `fleet.bin` + WebGL2 / 256×256 canvas + 16×16×16 drill-down |
+| `hyperswarm` | 16,777,216 ($64^4$) | 4,096 (static) | 64 | 64 | 262,144 | 64× | 64 × `n4-highmem-64` + dedicated system/db pools | Binary `fleet.bin` + WebGL2 / 4096×4096 canvas + 64×64×64 drill-down |
+
+### High-scale snapshot transfers and Agent Substrate PR #3150
+
+Under upstream Substrate `v1.0.0`, `atelet` acquires short-lived GCS credentials for each snapshot transfer from `objectstore-plugin`, which calls `sts.googleapis.com` (`ExchangeToken`). On Google Cloud, STS enforces a project-wide quota of 6,000 requests per minute (100 QPS). In the `hyperswarm` profile with 4,096 worker pods restoring or checkpointing actors concurrently, synchronous STS exchanges hit `HTTP 429 RATE_LIMIT_EXCEEDED` and can starve other Workload Identity consumers (see `substrate-gaps.md` section *"Per-checkpoint STS token exchanges hit the 100 QPS project quota"*).
+
+Upstream [Agent Substrate PR #3150](https://github.com/agent-substrate/substrate/pull/3150) resolves this by minting downscoped GCS tokens locally via `tink-go` without making external STS token exchange calls.
+
+To enable smooth high-scale testing without dirtying this repository's `go.mod` (which remains pinned to stock upstream `v1.0.0`):
+
+1. **Build the PR #3150 plugin image**: Run `hack/build-pr3150-objectstore-plugin.sh` against a local checkout of PR #3150. This builds and pushes an `objectstore-plugin` image to `KO_DOCKER_REPO`.
+2. **Deploy with the override**: Set `ATE_OBJECTSTORE_PLUGIN_IMAGE` when deploying:
+   ```bash
+   ATE_OBJECTSTORE_PLUGIN_IMAGE=us-west1-docker.pkg.dev/my-project/ate-images/objectstore-plugin:pr3150 \
+     make deploy-hyperswarm DEPLOY_FLAGS=--patch-router
+   ```
+   When `ATE_OBJECTSTORE_PLUGIN_IMAGE` is set and the cluster's Substrate pin is `v1.0.0`, `hack/deploy.sh` cleanly patches `deployment/ate-api-server`'s `objectstore-plugin` init container in `ate-system`.
+3. **Automatic switch-back**: Once PR #3150 merges into an upstream Agent Substrate release (e.g., `v1.0.1`+), bumping the pin in `go.mod` automatically deactivates this override, switching back to 100% stock upstream release images without requiring any manifest changes.
 
 `make deploy` runs `hack/deploy.sh up $(DEPLOY_FLAGS)` (defaulting to
 `DEMO_CONF_PROFILE=swarm`), while `make deploy-megaswarm` and

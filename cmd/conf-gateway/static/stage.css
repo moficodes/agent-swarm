@@ -1615,6 +1615,20 @@ html, body {
   box-shadow: 0 0 8px rgba(0, 255, 204, 0.4);
 }
 
+.seat-grid-2x2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  width: 100%;
+}
+
+.seat-grid-swarm-pods {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  width: 100%;
+}
+
 .seat-grid-4x4 {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

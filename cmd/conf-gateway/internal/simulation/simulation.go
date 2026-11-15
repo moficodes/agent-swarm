@@ -199,7 +199,6 @@ type slotState struct {
 	phase                    slotPhase
 	hasContainerApproval     bool
 	approveRetries           uint8
-	inSeatedQueue            bool
 	awaitingObservedUnseated bool
 }
 
@@ -251,9 +250,7 @@ type SimulationRunner struct {
 	slots              []slotState
 	containerApprovals map[int]string
 	readyQueue         []int
-	seatedIdleQueue    []int
 	readyScanCursor    uint64
-	seatedScanCursor   uint64
 	unstartedCursor    uint64
 	turnCursor         uint64
 	dispatchSeq        uint64
@@ -292,9 +289,7 @@ func (s *SimulationRunner) initSlotsLocked(count int) {
 	s.slots = make([]slotState, count+1)
 	s.containerApprovals = make(map[int]string)
 	s.readyQueue = nil
-	s.seatedIdleQueue = nil
 	s.readyScanCursor = 0
-	s.seatedScanCursor = 0
 	if count > 65536 {
 		s.unstartedCursor = uint64(rand.Intn(count))
 		s.turnCursor = uint64(rand.Intn(count))
@@ -311,58 +306,10 @@ func (s *SimulationRunner) clearSlotsLocked() {
 	s.slots = nil
 	s.containerApprovals = nil
 	s.readyQueue = nil
-	s.seatedIdleQueue = nil
 	s.readyScanCursor = 0
-	s.seatedScanCursor = 0
 	s.unstartedCursor = 0
 	s.turnCursor = 0
 	s.dispatchSeq = 0
-}
-
-// AdoptSeatedActor enqueues a running actor into seatedIdleQueue when the
-// simulation is active and the slot is currently idle, ensuring background-woken
-// seats immediately enter the active turn loop instead of sitting idle.
-func (s *SimulationRunner) AdoptSeatedActor(attendeeID string) bool {
-	s.mu.RLock()
-	running := s.running
-	totalCount := s.count
-	s.mu.RUnlock()
-	if !running || totalCount <= 65536 {
-		return false
-	}
-	const prefix = "attendee-"
-	if !strings.HasPrefix(attendeeID, prefix) {
-		return false
-	}
-	idx := 0
-	for i := len(prefix); i < len(attendeeID); i++ {
-		ch := attendeeID[i]
-		if ch < '0' || ch > '9' {
-			return false
-		}
-		idx = idx*10 + int(ch-'0')
-		if idx > totalCount {
-			return false
-		}
-	}
-	if idx < 1 || s.isReserved(attendeeID, idx) {
-		return false
-	}
-	s.slotMu.Lock()
-	defer s.slotMu.Unlock()
-	if idx >= len(s.slots) {
-		return false
-	}
-	st := &s.slots[idx]
-	if st.phase == phaseIdle && !st.inSeatedQueue {
-		nowMs := time.Now().UnixMilli()
-		if st.readyAtUnixMs <= nowMs {
-			st.readyAtUnixMs = nowMs + int64((idx*137)%4000)
-		}
-		st.inSeatedQueue = true
-		s.seatedIdleQueue = append(s.seatedIdleQueue, idx)
-	}
-	return true
 }
 
 func (s *SimulationRunner) stopActiveRun(pauseOrchestrator, keepSeats bool) bool {
@@ -627,60 +574,6 @@ func (s *SimulationRunner) claimMaturedApprovalLocked(now time.Time, totalCount 
 	return 0, phaseIdle, "", false
 }
 
-func (s *SimulationRunner) claimSeatedIdleSlotLocked(now time.Time, totalCount int) (int, slotPhase, string, bool) {
-	qLen := len(s.seatedIdleQueue)
-	if qLen == 0 {
-		return 0, phaseIdle, "", false
-	}
-	nowMs := now.UnixMilli()
-	hsc, hasHSC := s.target.(HyperSeatCoordinator)
-	scanLimit := min(qLen, 2048)
-	for inspected := 0; inspected < scanLimit && len(s.seatedIdleQueue) > 0; inspected++ {
-		qLen = len(s.seatedIdleQueue)
-		pos := int(s.seatedScanCursor % uint64(qLen))
-		idx := s.seatedIdleQueue[pos]
-		if idx < 1 || idx > totalCount {
-			s.seatedIdleQueue[pos] = s.seatedIdleQueue[qLen-1]
-			s.seatedIdleQueue = s.seatedIdleQueue[:qLen-1]
-			continue
-		}
-		st := &s.slots[idx]
-		if st.phase != phaseIdle {
-			st.inSeatedQueue = false
-			s.seatedIdleQueue[pos] = s.seatedIdleQueue[qLen-1]
-			s.seatedIdleQueue = s.seatedIdleQueue[:qLen-1]
-			continue
-		}
-		if nowMs < st.readyAtUnixMs {
-			s.seatedScanCursor++
-			continue
-		}
-		st.inSeatedQueue = false
-		s.seatedIdleQueue[pos] = s.seatedIdleQueue[qLen-1]
-		s.seatedIdleQueue = s.seatedIdleQueue[:qLen-1]
-		s.seatedScanCursor++
-
-		if hasHSC && !hsc.IsSeatedActorIndex(idx) {
-			continue
-		}
-		attendeeID := fmt.Sprintf("attendee-%02d", idx)
-		if hasHSC {
-			if hsc.HasPendingSuspend(attendeeID) {
-				continue
-			}
-			if hsc.TryScheduleSimulatedSuspend(attendeeID, idx) {
-				st.readyAtUnixMs = nowMs + 4000
-				continue
-			}
-		}
-		st.phase = phaseChatInFlight
-		st.hasContainerApproval = false
-		st.approveRetries = 0
-		return idx, phaseChatInFlight, "", true
-	}
-	return 0, phaseIdle, "", false
-}
-
 func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int) (int, slotPhase, string, bool) {
 	nowMs := now.UnixMilli()
 	hStride := s.humanStrideLocked(totalCount)
@@ -703,7 +596,7 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 				continue
 			}
 			st := &s.slots[idx]
-			if st.phase != phaseIdle || st.inSeatedQueue || nowMs < st.readyAtUnixMs {
+			if st.phase != phaseIdle || nowMs < st.readyAtUnixMs {
 				continue
 			}
 			if hasHSC && hsc.IsSeatedActorIndex(idx) {
@@ -731,7 +624,7 @@ func (s *SimulationRunner) claimIdleChatSlotLocked(now time.Time, totalCount int
 			continue
 		}
 		st := &s.slots[idx]
-		if st.phase != phaseIdle || st.inSeatedQueue || nowMs < st.readyAtUnixMs {
+		if st.phase != phaseIdle || nowMs < st.readyAtUnixMs {
 			continue
 		}
 		if hasHSC && hsc.IsSeatedActorIndex(idx) {
