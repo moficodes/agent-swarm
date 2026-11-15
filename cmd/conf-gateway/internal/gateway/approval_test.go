@@ -370,3 +370,27 @@ func TestSession_SkipsAlreadyCheckpointedEvery16thHumanSlot(t *testing.T) {
 		t.Errorf("attendee_id = %q, want attendee-32 (skipping already-checkpointed attendee-16)", sess["attendee_id"])
 	}
 }
+
+func TestSession_HyperSwarmEvery4096thSlot(t *testing.T) {
+	gw := newTestGateway(t, "http://127.0.0.1:0",
+		gateway.WithMaxActors(16777216),
+		gateway.WithSeatsPerWorker(64),
+	)
+	if gw.HumanSlotStride() != 4096 {
+		t.Fatalf("HumanSlotStride() = %d, want 4096", gw.HumanSlotStride())
+	}
+
+	for _, want := range []string{"attendee-4096", "attendee-8192", "attendee-12288"} {
+		rec := getPath(gw, "/api/session")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("session status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var sess map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &sess); err != nil {
+			t.Fatalf("unmarshal session: %v", err)
+		}
+		if sess["attendee_id"] != want {
+			t.Fatalf("attendee_id = %q, want %q", sess["attendee_id"], want)
+		}
+	}
+}

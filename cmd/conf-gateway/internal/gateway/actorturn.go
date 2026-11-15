@@ -16,24 +16,77 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorproxy"
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
-func (g *Gateway) canFallbackApprovalToActor(attendeeID string) bool {
+type turnStartCtxKey struct{}
+
+type turnExecState struct {
+	startedAt      time.Time
+	asyncThinkHold time.Duration
+}
+
+func (g *Gateway) beginHyperTurnActivity(attendeeID string, act types.Activity) func() {
+	if g.board == nil || !g.board.IsHyperMode() || g.control == nil {
+		g.setActivity(attendeeID, act)
+		return func() {}
+	}
+	g.board.BeginHyperResume(attendeeID, act)
+	t := time.AfterFunc(1000*time.Millisecond, func() {
+		if g.ctx != nil && g.ctx.Err() != nil {
+			return
+		}
+		g.board.PromoteHyperResume(attendeeID)
+	})
+	return func() { t.Stop() }
+}
+
+func (g *Gateway) canFallbackApprovalToActor(reqCtx context.Context, attendeeID string) bool {
 	if g.control == nil || g.board == nil {
 		return false
 	}
+	if g.proxy != nil && g.proxy.PendingApproval(attendeeID) != nil {
+		// Fast path: gateway already holds the pending approval in memory, so
+		// ClaimApprovalWithFallback will not use actor fallback anyway.
+		return false
+	}
+	if g.maxActors > actorstate.HyperFleetThreshold && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) && !g.IsLeased(attendeeID) {
+		return true
+	}
 	v, ok := g.board.View(attendeeID)
-	return ok && !v.NeverStarted && !strings.Contains(v.SnapshotURI, "/tags/")
+	if ok && ((!v.NeverStarted && !strings.Contains(v.SnapshotURI, "/tags/")) || v.WorkerPod != "" || v.Activity == types.ActivityAwaitingApproval) {
+		return true
+	}
+	if g.maxActors > actorstate.HyperFleetThreshold && (isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) || g.IsLeased(attendeeID)) {
+		if getter, hasGet := g.control.(actorstate.SingleActorGetter); hasGet {
+			parentCtx := reqCtx
+			if parentCtx == nil {
+				parentCtx = g.ctx
+			}
+			ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
+			defer cancel()
+			if s, err := getter.Get(ctx, attendeeID); err == nil {
+				uri := s.SnapshotURI
+				if s.InProgressSnapshotURI != "" {
+					uri = s.InProgressSnapshotURI
+				}
+				return uri != "" && !strings.Contains(uri, "/tags/")
+			}
+		}
+	}
+	return false
 }
 
 func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
@@ -71,10 +124,12 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 					}
 					actionID := fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
 					sampled = g.shouldRecordAction(attendeeID, actionID, true)
-					g.mu.Lock()
-					g.appendChatHistoryLocked(attendeeID, userMsg)
-					g.currentActionID[attendeeID] = actionID
-					g.mu.Unlock()
+					if !useMock || sampled || g.maxActors <= actorstate.HyperFleetThreshold {
+						g.mu.Lock()
+						g.appendChatHistoryLocked(attendeeID, userMsg)
+						g.currentActionID[attendeeID] = actionID
+						g.mu.Unlock()
+					}
 					if sampled {
 						g.RecordActionEntry(types.ActionLogEntry{
 							ID:         actionID,
@@ -87,12 +142,16 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-	} else if r.URL.Path == "/api/approve" {
-		apprReq, release, ok := g.proxy.ClaimApprovalWithFallback(w, r, attendeeID, g.canFallbackApprovalToActor(attendeeID))
+	}
+	wasUnseatedSim := useMock && g.board != nil && g.board.IsHyperMode() && g.currentView(attendeeID).WorkerPod == ""
+	if r.URL.Path == "/api/approve" {
+		apprReq, release, ok := g.proxy.ClaimApprovalWithFallback(w, r, attendeeID, g.canFallbackApprovalToActor(r.Context(), attendeeID))
 		if !ok {
 			return
 		}
 		defer release()
+		useMock = apprReq.Mock
+		wasUnseatedSim = useMock && g.board != nil && g.board.IsHyperMode() && g.currentView(attendeeID).WorkerPod == ""
 		g.mu.RLock()
 		actionID := g.currentActionID[attendeeID]
 		g.mu.RUnlock()
@@ -112,22 +171,54 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		}
 		if apprReq.Decision == types.DecisionApprove {
 			entry.Activity = types.ActivityExecuting
-			g.setActivity(attendeeID, types.ActivityExecuting)
+			stopPromote := g.beginHyperTurnActivity(attendeeID, types.ActivityExecuting)
+			defer stopPromote()
 		}
 		if sampled {
 			g.RecordActionEntry(entry)
 		}
-	} else {
+	} else if r.URL.Path != "/api/chat" {
 		sampled = true
 	}
-	if r.URL.Path != "/api/approve" {
-		g.setActivity(attendeeID, types.ActivityThinking)
+	if useMock && g.board != nil {
+		g.board.SetSource(attendeeID, types.SourceMock)
 	}
-	if !useMock && (isReservedHumanSlotID(attendeeID, g.maxActors) || g.IsLeased(attendeeID)) {
+	stopChatPromote := func() {}
+	if r.URL.Path != "/api/approve" {
+		stopChatPromote = g.beginHyperTurnActivity(attendeeID, types.ActivityThinking)
+	}
+	if !useMock && (isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) || g.IsLeased(attendeeID)) {
 		g.LeaseAttendee(attendeeID)
 	}
-	g.beginTurn(attendeeID)
-	defer g.endTurn(attendeeID)
+	isApproveTurn := r.URL.Path == "/api/approve"
+	turnSeq := g.beginTurn(attendeeID)
+	execState := &turnExecState{startedAt: time.Now()}
+	defer func() {
+		if execState.asyncThinkHold > 0 {
+			hold := execState.asyncThinkHold
+			time.AfterFunc(hold, func() {
+				stopChatPromote()
+				g.mu.RLock()
+				sameTurn := !g.closed && g.turnSeq[attendeeID] == turnSeq
+				g.mu.RUnlock()
+				if !isApproveTurn && sameTurn && (g.ctx == nil || g.ctx.Err() == nil) {
+					isHyperAutoWait := g.control != nil && g.suspendAfter > 0 && g.board != nil && g.board.IsHyperMode() &&
+						useMock && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride())
+					if !isHyperAutoWait {
+						if sr := g.SimulationRunner(); sr == nil {
+							g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+						} else if running, _ := sr.Status(); running {
+							g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+						}
+					}
+				}
+				g.endTurnWithOpts(attendeeID, useMock, isApproveTurn)
+			})
+			return
+		}
+		stopChatPromote()
+		g.endTurnWithOpts(attendeeID, useMock, isApproveTurn)
+	}()
 	g.settleHistoryClear(r.Context(), attendeeID)
 
 	if sampled {
@@ -136,6 +227,21 @@ func (g *Gateway) proxyToActor(w http.ResponseWriter, r *http.Request) {
 		g.mu.Unlock()
 	}
 
+	r = r.WithContext(context.WithValue(r.Context(), turnStartCtxKey{}, execState))
+	if wasUnseatedSim {
+		g.unseatedSimInFlight.Add(1)
+		var releaseOnce sync.Once
+		releaseUnseated := func() {
+			releaseOnce.Do(func() {
+				g.unseatedSimInFlight.Add(-1)
+			})
+		}
+		wakeTimer := time.AfterFunc(2500*time.Millisecond, releaseUnseated)
+		defer func() {
+			wakeTimer.Stop()
+			releaseUnseated()
+		}()
+	}
 	g.proxy.ServeHTTP(w, actorproxy.WithMock(actorproxy.WithAttendee(r, attendeeID), useMock))
 }
 
@@ -150,6 +256,22 @@ func (g *Gateway) appendChatHistoryLocked(attendeeID string, msg types.ChatMessa
 func (g *Gateway) shouldRecordAction(attendeeID, actionID string, isStart bool) bool {
 	if g.maxActors <= 256 || attendeeID == "attendee-01" || g.IsLeased(attendeeID) {
 		return true
+	}
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		if !isStart {
+			g.mu.RLock()
+			ok := g.sampledActions[actionID]
+			g.mu.RUnlock()
+			return ok
+		}
+		nowNano := time.Now().UnixNano()
+		last := g.lastActionSampleNano.Load()
+		if nowNano-last < int64(80*time.Millisecond) {
+			return false
+		}
+		if !g.lastActionSampleNano.CompareAndSwap(last, nowNano) {
+			return false
+		}
 	}
 	g.mu.RLock()
 	sc := g.simController
@@ -170,7 +292,7 @@ func (g *Gateway) shouldRecordAction(attendeeID, actionID string, isStart bool) 
 		return false
 	}
 	now := time.Now()
-	if now.Sub(g.lastActionSample) < 80*time.Millisecond {
+	if g.maxActors <= actorstate.HyperFleetThreshold && now.Sub(g.lastActionSample) < 80*time.Millisecond {
 		return false
 	}
 	g.lastActionSample = now
@@ -183,10 +305,32 @@ func (g *Gateway) shouldRecordAction(attendeeID, actionID string, isStart bool) 
 
 // onProxyError records a router that could not be reached.
 func (g *Gateway) onProxyError(attendeeID string, err error) {
-	g.setActivity(attendeeID, types.ActivityIdle)
+	if g.proxy != nil && g.proxy.PendingApproval(attendeeID) != nil {
+		g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+	} else {
+		g.setActivity(attendeeID, types.ActivityIdle)
+	}
+	g.scheduleUnseatedRevert(attendeeID)
 	g.mu.Lock()
 	g.addEventLocked(fmt.Sprintf("Router proxy error for %s: %v", attendeeID, err))
 	g.mu.Unlock()
+}
+
+func (g *Gateway) hyperActiveTurnHold() time.Duration {
+	activeSeats := 0
+	if g.board != nil {
+		activeSeats = g.board.ActiveSeatCount()
+	}
+	switch {
+	case activeSeats < 210000:
+		return 24*time.Second + time.Duration(rand.Int64N(int64(12*time.Second)))
+	case activeSeats < 225000:
+		return 10*time.Second + time.Duration(rand.Int64N(int64(8*time.Second)))
+	case activeSeats < 238000:
+		return 4*time.Second + time.Duration(rand.Int64N(int64(4*time.Second)))
+	default:
+		return 1500*time.Millisecond + time.Duration(rand.Int64N(int64(1500*time.Millisecond)))
+	}
 }
 
 func (g *Gateway) mockTurnDelay(minD, maxD time.Duration) time.Duration {
@@ -202,6 +346,10 @@ func (g *Gateway) mockTurnDelay(minD, maxD time.Duration) time.Duration {
 // onActorReply records an actor's answer to a turn: its activity, chat
 // history, pending approval, and the action feed entry.
 func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMessage) {
+	g.onActorReplyWithContext(g.ctx, attendeeID, status, msg)
+}
+
+func (g *Gateway) onActorReplyWithContext(reqCtx context.Context, attendeeID string, status int, msg *types.ChatMessage) {
 	var isWaitingForApproval bool
 	var chatMsg types.ChatMessage
 	hasChatMsg := msg != nil
@@ -212,17 +360,60 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 		}
 	}
 
-	if hasChatMsg && chatMsg.Source == types.SourceMock {
-		var hold time.Duration
-		if isWaitingForApproval {
-			hold = g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
-		} else {
-			hold = g.mockTurnDelay(g.mockExecMin, g.mockExecMax)
+	var execState *turnExecState
+	if reqCtx != nil {
+		execState, _ = reqCtx.Value(turnStartCtxKey{}).(*turnExecState)
+	}
+
+	if hasChatMsg && chatMsg.Source == types.SourceMock && isWaitingForApproval {
+		if reqCtx != nil && reqCtx.Err() != nil {
+			g.setActivity(attendeeID, types.ActivityIdle)
+			return
 		}
-		if hold > 0 && g.ctx != nil {
-			select {
-			case <-time.After(hold):
-			case <-g.ctx.Done():
+		rawHold := g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
+		if g.maxActors > actorstate.HyperFleetThreshold && rawHold > time.Second && execState != nil && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) {
+			targetHold := g.hyperActiveTurnHold()
+			if !execState.startedAt.IsZero() {
+				targetHold -= time.Since(execState.startedAt)
+			}
+			if targetHold > 0 {
+				execState.asyncThinkHold = targetHold
+			}
+		} else {
+			hold := rawHold
+			if execState != nil && !execState.startedAt.IsZero() {
+				hold -= time.Since(execState.startedAt)
+			}
+			if hold > 0 {
+				var reqDone <-chan struct{}
+				if reqCtx != nil {
+					reqDone = reqCtx.Done()
+				}
+				var gwDone <-chan struct{}
+				if g.ctx != nil {
+					gwDone = g.ctx.Done()
+				}
+				timer := time.NewTimer(hold)
+				select {
+				case <-timer.C:
+				case <-reqDone:
+					timer.Stop()
+					g.setActivity(attendeeID, types.ActivityIdle)
+					return
+				case <-gwDone:
+					timer.Stop()
+				}
+			}
+		}
+	} else if hasChatMsg && chatMsg.Source == types.SourceMock && chatMsg.Execution != nil {
+		rawHold := g.mockTurnDelay(g.mockThinkMin, g.mockThinkMax)
+		if g.maxActors > actorstate.HyperFleetThreshold && rawHold > time.Second && execState != nil && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) {
+			targetHold := g.hyperActiveTurnHold()
+			if !execState.startedAt.IsZero() {
+				targetHold -= time.Since(execState.startedAt)
+			}
+			if targetHold > 0 {
+				execState.asyncThinkHold = targetHold
 			}
 		}
 	}
@@ -230,7 +421,20 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 	if hasChatMsg {
 		g.board.SetSource(attendeeID, chatMsg.Source)
 		if isWaitingForApproval {
-			g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+			isHyperAutoWait := g.control != nil && g.suspendAfter > 0 && g.board != nil && g.board.IsHyperMode() &&
+				chatMsg.Source == types.SourceMock && !g.IsLeased(attendeeID) && !isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride())
+			if isHyperAutoWait {
+				// Keep ActivityThinking visible while on the worker seat until
+				// FinishHyperSuspend / SetActiveStatuses transitions the actor to
+				// ActivityAwaitingApproval in GCS.
+				g.setActivity(attendeeID, types.ActivityThinking)
+			} else if execState == nil || execState.asyncThinkHold <= 0 {
+				g.setActivity(attendeeID, types.ActivityAwaitingApproval)
+			}
+		} else if chatMsg.Execution != nil && g.control != nil && g.suspendAfter > 0 && g.board != nil && g.board.IsHyperMode() {
+			// Keep ActivityExecuting visible during the SUSPEND_AFTER window until
+			// BeginHyperSuspend transitions the actor to StateSuspending.
+			g.setActivity(attendeeID, types.ActivityExecuting)
 		} else {
 			g.setActivity(attendeeID, types.ActivityIdle)
 		}
@@ -239,19 +443,6 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 	}
 	workerPod := g.currentView(attendeeID).WorkerPod
 
-	var newExec types.ExecutionResult
-	hasNewExec := hasChatMsg && chatMsg.Execution != nil
-	if hasNewExec {
-		newExec = *chatMsg.Execution
-		// The agent already proposed a fix for a corrected run, so the
-		// spotlight keeps what it showed.
-		if !newExec.Corrected {
-			g.mu.Lock()
-			g.lastResults[attendeeID] = &newExec
-			g.mu.Unlock()
-		}
-	}
-
 	g.mu.RLock()
 	actionID := g.currentActionID[attendeeID]
 	g.mu.RUnlock()
@@ -259,6 +450,23 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 		actionID = fmt.Sprintf("act-%s-%d", attendeeID, time.Now().UnixNano())
 	}
 	sampled := g.shouldRecordAction(attendeeID, actionID, false)
+	isHumanOrSampled := chatMsg.Source != types.SourceMock || sampled || g.maxActors <= actorstate.HyperFleetThreshold || attendeeID == "attendee-01" || g.IsLeased(attendeeID) || isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride())
+
+	var newExec types.ExecutionResult
+	hasNewExec := hasChatMsg && chatMsg.Execution != nil
+	if hasNewExec {
+		newExec = *chatMsg.Execution
+		// The agent already proposed a fix for a corrected run, so the
+		// spotlight keeps what it showed.
+		if !newExec.Corrected && isHumanOrSampled {
+			g.mu.Lock()
+			if g.maxActors > actorstate.HyperFleetThreshold && len(g.lastResults) >= 2048 {
+				clear(g.lastResults)
+			}
+			g.lastResults[attendeeID] = &newExec
+			g.mu.Unlock()
+		}
+	}
 
 	if isWaitingForApproval {
 		if hasNewExec && newExec.Corrected {
@@ -275,17 +483,21 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 				})
 			}
 			actionID = fmt.Sprintf("act-fix-%s-%d", attendeeID, time.Now().UnixNano())
-			g.mu.Lock()
-			g.currentActionID[attendeeID] = actionID
-			if sampled {
-				g.sampledActions[actionID] = true
+			if isHumanOrSampled {
+				g.mu.Lock()
+				g.currentActionID[attendeeID] = actionID
+				if sampled {
+					g.sampledActions[actionID] = true
+				}
+				g.mu.Unlock()
 			}
-			g.mu.Unlock()
 		}
 
 		g.mu.Lock()
-		g.proxy.SetPending(attendeeID, chatMsg.Approval)
-		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
+		if g.control == nil || isHumanOrSampled {
+			g.proxy.SetPending(attendeeID, chatMsg.Approval)
+		}
+		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") && isHumanOrSampled {
 			history := g.chatHistories[attendeeID]
 			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
 				g.appendChatHistoryLocked(attendeeID, chatMsg)
@@ -313,8 +525,11 @@ func (g *Gateway) onActorReply(attendeeID string, status int, msg *types.ChatMes
 		}
 	} else if status == http.StatusOK {
 		g.mu.Lock()
-		g.proxy.ClearPending(attendeeID)
-		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") {
+		delete(g.currentActionID, attendeeID)
+		if g.control == nil || isHumanOrSampled {
+			g.proxy.ClearPending(attendeeID)
+		}
+		if hasChatMsg && (chatMsg.ID != "" || chatMsg.Content != "") && isHumanOrSampled {
 			history := g.chatHistories[attendeeID]
 			if len(history) == 0 || history[len(history)-1].ID != chatMsg.ID {
 				g.appendChatHistoryLocked(attendeeID, chatMsg)

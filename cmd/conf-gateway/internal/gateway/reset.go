@@ -21,10 +21,12 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/actorstate"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 )
 
@@ -189,7 +191,28 @@ func (g *Gateway) SuspendActorForReset(ctx context.Context, attendeeID string) e
 
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	return g.control.Suspend(callCtx, attendeeID)
+	if g.maxActors > actorstate.HyperFleetThreshold {
+		// In hyper mode, RevertActor releases the worker seat and transitions a
+		// RUNNING actor back to SUSPENDED (keeping its last completed durable
+		// snapshot) without invoking sts.googleapis.com or uploading a redundant
+		// post-reset snapshot. Only fall back to paced Suspend if the actor was
+		// already mid-SUSPENDING.
+		err := g.control.Revert(callCtx, attendeeID)
+		if err == nil || strings.Contains(err.Error(), "ACTOR_STATE_SUSPENDED") {
+			if g.board != nil {
+				g.board.FinishHyperSuspend(attendeeID, true)
+			}
+			return nil
+		}
+		if !g.paceAutomatedSuspend(callCtx, attendeeID) {
+			return callCtx.Err()
+		}
+	}
+	err := g.control.Suspend(callCtx, attendeeID)
+	if g.board != nil {
+		g.board.FinishHyperSuspend(attendeeID, err == nil)
+	}
+	return err
 }
 
 // RevertActorForReset reverts one crashed actor during a data-generator reset pass.

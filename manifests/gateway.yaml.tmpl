@@ -132,6 +132,21 @@ spec:
     spec:
       serviceAccountName: conf-gateway
       terminationGracePeriodSeconds: 45
+      tolerations:
+      - key: ate.dev/workloadType
+        operator: Equal
+        value: ate-system-infra
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: ate.dev/workloadType
+                operator: In
+                values:
+                - ate-system-infra
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -181,6 +196,10 @@ spec:
           value: "${ACTOR_COUNT}"
         - name: ACTORS_PER_WORKER
           value: "${ACTORS_PER_WORKER}"
+        - name: HUMAN_SLOT_STRIDE
+          value: "${HUMAN_SLOT_STRIDE}"
+        - name: SIMULATION_MAX_MPS
+          value: "${SIMULATION_MAX_MPS}"
         - name: ALLOWED_GOOGLE_DOMAINS
           value: "${ALLOWED_GOOGLE_DOMAINS}"
         - name: GOOGLE_CLIENT_ID
@@ -226,7 +245,7 @@ spec:
             cpu: 1000m
             memory: 512Mi
           limits:
-            memory: 4Gi
+            memory: ${GATEWAY_MEMORY_LIMIT}
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

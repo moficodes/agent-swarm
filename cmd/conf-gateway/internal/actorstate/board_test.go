@@ -15,6 +15,7 @@
 package actorstate_test
 
 import (
+	"encoding/binary"
 	"runtime"
 	"sync"
 	"testing"
@@ -282,5 +283,226 @@ func TestBoard_TelemetrySnapshotCompactAndStandard(t *testing.T) {
 	}
 	if _, ok := actorsLarge["attendee-16"]; !ok {
 		t.Errorf("leased attendee-16 should remain in pruned actors map")
+	}
+}
+
+func TestBoard_HyperMode16Million(t *testing.T) {
+	const total = 16777216
+	b := actorstate.NewBoardWithCapacity(func(types.ActorView) {}, total)
+	if !b.IsHyperMode() {
+		t.Fatalf("expected IsHyperMode() == true for %d actors", total)
+	}
+
+	for _, id := range []string{"attendee-01", "attendee-02", "attendee-16777215"} {
+		b.SetActivity(id, types.ActivityAwaitingApproval)
+		b.SetSource(id, types.SourceMock)
+	}
+	b.SetActiveStatuses([]actorstate.Status{
+		{Name: "attendee-4096", State: types.StateRunning, WorkerPod: "conf-workers-pod-1"},
+		{Name: "attendee-8192", State: types.StateRunning, WorkerPod: "conf-workers-pod-2"},
+	})
+	if got := b.ActiveSeatCount(); got != 2 {
+		t.Fatalf("ActiveSeatCount() = %d, want 2", got)
+	}
+
+	// Evicting attendee-8192 from active statuses marks it checkpointed SUSPENDED and frees b.views.
+	b.SetActiveStatuses([]actorstate.Status{
+		{Name: "attendee-4096", State: types.StateRunning, WorkerPod: "conf-workers-pod-1"},
+	})
+	if got := b.ActiveSeatCount(); got != 1 {
+		t.Fatalf("ActiveSeatCount() after suspend = %d, want 1", got)
+	}
+	v8192, ok := b.View("attendee-8192")
+	if !ok || v8192.State != types.StateSuspended || v8192.NeverStarted {
+		t.Fatalf("View(attendee-8192) = %+v (ok=%v), want checkpointed SUSPENDED", v8192, ok)
+	}
+
+	leased := map[string]bool{"attendee-12288": true}
+	actors, compact, running, suspended := b.TelemetrySnapshotWithLeases(total, func(id string) bool { return leased[id] }, []string{"attendee-12288"})
+	if len(compact) != total {
+		t.Fatalf("len(compact) = %d, want %d", len(compact), total)
+	}
+	if running != 1 || suspended != total-1 {
+		t.Errorf("running=%d suspended=%d, want 1 and %d", running, suspended, total-1)
+	}
+	if got := compact[0] - '@'; got != 6 {
+		t.Errorf("attendee-01 code = %d, want 6 (AwaitingApproval)", got)
+	}
+	if got := compact[4095] - '@'; got != 4 {
+		t.Errorf("attendee-4096 code = %d, want 4 (Running)", got)
+	}
+	if got := compact[8191] - '@'; got != 1 {
+		t.Errorf("attendee-8192 code = %d, want 1 (Checkpointed SUSPENDED)", got)
+	}
+	if got := compact[12287] - '@'; got != 16 {
+		t.Errorf("attendee-12288 code = %d, want 16 (NeverStarted + Leased)", got)
+	}
+	if _, ok := actors["attendee-4096"]; !ok {
+		t.Errorf("seated attendee-4096 missing from actors snapshot")
+	}
+	if _, ok := actors["attendee-12288"]; !ok {
+		t.Errorf("leased attendee-12288 missing from actors snapshot")
+	}
+
+	// TelemetrySnapshotOptions with includeCompact=false omits the 16.78M string while preserving exact counters.
+	_, compactOmitted, runOpt, suspOpt, activeCohortOpt, snapOpt, leasedOpt := b.TelemetrySnapshotOptions(
+		total, func(id string) bool { return leased[id] }, []string{"attendee-12288"}, false,
+	)
+	if compactOmitted != "" {
+		t.Errorf("compactOmitted len = %d, want 0", len(compactOmitted))
+	}
+	if runOpt != 1 || suspOpt != total-1 {
+		t.Errorf("TelemetrySnapshotOptions running=%d suspended=%d, want 1 and %d", runOpt, suspOpt, total-1)
+	}
+	// Active cohort: indices 1, 2, 16777215 (AwaitingApproval = 3) + attendee-4096 (Running = 1) = 4;
+	// Snapshotted: attendee-8192 (Checkpointed SUSPENDED = 1); Leased: attendee-12288 (= 1).
+	if activeCohortOpt != 4 || snapOpt != 1 || leasedOpt != 1 {
+		t.Errorf("TelemetrySnapshotOptions counters active=%d snap=%d leased=%d, want 4, 1, 1", activeCohortOpt, snapOpt, leasedOpt)
+	}
+
+	// Binary snapshot ("SWFL" 24-byte header + 16,777,216 raw bytes with bit 5 onPod and bit 4 leased).
+	bin := b.FleetBinarySnapshot(total, func(id string) bool { return leased[id] }, []string{"attendee-12288"})
+	if len(bin) != actorstate.FleetBinaryHeaderBytes+total {
+		t.Fatalf("len(bin) = %d, want %d", len(bin), actorstate.FleetBinaryHeaderBytes+total)
+	}
+	if string(bin[0:4]) != "SWFL" {
+		t.Fatalf("magic = %q, want SWFL", string(bin[0:4]))
+	}
+	if v := binary.LittleEndian.Uint32(bin[4:8]); v != 1 {
+		t.Errorf("version = %d, want 1", v)
+	}
+	if cnt := binary.LittleEndian.Uint32(bin[8:12]); cnt != total {
+		t.Errorf("actorCount = %d, want %d", cnt, total)
+	}
+	if ac := binary.LittleEndian.Uint32(bin[12:16]); ac != 4 {
+		t.Errorf("binary activeCohort = %d, want 4", ac)
+	}
+	if sc := binary.LittleEndian.Uint32(bin[16:20]); sc != 1 {
+		t.Errorf("binary snapshotted = %d, want 1", sc)
+	}
+	if lc := binary.LittleEndian.Uint32(bin[20:24]); lc != 1 {
+		t.Errorf("binary leased = %d, want 1", lc)
+	}
+	payload := bin[actorstate.FleetBinaryHeaderBytes:]
+	if got := payload[0]; got != 6 {
+		t.Errorf("payload[0] (attendee-01) = %d, want 6", got)
+	}
+	if got := payload[4095]; got != (4 | 32) {
+		t.Errorf("payload[4095] (seated attendee-4096) = %d, want %d (Running | onPod)", got, 4|32)
+	}
+	if got := payload[12287]; got != 16 {
+		t.Errorf("payload[12287] (leased attendee-12288) = %d, want 16", got)
+	}
+
+	// Fast ClearUnleasedActivityIndices preserves protected indices and 4096-stride slots while clearing unleased simulated activity.
+	b.SetActivity("attendee-4096", types.ActivityThinking)
+	b.SetSource("attendee-4096", types.SourceGemini)
+	b.ClearUnleasedActivityIndices(map[int]bool{2: true}, func(id string) bool { return id == "attendee-02" }, 4096)
+	binAfter := b.FleetBinarySnapshot(total, nil, nil)
+	payloadAfter := binAfter[actorstate.FleetBinaryHeaderBytes:]
+	if got := payloadAfter[0] & 15; got != 0 {
+		t.Errorf("attendee-01 after ClearUnleasedActivityIndices = %d, want 0 (cleared)", got)
+	}
+	if got := payloadAfter[1] & 15; got != 6 {
+		t.Errorf("protected attendee-02 after ClearUnleasedActivityIndices = %d, want 6 (preserved)", got)
+	}
+	if got := payloadAfter[4095] & 15; got != 4 {
+		t.Errorf("stride-protected seated attendee-4096 = %d, want 4", got)
+	}
+}
+
+func TestBoard_HyperModeLifecycleResumingThinkingExecutingRunningSuspendingSuspended(t *testing.T) {
+	const total = 100000
+	b := actorstate.NewBoardWithCapacity(func(types.ActorView) {}, total)
+
+	codeOf := func(idx1 int) byte {
+		bin := b.FleetBinarySnapshot(total, nil, nil)
+		return bin[actorstate.FleetBinaryHeaderBytes+idx1-1]
+	}
+
+	// 0. NeverStarted -> code 0
+	if got := codeOf(42); got != 0 {
+		t.Fatalf("initial code = %d, want 0 (NeverStarted)", got)
+	}
+
+	// 1. BeginHyperResume -> code 2 (Resuming), surviving an intermediate empty poll before worker assignment.
+	b.BeginHyperResume("attendee-42", types.ActivityThinking)
+	if got := codeOf(42) & 15; got != 2 {
+		t.Fatalf("after BeginHyperResume code = %d, want 2 (Resuming)", got)
+	}
+	b.SetActiveStatuses(nil)
+	if got := codeOf(42) & 15; got != 2 {
+		t.Fatalf("after pre-assignment SetActiveStatuses code = %d, want 2 (Resuming preserved)", got)
+	}
+
+	// 2. Worker pod assigned -> StateRunning + ActivityThinking -> code 5 | 32 (onPod)
+	b.SetActiveStatuses([]actorstate.Status{
+		{Name: "attendee-42", State: types.StateRunning, WorkerPod: "worker-7"},
+	})
+	if got := codeOf(42); got != (5 | 32) {
+		t.Fatalf("after worker assignment code = %d, want %d (Thinking | onPod)", got, 5|32)
+	}
+
+	// 3. Auto-chained approve on already-seated actor -> ActivityExecuting -> code 7 | 32 (no Resuming detour)
+	b.BeginHyperResume("attendee-42", types.ActivityExecuting)
+	if got := codeOf(42); got != (7 | 32) {
+		t.Fatalf("during approve execution code = %d, want %d (Executing | onPod)", got, 7|32)
+	}
+
+	// 4. Turn finishes, warm SUSPEND_AFTER window -> StateRunning + ActivityIdle -> code 4 | 32
+	b.SetActivity("attendee-42", types.ActivityIdle)
+	if got := codeOf(42); got != (4 | 32) {
+		t.Fatalf("during warm running idle window code = %d, want %d (Running | onPod)", got, 4|32)
+	}
+
+	// 5. BeginHyperSuspend -> StateSuspending -> code 3 | 32, surviving an intermediate active-seat poll.
+	b.BeginHyperSuspend("attendee-42")
+	if got := codeOf(42); got != (3 | 32) {
+		t.Fatalf("during BeginHyperSuspend code = %d, want %d (Suspending | onPod)", got, 3|32)
+	}
+	b.SetActiveStatuses([]actorstate.Status{
+		{Name: "attendee-42", State: types.StateRunning, WorkerPod: "worker-7"},
+	})
+	if got := codeOf(42); got != (3 | 32) {
+		t.Fatalf("during active-seat poll mid-suspend code = %d, want %d (Suspending | onPod preserved)", got, 3|32)
+	}
+
+	// 6. FinishHyperSuspend(true) -> Checkpointed SUSPENDED -> code 1 (unseated)
+	if b.IsCheckpointedIndex(43) {
+		t.Fatalf("IsCheckpointedIndex(43) = true on untouched NeverStarted slot, want false")
+	}
+	b.FinishHyperSuspend("attendee-42", true)
+	if !b.IsCheckpointedIndex(42) {
+		t.Fatalf("IsCheckpointedIndex(42) = false after FinishHyperSuspend, want true")
+	}
+	if got := codeOf(42); got != 1 {
+		t.Fatalf("after FinishHyperSuspend code = %d, want 1 (Checkpointed SUSPENDED)", got)
+	}
+	if seats := b.ActiveSeatCount(); seats != 0 {
+		t.Fatalf("ActiveSeatCount after FinishHyperSuspend = %d, want 0", seats)
+	}
+
+	// 7. MarkCheckpointedBatch hydrates pre-existing checkpointed actors on startup,
+	// and unseated BeginHyperResume(ActivityExecuting) immediately shows code 7 (Executing).
+	b.MarkCheckpointedBatch([]int{10, 20, 30})
+	if !b.IsCheckpointedIndex(20) || codeOf(20) != 1 {
+		t.Fatalf("after MarkCheckpointedBatch codeOf(20) = %d, want 1 (Checkpointed SUSPENDED)", codeOf(20))
+	}
+	b.SetActivity("attendee-20", types.ActivityAwaitingApproval)
+	b.FinishHyperSuspend("attendee-20", true)
+	if got := codeOf(20); got != 6 {
+		t.Fatalf("while suspended awaiting approval codeOf(20) = %d, want 6", got)
+	}
+	b.BeginHyperResume("attendee-20", types.ActivityExecuting)
+	if got := codeOf(20) & 15; got != 7 {
+		t.Fatalf("after unseated BeginHyperResume(ActivityExecuting) code = %d, want 7 (Executing)", got)
+	}
+	b.BeginHyperSuspend("attendee-20")
+	if got := codeOf(20) & 15; got != 3 {
+		t.Fatalf("during post-execution BeginHyperSuspend code = %d, want 3 (Suspending)", got)
+	}
+	b.FinishHyperSuspend("attendee-20", true)
+	if got := codeOf(20); got != 1 {
+		t.Fatalf("after post-execution FinishHyperSuspend code = %d, want 1 (Checkpointed SUSPENDED)", got)
 	}
 }

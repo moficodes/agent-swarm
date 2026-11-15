@@ -144,6 +144,21 @@ spec:
         app: conf-prometheus
     spec:
       serviceAccountName: conf-prometheus
+      tolerations:
+      - key: ate.dev/workloadType
+        operator: Equal
+        value: ate-system-infra
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: ate.dev/workloadType
+                operator: In
+                values:
+                - ate-system-infra
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -253,6 +268,21 @@ spec:
         app: conf-prometheus-adapter
     spec:
       serviceAccountName: conf-prometheus-adapter
+      tolerations:
+      - key: ate.dev/workloadType
+        operator: Equal
+        value: ate-system-infra
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: ate.dev/workloadType
+                operator: In
+                values:
+                - ate-system-infra
       securityContext:
         runAsNonRoot: true
         seccompProfile:

@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -110,6 +111,10 @@ type Config struct {
 	ActorCount int
 	// ActorsPerWorker is how many actors one worker pod hosts at once.
 	ActorsPerWorker int
+	// HumanSlotStride is the periodic reserved QR attendee slot stride (0 = auto).
+	HumanSlotStride int
+	// MaxSimulationMPS overrides the peak target MPS on data-generator for >65k runs.
+	MaxSimulationMPS int
 	// AllowedGoogleDomains lists Google Workspace domains whose verified users
 	// may sign in to presenter pages (/stage and /feed). Empty disables Google Sign-In.
 	AllowedGoogleDomains []string
@@ -216,6 +221,8 @@ func LoadConfig() Config {
 		ModelAllowlist:        splitList(os.Getenv("MODEL_ALLOWLIST"), "gemini-3.8-flash"),
 		ActorCount:            envPositiveInt("ACTOR_COUNT", 50),
 		ActorsPerWorker:       envPositiveInt("ACTORS_PER_WORKER", 1),
+		HumanSlotStride:       envNonNegativeInt("HUMAN_SLOT_STRIDE", 0),
+		MaxSimulationMPS:      envNonNegativeInt("SIMULATION_MAX_MPS", 0),
 		AllowedGoogleDomains:  auth.NormalizeDomains([]string{os.Getenv("ALLOWED_GOOGLE_DOMAINS")}),
 		GoogleClientID:        strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
 		FirebaseAPIKey:        strings.TrimSpace(os.Getenv("FIREBASE_API_KEY")),
@@ -326,6 +333,16 @@ func newModelProxy(ctx context.Context, cfg Config) (*modelproxy.Proxy, error) {
 	return modelproxy.New(pc)
 }
 
+func inClusterRestConfig() (*rest.Config, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	restCfg.QPS = 50
+	restCfg.Burst = 100
+	return restCfg, nil
+}
+
 // newRouterHTTPClient builds the HTTP client for atenet-router. When neither
 // RouterCAFile nor RouterCredBundle is set (for example in local mode), it
 // returns http.DefaultClient; otherwise both must be set for mTLS.
@@ -333,7 +350,16 @@ func newRouterHTTPClient(cfg Config) (*http.Client, error) {
 	if cfg.RouterCAFile == "" && cfg.RouterCredBundle == "" {
 		return http.DefaultClient, nil
 	}
-	return routertls.NewHTTPClient(cfg.RouterCAFile, cfg.RouterCredBundle)
+	var opts []routertls.ClientOption
+	if !cfg.LocalMode && cfg.RouterStatusDiscovery == "endpointslices" {
+		if restCfg, err := inClusterRestConfig(); err == nil {
+			if client, cErr := kubernetes.NewForConfig(restCfg); cErr == nil {
+				addrs := routerstatus.NewEndpointSliceAddrs(client, routerStatusNamespace, routerStatusService, "https", 8443)
+				opts = append(opts, routertls.WithEndpointResolver(addrs.Addrs))
+			}
+		}
+	}
+	return routertls.NewHTTPClient(cfg.RouterCAFile, cfg.RouterCredBundle, opts...)
 }
 
 // newRouterStatusSource builds the router pod source cfg.RouterStatusDiscovery
@@ -345,7 +371,7 @@ func newRouterStatusSource(cfg Config) (routerstatus.Source, error) {
 	case "static":
 		return routerstatus.StaticTargets{cfg.StatusURL}, nil
 	case "endpointslices":
-		restCfg, err := rest.InClusterConfig()
+		restCfg, err := inClusterRestConfig()
 		if err != nil {
 			return nil, fmt.Errorf("loading in-cluster config: %w", err)
 		}
@@ -374,7 +400,7 @@ func newActorControl(cfg Config) (*actorstate.KubectlATE, error) {
 // newInClusterGRPCControl builds a direct gRPC ActorControl client when running
 // inside a Kubernetes cluster, avoiding per-poll kubectl-ate subprocesses.
 func newInClusterGRPCControl(cfg Config) (*actorstate.GRPCControl, error) {
-	restCfg, err := rest.InClusterConfig()
+	restCfg, err := inClusterRestConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +414,7 @@ func newInClusterGRPCControl(cfg Config) (*actorstate.GRPCControl, error) {
 // newWorkerScaleReader builds a reader for the configured worker pool's size
 // from the in-cluster Kubernetes API.
 func newWorkerScaleReader(cfg Config) (*workerscale.Reader, error) {
-	restCfg, err := rest.InClusterConfig()
+	restCfg, err := inClusterRestConfig()
 	if err != nil {
 		return nil, fmt.Errorf("loading in-cluster config: %w", err)
 	}
@@ -405,6 +431,9 @@ func newWorkerScaleReader(cfg Config) (*workerscale.Reader, error) {
 
 func main() {
 	cfg := LoadConfig()
+	if cfg.ActorCount > actorstate.HyperFleetThreshold && os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(12 << 30)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -420,6 +449,8 @@ func main() {
 	}
 	if !proxy.Enabled() {
 		log.Printf("VERTEX_PROJECT is unset; model calls are disabled and actors reply with the mock engine.")
+	} else if !cfg.LocalMode {
+		proxy.WarmCredentials(ctx)
 	}
 
 	routerHTTPClient, err := newRouterHTTPClient(cfg)
@@ -448,6 +479,8 @@ func main() {
 		gateway.WithPollInterval(cfg.StatePollInterval),
 		gateway.WithMaxActors(cfg.ActorCount),
 		gateway.WithSeatsPerWorker(cfg.ActorsPerWorker),
+		gateway.WithHumanSlotStride(cfg.HumanSlotStride),
+		gateway.WithMaxSimulationMPS(cfg.MaxSimulationMPS),
 		gateway.WithSuspendAfter(cfg.SuspendAfter),
 		gateway.WithSuspendDrainTimeout(20 * time.Second),
 		gateway.WithHTTPClient(routerHTTPClient),

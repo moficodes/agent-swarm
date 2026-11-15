@@ -93,6 +93,43 @@ func (c attendeeControl) List(ctx context.Context) ([]actorstate.Status, error) 
 	return filtered, nil
 }
 
+func (c attendeeControl) ListActiveSeats(ctx context.Context) ([]actorstate.Status, error) {
+	sl, ok := c.ActorControl.(actorstate.ActiveSeatLister)
+	if !ok {
+		return c.List(ctx)
+	}
+	statuses, err := sl.ListActiveSeats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]actorstate.Status, 0, len(statuses))
+	for _, s := range statuses {
+		if auth.ValidAttendeeID(s.Name, c.maxActors) {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered, nil
+}
+
+func (c attendeeControl) Get(ctx context.Context, name string) (actorstate.Status, error) {
+	if !auth.ValidAttendeeID(name, c.maxActors) {
+		return actorstate.Status{}, fmt.Errorf("invalid attendee actor %q", name)
+	}
+	getter, ok := c.ActorControl.(actorstate.SingleActorGetter)
+	if !ok {
+		return actorstate.Status{}, fmt.Errorf("GetActor unsupported")
+	}
+	return getter.Get(ctx, name)
+}
+
+func (c attendeeControl) HydrateCheckpointed(ctx context.Context, maxActors int, onBatch func(indices []int)) error {
+	h, ok := c.ActorControl.(actorstate.CheckpointHydrator)
+	if !ok {
+		return nil
+	}
+	return h.HydrateCheckpointed(ctx, maxActors, onBatch)
+}
+
 // WithPollInterval sets how often actor state is read from ateapi.
 func WithPollInterval(d time.Duration) Option {
 	return func(g *Gateway) {
@@ -153,14 +190,11 @@ func WithMockLLM(on bool) Option {
 	return func(g *Gateway) { g.mockLLM = on }
 }
 
-// WithMockTurnDelays sets optional simulated thinking and execution durations
-// held while an actor is running on a worker seat during mock turns.
-func WithMockTurnDelays(thinkMin, thinkMax, execMin, execMax time.Duration) Option {
+// WithMockTurnDelays sets optional simulated thinking durations for mock chat turns.
+func WithMockTurnDelays(thinkMin, thinkMax, _, _ time.Duration) Option {
 	return func(g *Gateway) {
 		g.mockThinkMin = thinkMin
 		g.mockThinkMax = thinkMax
-		g.mockExecMin = execMin
-		g.mockExecMax = execMax
 	}
 }
 
@@ -187,6 +221,26 @@ func WithSeatsPerWorker(n int) Option {
 	return func(g *Gateway) {
 		if n > 0 {
 			g.seatsPerWorker = n
+		}
+	}
+}
+
+// WithHumanSlotStride sets the periodic human-reserved QR slot stride (e.g. 16
+// on megaswarm, 4096 on hyperswarm). Zero derives the stride from maxActors.
+func WithHumanSlotStride(stride int) Option {
+	return func(g *Gateway) {
+		if stride > 0 {
+			g.humanSlotStride = stride
+		}
+	}
+}
+
+// WithMaxSimulationMPS overrides the maximum target MPS configured on
+// data-generator when running hyperswarm simulations (>65,536 actors).
+func WithMaxSimulationMPS(mps int) Option {
+	return func(g *Gateway) {
+		if mps > 0 {
+			g.maxSimulationMPS = mps
 		}
 	}
 }
@@ -287,6 +341,8 @@ type Gateway struct {
 	staticFS            fs.FS
 	maxActors           int
 	seatsPerWorker      int
+	humanSlotStride     int
+	maxSimulationMPS    int
 	broker              *feed.Broker
 	actions             *feed.Log
 
@@ -302,9 +358,12 @@ type Gateway struct {
 	mockLLM              bool
 	mockThinkMin         time.Duration
 	mockThinkMax         time.Duration
-	mockExecMin          time.Duration
-	mockExecMax          time.Duration
 	statePollMs          atomic.Int64
+	firstActivePollDone  atomic.Bool
+	unseatedSimInFlight  atomic.Int64
+	activeTurnsCount     atomic.Int64
+	leasedCountAtomic    atomic.Int64
+	lastActionSampleNano atomic.Int64
 
 	mux         *http.ServeMux
 	proxy       *actorproxy.Proxy
@@ -326,6 +385,11 @@ type Gateway struct {
 	simulationTurnURL string
 	// suspendSem bounds concurrent SuspendActor RPCs to ate-api-server.
 	suspendSem chan struct{}
+	// revertSem bounds concurrent background RevertActor RPCs for unseated actors that failed to wake.
+	revertSem chan struct{}
+	// suspendNextUnixNano paces automated hyper-mode SuspendActor RPCs so
+	// checkpoint uploads stay below GCP's project-wide 100 QPS STS token-exchange limit.
+	suspendNextUnixNano atomic.Int64
 	// suspendTimers holds each attendee's pending auto-suspend when
 	// suspendAfter is positive. Each pending timer holds one wg count.
 	suspendTimers map[string]*time.Timer
@@ -341,7 +405,8 @@ type Gateway struct {
 	turnsInFlight map[string]int
 	// turnSeq counts each attendee's turns, so a scheduled suspend can tell
 	// that a newer turn has started since it was scheduled.
-	turnSeq map[string]uint64
+	turnSeq     map[string]uint64
+	nextTurnSeq uint64
 	// beforeSuspendCheck, when set by tests, runs just before a scheduled
 	// suspend re-checks for newer turns.
 	beforeSuspendCheck func(attendee string)
@@ -383,6 +448,7 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		sampledActions:       make(map[string]bool),
 		recentEvents:         make([]string, 0),
 		suspendSem:           make(chan struct{}, 256),
+		revertSem:            make(chan struct{}, 256),
 		suspendTimers:        make(map[string]*time.Timer),
 		suspendsInFlight:     make(map[string]int),
 		suspendingSince:      make(map[string]time.Time),
@@ -399,6 +465,20 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		opt(gw)
 	}
 
+	if gw.humanSlotStride <= 0 {
+		if gw.maxActors > actorstate.HyperFleetThreshold {
+			gw.humanSlotStride = 4096
+		} else if gw.maxActors > actorstate.CompactFleetThreshold {
+			gw.humanSlotStride = 16
+		}
+	}
+	if gw.maxActors > actorstate.HyperFleetThreshold && cap(gw.suspendSem) < 8192 {
+		gw.suspendSem = make(chan struct{}, 8192)
+	}
+	if gw.maxActors > 262144 && gw.pollInterval == time.Second {
+		gw.pollInterval = 1500 * time.Millisecond
+	}
+
 	if gw.secret == "" {
 		gw.secret = randomHex(32)
 	}
@@ -410,9 +490,15 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	gw.sessionLimiter = newRateLimiter(gw.sessionRateLimitRPM, nil)
 
 	if gw.simController == nil {
-		var simOpts []SimulationOption
+		simOpts := []SimulationOption{WithSimulationPresenterKey(gw.presenterKey)}
 		if gw.dataGeneratorURL != "" {
 			simOpts = append(simOpts, WithDataGeneratorExecutor(gw.dataGeneratorURL, gw.simulationTurnURL, gw.presenterKey))
+		}
+		if gw.maxActors > actorstate.HyperFleetThreshold {
+			simOpts = append(simOpts, WithSimulationMaxConcurrentTurns(32768))
+			if gw.maxSimulationMPS > 0 {
+				simOpts = append(simOpts, WithSimulationMaxTargetMPS(gw.maxSimulationMPS))
+			}
 		}
 		gw.simController = NewSimulationRunner(gw, simOpts...)
 	}
@@ -431,14 +517,23 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 		transport = gw.httpClient.Transport
 	}
 	gw.proxy = actorproxy.New(targetURL, gw.atespace, []byte(gw.secret), transport, gw.model, actorproxy.Hooks{
-		OnActorError: func(attendeeID string) { gw.setActivity(attendeeID, types.ActivityIdle) },
-		OnReply:      gw.onActorReply,
-		OnError:      gw.onProxyError,
+		OnActorError: func(attendeeID string) {
+			if gw.proxy != nil && gw.proxy.PendingApproval(attendeeID) != nil {
+				gw.setActivity(attendeeID, types.ActivityAwaitingApproval)
+				gw.scheduleUnseatedRevert(attendeeID)
+				return
+			}
+			gw.setActivity(attendeeID, types.ActivityIdle)
+			gw.scheduleUnseatedRevert(attendeeID)
+		},
+		OnReply:            gw.onActorReply,
+		OnReplyWithContext: gw.onActorReplyWithContext,
+		OnError:            gw.onProxyError,
 	})
 
 	gw.routes()
 
-	gw.board = actorstate.NewBoard(gw.publishView)
+	gw.board = actorstate.NewBoardWithCapacity(gw.publishView, gw.maxActors)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	suspendCtx, suspendCancel := context.WithCancel(context.Background())
@@ -454,15 +549,56 @@ func NewGateway(routerURL string, opts ...Option) *Gateway {
 	}
 	if gw.control != nil {
 		gw.control = attendeeControl{ActorControl: gw.control, maxActors: gw.maxActors}
+		if gw.maxActors > actorstate.HyperFleetThreshold {
+			if hydrator, ok := gw.control.(actorstate.CheckpointHydrator); ok {
+				gw.wg.Add(1)
+				go func() {
+					defer gw.wg.Done()
+					for attempt := 0; attempt < 3; attempt++ {
+						if ctx.Err() != nil {
+							return
+						}
+						started := time.Now()
+						var totalHydrated atomic.Int64
+						err := hydrator.HydrateCheckpointed(ctx, gw.maxActors, func(indices []int) {
+							totalHydrated.Add(int64(len(indices)))
+							gw.board.MarkCheckpointedBatch(indices)
+						})
+						if err == nil {
+							log.Printf("[gateway] hydrated %d checkpointed actors from ateapi in %s", totalHydrated.Load(), time.Since(started).Round(time.Millisecond))
+							return
+						}
+						if ctx.Err() != nil {
+							return
+						}
+						log.Printf("[gateway] checkpoint hydration attempt %d failed (%d hydrated so far): %v", attempt+1, totalHydrated.Load(), err)
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(3 * time.Second):
+						}
+					}
+				}()
+			}
+		}
 		gw.wg.Add(1)
 		go func() {
 			defer gw.wg.Done()
+			var lastReconcile time.Time
 			actorstate.Poll(ctx, gw.control, gw.pollInterval, gw.board, func(d time.Duration, err error) {
 				gw.statePollMs.Store(d.Milliseconds())
 				if err == nil {
+					gw.firstActivePollDone.Store(true)
 					now := time.Now()
-					gw.reconcileStuckSuspending(now)
-					gw.reconcileStuckRunning(now)
+					if gw.maxActors > actorstate.HyperFleetThreshold {
+						if !lastReconcile.IsZero() && now.Sub(lastReconcile) < 5*time.Second {
+							return
+						}
+						lastReconcile = now
+					}
+					views := gw.board.Views()
+					gw.reconcileStuckSuspendingWithViews(now, views)
+					gw.reconcileStuckRunningWithViews(now, views)
 				}
 			})
 		}()
@@ -485,9 +621,17 @@ func (g *Gateway) StopSimulation() {
 // ClearSimulatedActivity resets gateway-side activity (Thinking, AwaitingApproval,
 // Executing) to ActivityIdle on every actor that is not leased or reserved for a live attendee.
 func (g *Gateway) ClearSimulatedActivity() {
+	g.ClearSimulatedActivityKeepSeats()
+	g.drainUnleasedHeldSeats(g.simCleanupProtectedChecker())
+}
+
+// ClearSimulatedActivityKeepSeats clears gateway-side simulated activity and
+// pending approvals without draining warm worker seats, avoiding STS
+// SuspendActor bursts across hyper-mode restarts or gateway rollouts.
+func (g *Gateway) ClearSimulatedActivityKeepSeats() {
 	isProtected := g.simCleanupProtectedChecker()
 	if g.board != nil {
-		g.board.ClearUnleasedActivity(isProtected)
+		g.board.ClearUnleasedActivityIndices(g.simCleanupProtectedIndices(), isProtected, g.HumanSlotStride())
 	}
 	if g.proxy != nil {
 		g.proxy.ClearUnleasedPending(isProtected)
@@ -497,7 +641,15 @@ func (g *Gateway) ClearSimulatedActivity() {
 // Close stops background work, including pending auto-suspends, and waits
 // for any suspend already running to finish.
 func (g *Gateway) Close() {
-	g.StopSimulation()
+	if g.maxActors > 262144 {
+		if sr := g.SimulationRunner(); sr != nil {
+			sr.StopKeepSeats()
+		} else {
+			g.StopSimulation()
+		}
+	} else {
+		g.StopSimulation()
+	}
 
 	g.mu.Lock()
 	g.closed = true
@@ -598,6 +750,7 @@ func (g *Gateway) routes() {
 	g.mux.HandleFunc("/api/actor/", g.requirePresenter(g.handleActorDetails))
 	g.mux.HandleFunc("/api/actor", g.requirePresenter(g.handleActorDetails))
 	g.mux.HandleFunc("/api/stage/telemetry", g.requirePresenter(g.handleTelemetry))
+	g.mux.HandleFunc("/api/stage/fleet.bin", g.requirePresenter(g.handleFleetBinary))
 	g.mux.HandleFunc("/api/reset", g.requirePresenter(g.handleReset))
 	g.mux.HandleFunc("/api/simulation", g.requirePresenter(web.JSONPOST(g.handleSimulation)))
 	g.mux.HandleFunc("/api/simulation/turn", g.requirePresenter(web.JSONPOST(g.handleSimulationTurn)))

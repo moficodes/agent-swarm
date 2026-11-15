@@ -174,11 +174,13 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 	orchMu.Unlock()
 
-	// Drive a chat turn via HandleTurn with a short 5ms review delay.
+	// Drive a simulated turn via HandleTurn: Turn 1 dispatches /api/chat and
+	// pauses in AwaitingApproval for ReviewDelayMs so the actor suspends to GCS
+	// while awaiting approval, matching the live human-in-the-loop lifecycle.
 	turnBody, _ := json.Marshal(TurnPayload{
 		TurnID:        "t1",
 		Prompt:        "Run benchmark sandbox test",
-		ReviewDelayMs: 5,
+		ReviewDelayMs: 20,
 		IdleDelayMs:   50,
 	})
 	req1 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader(turnBody))
@@ -190,14 +192,13 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 
 	target.mu.Lock()
 	if len(target.chats) != 1 || len(target.approvals) != 0 {
-		t.Fatalf("after first turn chats=%v approvals=%v", target.chats, target.approvals)
+		t.Fatalf("after first turn chats=%v approvals=%v, want 1 chat awaiting approval and 0 approvals", target.chats, target.approvals)
 	}
 	firstAttendee := target.chats[0]
 	target.mu.Unlock()
 
-	// Wait for the 5ms review delay to mature, then drive the next turn; Priority 1
-	// must approve the awaiting actor before starting another chat.
-	time.Sleep(15 * time.Millisecond)
+	// Wait for ReviewDelayMs to mature, then drive Turn 2 to dispatch /api/approve.
+	time.Sleep(30 * time.Millisecond)
 	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader(turnBody))
 	rec2 := httptest.NewRecorder()
 	r.HandleTurn(rec2, req2)
@@ -206,8 +207,8 @@ func TestRunner_DataGeneratorOrchestrationAndHandleTurn(t *testing.T) {
 	}
 
 	target.mu.Lock()
-	if len(target.approvals) != 1 || target.approvals[0] != firstAttendee {
-		t.Fatalf("after second turn approvals=%v, want [%s]", target.approvals, firstAttendee)
+	if len(target.chats) != 1 || len(target.approvals) != 1 || target.approvals[0] != firstAttendee {
+		t.Fatalf("after second turn chats=%v approvals=%v, want matured approval for %s", target.chats, target.approvals, firstAttendee)
 	}
 	target.mu.Unlock()
 
@@ -324,7 +325,7 @@ func TestRunner_DataGeneratorResetOrchestrationAndHandleTurn(t *testing.T) {
 type oversubFakeTarget struct {
 	approvalFakeTarget
 	canAcquireSeat bool
-	seeded         map[string]string
+	checkpointed   map[int]bool
 }
 
 func (f *oversubFakeTarget) CanAcquireSimulatedSeat() bool {
@@ -333,18 +334,13 @@ func (f *oversubFakeTarget) CanAcquireSimulatedSeat() bool {
 	return f.canAcquireSeat
 }
 
-func (f *oversubFakeTarget) SeedSimulatedApproval(attendeeID, prompt string) string {
+func (f *oversubFakeTarget) IsCheckpointedActorIndex(slotIndex int) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.seeded == nil {
-		f.seeded = make(map[string]string)
-	}
-	appID := "seed-appr-" + attendeeID
-	f.seeded[attendeeID] = prompt
-	return appID
+	return f.checkpointed != nil && f.checkpointed[slotIndex]
 }
 
-func TestRunner_OversubscribedCohortSeedingAndSeatBackpressure(t *testing.T) {
+func TestRunner_RealExecutionOnlyWithoutStaticPurpleSeeding(t *testing.T) {
 	orchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -364,30 +360,28 @@ func TestRunner_OversubscribedCohortSeedingAndSeatBackpressure(t *testing.T) {
 	}
 	defer r.Stop()
 
-	// Even when physical seats are full (canAcquireSeat == false), HandleTurn
-	// must onboard a batch of oversubscribed actors into AwaitingApproval.
+	// When physical seats are full (canAcquireSeat == false), HandleTurn must
+	// apply backpressure (204 No Content) and NEVER synthetically paint un-run
+	// actors into static Purple (AwaitingApproval).
 	req := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
 	r.HandleTurn(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("HandleTurn during onboarding status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("HandleTurn while seat-blocked status = %d, want 204", rec.Code)
 	}
 
 	target.mu.Lock()
-	seededCount := len(target.seeded)
 	chatCount := len(target.chats)
 	target.canAcquireSeat = true
 	target.mu.Unlock()
 
-	if seededCount != 64 {
-		t.Fatalf("seededCount = %d, want 64", seededCount)
-	}
 	if chatCount != 0 {
 		t.Fatalf("chatCount while seat-blocked = %d, want 0", chatCount)
 	}
 
-	// Once seat headroom opens up, HandleTurn both seeds and dispatches a live container turn.
-	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{}`)))
+	// Once seat headroom opens up, HandleTurn dispatches /api/chat (Phase 1) and
+	// then /api/approve (Phase 2) once ReviewDelayMs matures.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{"review_delay_ms":10}`)))
 	rec2 := httptest.NewRecorder()
 	r.HandleTurn(rec2, req2)
 	if rec2.Code != http.StatusOK {
@@ -395,8 +389,100 @@ func TestRunner_OversubscribedCohortSeedingAndSeatBackpressure(t *testing.T) {
 	}
 
 	target.mu.Lock()
-	if len(target.chats) != 1 {
-		t.Fatalf("chatCount after seat opened = %d, want 1", len(target.chats))
+	if len(target.chats) != 1 || len(target.approvals) != 0 {
+		t.Fatalf("after chat turn chats=%d approvals=%d, want 1 and 0", len(target.chats), len(target.approvals))
 	}
 	target.mu.Unlock()
+
+	time.Sleep(15 * time.Millisecond)
+	req3 := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{"review_delay_ms":10}`)))
+	rec3 := httptest.NewRecorder()
+	r.HandleTurn(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("third HandleTurn status = %d, want 200", rec3.Code)
+	}
+
+	target.mu.Lock()
+	if len(target.chats) != 1 || len(target.approvals) != 1 {
+		t.Fatalf("after approval turn chats=%d approvals=%d, want 1 and 1", len(target.chats), len(target.approvals))
+	}
+	target.mu.Unlock()
+}
+
+func TestRunner_PrioritizesNeverStartedBeforeCheckpointedSlots(t *testing.T) {
+	orchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer orchSrv.Close()
+
+	// Mark all slots except slot 7 as already checkpointed.
+	checkpointed := make(map[int]bool)
+	for i := 1; i <= 64; i++ {
+		if i != 7 {
+			checkpointed[i] = true
+		}
+	}
+	target := &oversubFakeTarget{
+		approvalFakeTarget: approvalFakeTarget{ctx: context.Background()},
+		canAcquireSeat:     true,
+		checkpointed:       checkpointed,
+	}
+	r := NewRunner(target,
+		WithSimulationDelays(10*time.Millisecond, 10*time.Millisecond),
+		WithDataGenerator(orchSrv.URL, "http://conf-gateway/api/simulation/turn", "test-key"),
+	)
+	if err := r.Start(64); err != nil {
+		t.Fatalf("Start(64): %v", err)
+	}
+	defer r.Stop()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/simulation/turn", bytes.NewReader([]byte(`{"review_delay_ms":5000}`)))
+	rec := httptest.NewRecorder()
+	r.HandleTurn(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HandleTurn status = %d, want 200", rec.Code)
+	}
+
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if len(target.chats) != 1 || target.chats[0] != "attendee-07" {
+		t.Fatalf("chats = %v, want [attendee-07] (the only NeverStarted slot)", target.chats)
+	}
+}
+
+func TestRunner_AllCheckpointedFullPeriodWithoutAliasing(t *testing.T) {
+	// Mark all 512 slots as already checkpointed and verify that claimIdleChatSlotLocked
+	// visits all 480 non-human-reserved slots in 480 calls instead of aliasing to a
+	// 1/128th subset when fallback slots are claimed.
+	checkpointed := make(map[int]bool, 512)
+	for i := 1; i <= 512; i++ {
+		checkpointed[i] = true
+	}
+	target := &oversubFakeTarget{
+		approvalFakeTarget: approvalFakeTarget{ctx: context.Background()},
+		canAcquireSeat:     true,
+		checkpointed:       checkpointed,
+	}
+	r := NewRunner(target)
+	r.initSlotsLocked(512)
+
+	now := time.Now()
+	seen := make(map[int]bool, 480)
+	r.slotMu.Lock()
+	for i := 0; i < 480; i++ {
+		idx, ph, _, ok := r.claimIdleChatSlotLocked(now, 512)
+		if !ok || ph != phaseChatInFlight {
+			r.slotMu.Unlock()
+			t.Fatalf("call %d: claimIdleChatSlotLocked = (%d, %v, %v), want ok", i, idx, ph, ok)
+		}
+		if seen[idx] {
+			r.slotMu.Unlock()
+			t.Fatalf("call %d: duplicate slot %d claimed before full ring traversal", i, idx)
+		}
+		seen[idx] = true
+	}
+	r.slotMu.Unlock()
+	if len(seen) != 480 {
+		t.Fatalf("unique slots claimed = %d, want 480", len(seen))
+	}
 }

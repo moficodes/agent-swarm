@@ -686,7 +686,7 @@ fi
 # The cluster gets the exclusion that keeps GKE from upgrading worker nodes.
 create_args="$(PROJECT_ID=p CLUSTER_NAME=c cc_create_args 1.37.0-gke.1)"
 for want in c "--project p" "--release-channel rapid" "--cluster-version 1.37.0-gke.1" \
-            "--num-nodes 2" "--machine-type c3-standard-4" \
+            "--num-nodes 1" "--machine-type c3-standard-8" \
             "--workload-pool p.svc.id.goog" "--enable-nested-virtualization"; do
   if ! tr '\n' ' ' <<<"${create_args}" | grep -qF -- "${want}"; then
     echo "FAIL: cc_create_args lacks ${want}" >&2
@@ -700,8 +700,56 @@ for want in "--num-nodes 16" "--machine-type c3-standard-8"; do
     fail=1
   fi
 done
-if ! conf_validate_profile || ! DEMO_CONF_PROFILE=swarm conf_validate_profile || ! DEMO_CONF_PROFILE=megaswarm conf_validate_profile; then
+if ! conf_validate_profile || ! DEMO_CONF_PROFILE=swarm conf_validate_profile || ! DEMO_CONF_PROFILE=megaswarm conf_validate_profile || ! DEMO_CONF_PROFILE=hyperswarm conf_validate_profile; then
   echo "FAIL: conf_validate_profile rejected a valid profile" >&2
+  fail=1
+fi
+hyper_create_args="$(DEMO_CONF_PROFILE=hyperswarm PROJECT_ID=p CLUSTER_NAME=c cc_create_args 1.37.0-gke.1)"
+for want in "--num-nodes 64" "--machine-type n4-highmem-64" "--disk-type hyperdisk-balanced" "--disk-size 300" "--logging NONE"; do
+  if ! tr '\n' ' ' <<<"${hyper_create_args}" | grep -qF -- "${want}"; then
+    echo "FAIL: hyperswarm cc_create_args lacks ${want}" >&2
+    fail=1
+  fi
+done
+hyper_system_pools="$(DEMO_CONF_PROFILE=hyperswarm CC_DRY_RUN=true PROJECT_ID=p CLUSTER_NAME=c cc_ensure_system_pools)"
+if ! grep -qF -- "--disk-size 500" <<<"${hyper_system_pools}"; then
+  echo "FAIL: hyperswarm cc_ensure_system_pools lacks --disk-size 500 for postgres" >&2
+  fail=1
+fi
+hyper_multi_args="$(DEMO_CONF_PROFILE=hyperswarm NODE_LOCATIONS=us-west1-b,us-west1-c PROJECT_ID=p CLUSTER_NAME=c cc_create_args 1.37.0-gke.1)"
+if ! tr '\n' ' ' <<<"${hyper_multi_args}" | grep -qF -- "--num-nodes 32"; then
+  echo "FAIL: hyperswarm 2-zone cc_create_args did not divide 64 nodes into 32 per zone" >&2
+  fail=1
+fi
+hyper_gw="$(DEMO_CONF_PROFILE=hyperswarm conf_render manifests/gateway.yaml.tmpl)"
+for pair in 'ACTOR_COUNT:16777216' 'ACTORS_PER_WORKER:64' 'HUMAN_SLOT_STRIDE:4096' 'SUSPEND_AFTER:3s'; do
+  k="${pair%%:*}"
+  v="${pair#*:}"
+  if ! grep -A1 "name: ${k}" <<<"${hyper_gw}" | grep -qF "value: \"${v}\""; then
+    echo "FAIL: hyperswarm gateway manifest lacks ${k}=${v}" >&2
+    fail=1
+  fi
+done
+hyper_pool="$(DEMO_CONF_PROFILE=hyperswarm conf_render manifests/workerpool.yaml.tmpl)"
+for want in "replicas: 4096" "cpu: 750m" "memory: 4096Mi" "cpu: 32250m"; do
+  if ! grep -qF -- "${want}" <<<"${hyper_pool}"; then
+    echo "FAIL: hyperswarm workerpool manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+hyper_tmpl="$(DEMO_CONF_PROFILE=hyperswarm conf_render manifests/actortemplate.yaml.tmpl)"
+for want in "cpuMillicores: 500" "memoryBytes: 536870912"; do
+  if ! grep -qF -- "${want}" <<<"${hyper_tmpl}"; then
+    echo "FAIL: hyperswarm actortemplate manifest lacks ${want}" >&2
+    fail=1
+  fi
+done
+if DEMO_CONF_PROFILE=hyperswarm conf_router_flags_ok '["--parked-request-budget=90s","--route-timeout=5m","--parked-request-max=4096","--ingress-allowed-spiffe-ids='"${DEMO_CONF_ROUTER_SPIFFE_ID}"'"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}" >/dev/null; then
+  echo "FAIL: hyperswarm conf_router_flags_ok did not require --parked-request-max=65536" >&2
+  fail=1
+fi
+if ! DEMO_CONF_PROFILE=hyperswarm conf_router_flags_ok '["--parked-request-budget=90s","--route-timeout=5m","--parked-request-max=65536","--ingress-allowed-spiffe-ids='"${DEMO_CONF_ROUTER_SPIFFE_ID}"'"]' 120 "${DEMO_CONF_ROUTER_SPIFFE_ID}" >/dev/null; then
+  echo "FAIL: hyperswarm conf_router_flags_ok rejected --parked-request-max=65536" >&2
   fail=1
 fi
 if DEMO_CONF_PROFILE=invalid conf_validate_profile 2>/dev/null || DEMO_CONF_PROFILE=invalid cc_validate_profile 2>/dev/null; then
@@ -717,7 +765,8 @@ for pair in 'ACTOR_COUNT:65536' 'ACTORS_PER_WORKER:16' 'SUSPEND_AFTER:3s' 'MOCK_
     fail=1
   fi
 done
-if ! DEMO_CONF_PROFILE=megaswarm DEMO_CONF_ACTORS=4096 conf_render manifests/gateway.yaml.tmpl | grep -A1 'name: ACTOR_COUNT' | grep -qF 'value: "4096"'; then
+mega_override_gw="$(DEMO_CONF_PROFILE=megaswarm DEMO_CONF_ACTORS=4096 conf_render manifests/gateway.yaml.tmpl)"
+if ! grep -A1 'name: ACTOR_COUNT' <<<"${mega_override_gw}" | grep -qF 'value: "4096"'; then
   echo "FAIL: DEMO_CONF_ACTORS did not override DEMO_CONF_PROFILE=megaswarm" >&2
   fail=1
 fi

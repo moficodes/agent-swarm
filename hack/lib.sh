@@ -182,7 +182,7 @@ substrate_label_mismatch_kind() {
 # so conf_check_substrate checks this before installing from SUBSTRATE_REPO.
 substrate_repo_clean() {
   local repo="$1"
-  [[ -z "$(git -C "${repo}" status --porcelain)" ]]
+  [[ -z "$(git -C "${repo}" status --porcelain --untracked-files=no)" ]]
 }
 
 # wait_for_pool_rollout_fatal waits for a WorkerPool's Deployment, which

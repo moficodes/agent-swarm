@@ -28,7 +28,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
 	"github.com/agent-substrate/agent-swarm/pkg/types"
@@ -68,6 +70,9 @@ type Hooks struct {
 	// the client still receives it. msg is nil when the body is not a
 	// ChatMessage.
 	OnReply func(attendee string, status int, msg *types.ChatMessage)
+	// OnReplyWithContext is like OnReply, passing the inbound request context
+	// so mock turn holds abort immediately if the caller disconnects or cancels.
+	OnReplyWithContext func(ctx context.Context, attendee string, status int, msg *types.ChatMessage)
 	// OnError runs when the router cannot be reached, before the 502 is
 	// written.
 	OnError func(attendee string, err error)
@@ -86,14 +91,15 @@ type ModelCaller interface {
 
 // Proxy forwards attendee requests to atenet-router.
 type Proxy struct {
-	rp             *httputil.ReverseProxy
-	hooks          Hooks
-	model          ModelCaller
-	target         *url.URL
-	atespace       string
-	secret         []byte
-	client         *http.Client
-	routerInFlight atomic.Int64
+	rp                *httputil.ReverseProxy
+	hooks             Hooks
+	model             ModelCaller
+	target            *url.URL
+	atespace          string
+	secret            []byte
+	client            *http.Client
+	routerInFlight    atomic.Int64
+	simRouterInFlight atomic.Int64
 	*approvals
 }
 
@@ -105,13 +111,33 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 // request URL unchanged. A nil transport uses http.DefaultTransport. A nil
 // model answers every model call with 503.
 func New(target *url.URL, atespace string, secret []byte, transport http.RoundTripper, model ModelCaller, hooks Hooks) *Proxy {
+	baseTransport := transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+	// Isolate live human attendee traffic (and postResult / ClearHistory calls)
+	// onto a dedicated transport pool so simulated load bursts can never starve
+	// or head-of-line block real /chat attendees.
+	humanTransport := baseTransport
+	if httpTr, ok := baseTransport.(*http.Transport); ok {
+		cloned := httpTr.Clone()
+		cloned.MaxConnsPerHost = 0
+		if cloned.MaxIdleConns < 256 {
+			cloned.MaxIdleConns = 256
+		}
+		if cloned.MaxIdleConnsPerHost < 256 {
+			cloned.MaxIdleConnsPerHost = 256
+		}
+		humanTransport = cloned
+	}
+
 	p := &Proxy{
 		hooks:     hooks,
 		model:     model,
 		target:    target,
 		atespace:  atespace,
 		secret:    secret,
-		client:    &http.Client{Transport: transport},
+		client:    &http.Client{Transport: humanTransport},
 		approvals: newApprovals(),
 	}
 	p.rp = &httputil.ReverseProxy{
@@ -143,16 +169,86 @@ func New(target *url.URL, atespace string, secret []byte, transport http.RoundTr
 			http.Error(w, fmt.Sprintf("Bad Gateway: %v", err), http.StatusBadGateway)
 		},
 	}
-	baseTransport := transport
-	if baseTransport == nil {
-		baseTransport = http.DefaultTransport
-	}
 	p.rp.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		p.routerInFlight.Add(1)
 		defer p.routerInFlight.Add(-1)
-		return baseTransport.RoundTrip(req)
+		if mockOf(req) {
+			p.simRouterInFlight.Add(1)
+			defer p.simRouterInFlight.Add(-1)
+			return baseTransport.RoundTrip(req)
+		}
+		return roundTripWithEnvoyRetry(req, humanTransport)
 	})
 	return p
+}
+
+func isEnvoyResetBeforeHeaders(statusCode int, body []byte) bool {
+	if statusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	s := strings.TrimSpace(string(body))
+	return strings.HasPrefix(s, "upstream connect error or disconnect/reset before headers")
+}
+
+func inspectRetryable503(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable || resp.Body == nil {
+		return false
+	}
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
+	if err == nil && isEnvoyResetBeforeHeaders(resp.StatusCode, bodyBytes) {
+		return true
+	}
+	setBody(resp, bodyBytes)
+	return false
+}
+
+func sleepRetry(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func roundTripWithEnvoyRetry(req *http.Request, tr http.RoundTripper) (*http.Response, error) {
+	var bodyBytes []byte
+	hasBody := req.Body != nil
+	if hasBody {
+		b, err := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		bodyBytes = b
+	}
+
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		attemptReq := req
+		if attempt > 0 {
+			attemptReq = req.Clone(req.Context())
+		}
+		if hasBody {
+			attemptReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			attemptReq.ContentLength = int64(len(bodyBytes))
+		}
+		resp, err := tr.RoundTrip(attemptReq)
+		if err != nil {
+			return nil, err
+		}
+		if attempt+1 < maxAttempts && inspectRetryable503(resp) {
+			if !sleepRetry(req.Context(), 150*time.Millisecond) {
+				return nil, req.Context().Err()
+			}
+			continue
+		}
+		return resp, nil
+	}
+	return nil, errors.New("exhausted router retry attempts")
 }
 
 // RouterInFlight returns the number of HTTP requests from this proxy currently
@@ -163,31 +259,47 @@ func (p *Proxy) RouterInFlight() int {
 	return int(max(0, p.routerInFlight.Load()))
 }
 
+// SimRouterInFlight returns the number of simulated (mock) HTTP requests from
+// this proxy currently awaiting an initial response from atenet-router.
+func (p *Proxy) SimRouterInFlight() int {
+	return int(max(0, p.simRouterInFlight.Load()))
+}
+
 // ClearHistory asks the attendee's actor, through the router, to drop its
 // conversation history and pending approval.
 func (p *Proxy) ClearHistory(ctx context.Context, attendee string) error {
 	if p.target == nil {
 		return fmt.Errorf("no router configured")
 	}
-	u := p.target.JoinPath(types.ClearHistoryPath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
-	if err != nil {
-		return err
+	u := p.target.JoinPath(types.ClearHistoryPath).String()
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", p.atespace, attendee))
+		req.Header.Set(types.ModelKeyHeader, ModelKey(p.secret, p.atespace, attendee))
+		p.routerInFlight.Add(1)
+		resp, err := p.client.Do(req)
+		p.routerInFlight.Add(-1)
+		if err != nil {
+			return err
+		}
+		if attempt+1 < maxAttempts && inspectRetryable503(resp) {
+			if !sleepRetry(ctx, 150*time.Millisecond) {
+				return ctx.Err()
+			}
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("clear history: actor answered %s", resp.Status)
+		}
+		return nil
 	}
-	req.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", p.atespace, attendee))
-	req.Header.Set(types.ModelKeyHeader, ModelKey(p.secret, p.atespace, attendee))
-	p.routerInFlight.Add(1)
-	resp, err := p.client.Do(req)
-	p.routerInFlight.Add(-1)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("clear history: actor answered %s", resp.Status)
-	}
-	return nil
+	return errors.New("clear history: exhausted retry attempts")
 }
 
 // ServeHTTP forwards r to the router.
@@ -225,7 +337,9 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	if err := json.Unmarshal(bodyBytes, &chatMsg); err == nil {
 		msg = &chatMsg
 	}
-	if p.hooks.OnReply != nil {
+	if p.hooks.OnReplyWithContext != nil {
+		p.hooks.OnReplyWithContext(resp.Request.Context(), attendeeID, resp.StatusCode, msg)
+	} else if p.hooks.OnReply != nil {
 		p.hooks.OnReply(attendeeID, resp.StatusCode, msg)
 	}
 	return nil
@@ -275,14 +389,29 @@ func (p *Proxy) postResult(ctx context.Context, attendee string, res types.Model
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.target.JoinPath(types.ModelResultPath).String(), bytes.NewReader(b))
-	if err != nil {
-		return nil, err
+	u := p.target.JoinPath(types.ModelResultPath).String()
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(b))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", p.atespace, attendee))
+		req.Header.Set(types.ModelKeyHeader, ModelKey(p.secret, p.atespace, attendee))
+		resp, err := p.client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if attempt+1 < maxAttempts && inspectRetryable503(resp) {
+			if !sleepRetry(ctx, 150*time.Millisecond) {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		return resp, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("ate-target-actor", fmt.Sprintf("%s/%s", p.atespace, attendee))
-	req.Header.Set(types.ModelKeyHeader, ModelKey(p.secret, p.atespace, attendee))
-	return p.client.Do(req)
+	return nil, errors.New("post model result: exhausted retry attempts")
 }
 
 func setBody(resp *http.Response, body []byte) {

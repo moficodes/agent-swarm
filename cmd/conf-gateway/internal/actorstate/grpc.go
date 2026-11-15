@@ -18,6 +18,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -28,6 +30,7 @@ import (
 	"github.com/agent-substrate/agent-swarm/pkg/types"
 	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
+	_ "google.golang.org/grpc/balancer/roundrobin"
 	"google.golang.org/grpc/credentials"
 	authv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,8 +44,17 @@ const (
 	ateSignerName      = "servicedns.podcert.ate.dev/identity"
 	canaryLabelKey     = "podcert.ate.dev/canarying"
 	canaryLabelLive    = "live"
-	controlConnPoolLen = 4
+	controlConnPoolLen = 32
+	activeConnPoolLen  = 16
 )
+
+type cachedWorkerAssignments struct {
+	version         int64
+	allocatedActors int32
+	pod             string
+	statuses        []Status
+	fetchedAt       time.Time
+}
 
 // GRPCControl implements ActorControl directly over gRPC to ate-api-server,
 // caching the minted ate-client bearer token and reusing persistent HTTP/2
@@ -53,14 +65,20 @@ type GRPCControl struct {
 	atespace  string
 	caFile    string
 
-	mu          sync.Mutex
-	listConn    *grpc.ClientConn
-	listClient  ateapi.ControlClient
-	conns       []*grpc.ClientConn
-	clients     []ateapi.ControlClient
-	rrSeq       atomic.Uint64
-	cachedToken string
-	tokenExpiry time.Time
+	mu            sync.Mutex
+	listConn      *grpc.ClientConn
+	listClient    ateapi.ControlClient
+	activeConns   []*grpc.ClientConn
+	activeClients []ateapi.ControlClient
+	activeRRSeq   atomic.Uint64
+	conns         []*grpc.ClientConn
+	clients       []ateapi.ControlClient
+	rrSeq         atomic.Uint64
+	cachedToken   string
+	tokenExpiry   time.Time
+
+	workerCacheMu sync.Mutex
+	workerCache   map[string]cachedWorkerAssignments
 }
 
 // NewGRPCControl returns a persistent gRPC ActorControl client.
@@ -75,10 +93,11 @@ func NewGRPCControl(k8sClient kubernetes.Interface, endpoint, atespace, caFile s
 		atespace = "default"
 	}
 	return &GRPCControl{
-		k8sClient: k8sClient,
-		endpoint:  endpoint,
-		atespace:  atespace,
-		caFile:    caFile,
+		k8sClient:   k8sClient,
+		endpoint:    endpoint,
+		atespace:    atespace,
+		caFile:      caFile,
+		workerCache: make(map[string]cachedWorkerAssignments),
 	}, nil
 }
 
@@ -94,6 +113,15 @@ func (g *GRPCControl) Close() error {
 		g.listConn = nil
 		g.listClient = nil
 	}
+	for _, conn := range g.activeConns {
+		if conn != nil {
+			if err := conn.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	g.activeConns = nil
+	g.activeClients = nil
 	for _, conn := range g.conns {
 		if conn != nil {
 			if err := conn.Close(); err != nil && firstErr == nil {
@@ -192,10 +220,15 @@ func (g *GRPCControl) dialConn(pool *x509.CertPool) (*grpc.ClientConn, error) {
 		ServerName: ateAPIAudience,
 		MinVersion: tls.VersionTLS12,
 	}
+	target := g.endpoint
+	if !strings.Contains(target, "://") {
+		target = "dns:///" + target
+	}
 	conn, err := grpc.NewClient(
-		g.endpoint,
+		target,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 		grpc.WithPerRPCCredentials(dynamicTokenAuth{control: g}),
+		grpc.WithDefaultServiceConfig(`{"loadBalancingConfig":[{"round_robin":{}}]}`),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(32*1024*1024)),
 	)
 	if err != nil {
@@ -283,6 +316,53 @@ func (g *GRPCControl) getClient(ctx context.Context) (ateapi.ControlClient, erro
 	return c, nil
 }
 
+func (g *GRPCControl) getActiveClient(ctx context.Context) (ateapi.ControlClient, error) {
+	g.mu.Lock()
+	if len(g.activeClients) > 0 {
+		idx := int(g.activeRRSeq.Add(1) % uint64(len(g.activeClients)))
+		c := g.activeClients[idx]
+		g.mu.Unlock()
+		return c, nil
+	}
+	g.mu.Unlock()
+
+	pool, err := g.loadCertPool(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	conns := make([]*grpc.ClientConn, 0, activeConnPoolLen)
+	clients := make([]ateapi.ControlClient, 0, activeConnPoolLen)
+	for i := 0; i < activeConnPoolLen; i++ {
+		conn, dialErr := g.dialConn(pool)
+		if dialErr != nil {
+			for _, c := range conns {
+				_ = c.Close()
+			}
+			return nil, dialErr
+		}
+		conns = append(conns, conn)
+		clients = append(clients, ateapi.NewControlClient(conn))
+	}
+
+	g.mu.Lock()
+	if len(g.activeClients) > 0 {
+		idx := int(g.activeRRSeq.Add(1) % uint64(len(g.activeClients)))
+		c := g.activeClients[idx]
+		g.mu.Unlock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+		return c, nil
+	}
+	g.activeConns = conns
+	g.activeClients = clients
+	idx := int(g.activeRRSeq.Add(1) % uint64(len(g.activeClients)))
+	c := g.activeClients[idx]
+	g.mu.Unlock()
+	return c, nil
+}
+
 // List returns every actor in the atespace by paging ListActors over gRPC.
 func (g *GRPCControl) List(ctx context.Context) ([]Status, error) {
 	client, err := g.getListClient(ctx)
@@ -316,6 +396,415 @@ func (g *GRPCControl) List(ctx context.Context) ([]Status, error) {
 	return out, nil
 }
 
+// Get fetches one actor's current status over gRPC via GetActor.
+func (g *GRPCControl) Get(ctx context.Context, name string) (Status, error) {
+	if !actorName.MatchString(name) {
+		return Status{}, fmt.Errorf("invalid actor name %q", name)
+	}
+	client, err := g.getClient(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	a, err := client.GetActor(ctx, &ateapi.GetActorRequest{
+		Actor: &ateapi.ObjectRef{
+			Atespace: g.atespace,
+			Name:     name,
+		},
+	})
+	if err != nil {
+		return Status{}, err
+	}
+	return ActorProtoToStatus(a), nil
+}
+
+// ListActiveSeats lists only actors currently assigned to worker pods in the
+// target atespace by querying ListWorkers (~5 pages at 4,096 pods) and fanning
+// out ListWorkerActorAssignments across occupied workers whose version or seat
+// count changed since the previous poll. This avoids paging 16,777,216 idle
+// suspended actors on every poll tick and prevents straggler workers from
+// blocking or failing active seat discovery.
+func (g *GRPCControl) ListActiveSeats(ctx context.Context) ([]Status, error) {
+	if _, err := g.getActiveClient(ctx); err != nil {
+		return nil, err
+	}
+
+	type occupiedWorker struct {
+		name            string
+		pod             string
+		version         int64
+		allocatedActors int32
+		fallback        []Status
+	}
+	var occupied []occupiedWorker
+	var pageToken string
+	for {
+		var (
+			resp *ateapi.ListWorkersResponse
+			err  error
+		)
+		for attempt := 0; attempt < 3; attempt++ {
+			listClient, cErr := g.getActiveClient(ctx)
+			if cErr != nil {
+				err = cErr
+				break
+			}
+			callCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			resp, err = listClient.ListWorkers(callCtx, &ateapi.ListWorkersRequest{
+				Options: &ateapi.ListOptions{
+					PageSize:  1000,
+					PageToken: pageToken,
+				},
+			})
+			cancel()
+			if err == nil || ctx.Err() != nil {
+				break
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("ListWorkers: %w", err)
+		}
+		for _, w := range resp.GetWorkers() {
+			if w.GetWorkerNamespace() != g.atespace {
+				continue
+			}
+			alloc := w.GetStatus().GetAllocated()
+			if alloc.GetActors() <= 0 && alloc.GetCpuMillicores() <= 0 && alloc.GetMemoryBytes() <= 0 {
+				continue
+			}
+			occupied = append(occupied, occupiedWorker{
+				name:            w.GetMetadata().GetName(),
+				pod:             w.GetWorkerPod(),
+				version:         w.GetMetadata().GetVersion(),
+				allocatedActors: alloc.GetActors(),
+			})
+		}
+		pageToken = resp.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+	}
+
+	now := time.Now()
+	occupiedSet := make(map[string]struct{}, len(occupied))
+	toFetch := make([]occupiedWorker, 0, len(occupied))
+	var out []Status
+
+	g.workerCacheMu.Lock()
+	for _, ow := range occupied {
+		occupiedSet[ow.name] = struct{}{}
+		if cached, ok := g.workerCache[ow.name]; ok {
+			if cached.version > 0 &&
+				cached.version == ow.version &&
+				cached.allocatedActors == ow.allocatedActors &&
+				cached.pod == ow.pod &&
+				now.Sub(cached.fetchedAt) < 25*time.Second {
+				out = append(out, cached.statuses...)
+				continue
+			}
+			if ow.allocatedActors > 0 && len(cached.statuses) > 0 {
+				ow.fallback = cached.statuses
+			}
+		}
+		toFetch = append(toFetch, ow)
+	}
+	for name := range g.workerCache {
+		if _, ok := occupiedSet[name]; !ok {
+			delete(g.workerCache, name)
+		}
+	}
+	g.workerCacheMu.Unlock()
+
+	if len(toFetch) == 0 {
+		return out, nil
+	}
+
+	fanoutCtx, cancelFanout := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelFanout()
+
+	workerCh := make(chan occupiedWorker, len(toFetch))
+	for _, ow := range toFetch {
+		workerCh <- ow
+	}
+	close(workerCh)
+
+	concurrency := min(len(toFetch), 64)
+	var (
+		resMu            sync.Mutex
+		firstErr         error
+		completedWorkers int
+		wg               sync.WaitGroup
+	)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ow := range workerCh {
+				if fanoutCtx.Err() != nil {
+					resMu.Lock()
+					if firstErr == nil {
+						firstErr = fanoutCtx.Err()
+					}
+					if len(ow.fallback) > 0 {
+						out = append(out, ow.fallback...)
+					}
+					resMu.Unlock()
+					continue
+				}
+				var tok string
+				var local []Status
+				workerFailed := false
+				for {
+					var (
+						aResp *ateapi.ListWorkerActorAssignmentsResponse
+						aErr  error
+					)
+					for attempt := 0; attempt < 2; attempt++ {
+						c, cErr := g.getActiveClient(fanoutCtx)
+						if cErr != nil {
+							aErr = cErr
+							break
+						}
+						timeout := 2500 * time.Millisecond
+						if attempt > 0 {
+							timeout = 1500 * time.Millisecond
+						}
+						callCtx, cancel := context.WithTimeout(fanoutCtx, timeout)
+						aResp, aErr = c.ListWorkerActorAssignments(callCtx, &ateapi.ListWorkerActorAssignmentsRequest{
+							Worker: &ateapi.ObjectRef{Name: ow.name},
+							Options: &ateapi.ListOptions{
+								PageSize:  1000,
+								PageToken: tok,
+							},
+						})
+						cancel()
+						if aErr == nil || strings.Contains(aErr.Error(), "NotFound") || fanoutCtx.Err() != nil {
+							break
+						}
+					}
+					if aErr != nil {
+						// A worker pod terminating mid-poll returns NotFound; skip it cleanly.
+						if strings.Contains(aErr.Error(), "NotFound") {
+							break
+						}
+						workerFailed = true
+						resMu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("ListWorkerActorAssignments(%s): %w", ow.name, aErr)
+						}
+						resMu.Unlock()
+						break
+					}
+					for _, asgn := range aResp.GetActorAssignments() {
+						if asgn.GetActor().GetAtespace() != g.atespace {
+							continue
+						}
+						actorID := asgn.GetActor().GetName()
+						if actorID == "" {
+							continue
+						}
+						local = append(local, Status{
+							Name:      actorID,
+							State:     types.StateRunning,
+							WorkerPod: ow.pod,
+						})
+					}
+					tok = aResp.GetNextPageToken()
+					if tok == "" {
+						break
+					}
+				}
+				if !workerFailed {
+					g.workerCacheMu.Lock()
+					g.workerCache[ow.name] = cachedWorkerAssignments{
+						version:         ow.version,
+						allocatedActors: ow.allocatedActors,
+						pod:             ow.pod,
+						statuses:        local,
+						fetchedAt:       now,
+					}
+					g.workerCacheMu.Unlock()
+
+					resMu.Lock()
+					completedWorkers++
+					if len(local) > 0 {
+						out = append(out, local...)
+					}
+					resMu.Unlock()
+				} else if len(ow.fallback) > 0 {
+					resMu.Lock()
+					out = append(out, ow.fallback...)
+					resMu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil && (ctx.Err() != nil || (len(out) == 0 && completedWorkers == 0)) {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
+type actorPageToken struct {
+	V     int      `json:"v"`
+	Kind  string   `json:"kind"`
+	Scope string   `json:"scope"`
+	Last  []string `json:"last"`
+}
+
+func encodeActorPageToken(atespace, lastName string) string {
+	if lastName == "" {
+		return ""
+	}
+	b, err := json.Marshal(actorPageToken{
+		V:     1,
+		Kind:  "actor",
+		Scope: atespace,
+		Last:  []string{lastName},
+	})
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func isActorProtoCheckpointed(a *ateapi.Actor) bool {
+	st := a.GetStatus()
+	if st == nil {
+		return false
+	}
+	state := st.GetState()
+	if state == ateapi.ActorState_ACTOR_STATE_RUNNING ||
+		state == ateapi.ActorState_ACTOR_STATE_RESUMING ||
+		state == ateapi.ActorState_ACTOR_STATE_SUSPENDING {
+		return true
+	}
+	for _, snap := range st.GetSnapshots() {
+		if snap.GetOwner() == ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR {
+			return true
+		}
+		if uri := snap.GetDurableSnapshot().GetObject().GetSnapshotUri(); uri != "" && !strings.Contains(uri, "/tags/") {
+			return true
+		}
+	}
+	return false
+}
+
+// HydrateCheckpointed scans the atespace's actors in parallel lexicographical
+// key-range shards and invokes onBatch with 1-based actor indices that already
+// have an actor-owned checkpoint or active state.
+func (g *GRPCControl) HydrateCheckpointed(ctx context.Context, maxActors int, onBatch func(indices []int)) error {
+	if maxActors <= 0 || onBatch == nil {
+		return nil
+	}
+	if _, err := g.getClient(ctx); err != nil {
+		return err
+	}
+
+	type lexShard struct {
+		start string
+		end   string
+	}
+	var shards []lexShard
+	if maxActors > HyperFleetThreshold {
+		bounds := make([]string, 0, 155)
+		bounds = append(bounds, "")
+		for p := 100; p <= 169; p++ {
+			bounds = append(bounds, fmt.Sprintf("attendee-%d", p))
+		}
+		for p := 17; p <= 99; p++ {
+			bounds = append(bounds, fmt.Sprintf("attendee-%d", p))
+		}
+		bounds = append(bounds, "")
+		shards = make([]lexShard, 0, len(bounds)-1)
+		for i := 0; i < len(bounds)-1; i++ {
+			shards = append(shards, lexShard{start: bounds[i], end: bounds[i+1]})
+		}
+	} else {
+		shards = []lexShard{{start: "", end: ""}}
+	}
+
+	shardCh := make(chan lexShard, len(shards))
+	for _, sh := range shards {
+		shardCh <- sh
+	}
+	close(shardCh)
+
+	concurrency := min(len(shards), 6)
+	var (
+		errMu    sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			batch := make([]int, 0, 4096)
+			for sh := range shardCh {
+				if ctx.Err() != nil {
+					return
+				}
+				pageToken := encodeActorPageToken(g.atespace, sh.start)
+				for {
+					c, cErr := g.getClient(ctx)
+					if cErr != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = cErr
+						}
+						errMu.Unlock()
+						return
+					}
+					resp, lErr := c.ListActors(ctx, &ateapi.ListActorsRequest{
+						Atespace: g.atespace,
+						Options: &ateapi.ListOptions{
+							PageSize:  1000,
+							PageToken: pageToken,
+						},
+					})
+					if lErr != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("HydrateCheckpointed ListActors(%q..%q): %w", sh.start, sh.end, lErr)
+						}
+						errMu.Unlock()
+						return
+					}
+					reachedEnd := false
+					for _, a := range resp.GetActors() {
+						name := a.GetMetadata().GetName()
+						if sh.end != "" && name > sh.end {
+							reachedEnd = true
+							break
+						}
+						if !isActorProtoCheckpointed(a) {
+							continue
+						}
+						if idx, ok := ParseAttendeeIndex(name, maxActors); ok {
+							batch = append(batch, idx)
+							if len(batch) >= 4096 {
+								onBatch(batch)
+								batch = batch[:0]
+							}
+						}
+					}
+					if len(batch) > 0 {
+						onBatch(batch)
+						batch = batch[:0]
+					}
+					if reachedEnd || resp.GetNextPageToken() == "" {
+						break
+					}
+					pageToken = resp.GetNextPageToken()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
+}
+
 // Suspend asks ateapi to suspend one actor.
 func (g *GRPCControl) Suspend(ctx context.Context, name string) error {
 	if !actorName.MatchString(name) {
@@ -344,6 +833,24 @@ func (g *GRPCControl) Revert(ctx context.Context, name string) error {
 		return err
 	}
 	_, err = client.RevertActor(ctx, &ateapi.RevertActorRequest{
+		Actor: &ateapi.ObjectRef{
+			Atespace: g.atespace,
+			Name:     name,
+		},
+	})
+	return err
+}
+
+// DeleteActor deletes one actor over gRPC.
+func (g *GRPCControl) DeleteActor(ctx context.Context, name string) error {
+	if !actorName.MatchString(name) {
+		return fmt.Errorf("invalid actor name %q", name)
+	}
+	client, err := g.getClient(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = client.DeleteActor(ctx, &ateapi.DeleteActorRequest{
 		Actor: &ateapi.ObjectRef{
 			Atespace: g.atespace,
 			Name:     name,

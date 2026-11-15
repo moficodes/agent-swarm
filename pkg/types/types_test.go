@@ -411,8 +411,13 @@ func TestEnhancementTypesSerialization(t *testing.T) {
 				wantErr: false,
 			},
 			{
-				name:    "valid start count max 65536",
+				name:    "valid start count 65536",
 				req:     &types.SimulationRequest{Action: "start", Count: 65536},
+				wantErr: false,
+			},
+			{
+				name:    "valid start count max 16777216",
+				req:     &types.SimulationRequest{Action: "start", Count: 16777216},
 				wantErr: false,
 			},
 			{
@@ -451,8 +456,8 @@ func TestEnhancementTypesSerialization(t *testing.T) {
 				wantErr: true,
 			},
 			{
-				name:    "start count > 65536 out of bounds",
-				req:     &types.SimulationRequest{Action: "start", Count: 65537},
+				name:    "start count > 16777216 out of bounds",
+				req:     &types.SimulationRequest{Action: "start", Count: 16777217},
 				wantErr: true,
 			},
 		}

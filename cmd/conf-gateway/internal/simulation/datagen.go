@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -117,7 +118,7 @@ type TurnPayload struct {
 	IdleDelayMs   int    `json:"idle_delay_ms"`
 }
 
-func targetMPSForCount(count int) int {
+func targetMPSForCount(count int, maxOverride int) int {
 	switch {
 	case count <= 16:
 		return 4
@@ -125,15 +126,25 @@ func targetMPSForCount(count int) int {
 		return 25
 	case count <= 4096:
 		return 160
-	default:
+	case count <= 65536:
 		return 240
+	case count <= 262144:
+		if maxOverride > 0 {
+			return max(240, maxOverride/2)
+		}
+		return 1200
+	default:
+		if maxOverride > 0 {
+			return maxOverride
+		}
+		return 6400
 	}
 }
 
 func (s *SimulationRunner) configureDataGenerator(ctx context.Context, count int, paused bool) error {
 	targetMPS := 0
 	if !paused {
-		targetMPS = targetMPSForCount(count)
+		targetMPS = targetMPSForCount(count, s.maxTargetMPS)
 	}
 	return s.configureDataGeneratorWithSchema(ctx, targetMPS, dataGeneratorSchemaYAML, count, paused)
 }
@@ -281,7 +292,7 @@ func (s *SimulationRunner) StartReset(crashed, active []string) (bool, error) {
 		return false, fmt.Errorf("cannot start reset: gateway is closed: %w", baseCtx.Err())
 	}
 
-	s.stopActiveRun(false)
+	s.stopActiveRun(false, true)
 
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -291,6 +302,7 @@ func (s *SimulationRunner) StartReset(crashed, active []string) (bool, error) {
 	s.mu.Lock()
 	s.simCtx = ctx
 	s.cancel = cancel
+	s.runWG = &sync.WaitGroup{}
 	s.initResetLocked(crashed, active)
 	s.mu.Unlock()
 
@@ -340,7 +352,7 @@ func (s *SimulationRunner) checkResetCompletionLocked(now time.Time, rh ResetHan
 	if !s.resetting {
 		return false, 0, 0, 0
 	}
-	if time.Since(s.resetStartedAt) > 45*time.Second {
+	if time.Since(s.resetStartedAt) > 180*time.Second {
 		s.resetting = false
 		return true, s.resetSuspended, s.resetReverted, s.resetErrors
 	}
@@ -377,10 +389,12 @@ func (s *SimulationRunner) executeNextResetTurn(ctx context.Context) (bool, stri
 	if len(s.resetQueue) == 0 {
 		s.enqueueResetStragglersLocked(now, rh)
 	}
-	for i := 0; i < len(s.resetQueue); i++ {
+	scanLimit := min(len(s.resetQueue), 512)
+	for i := 0; i < scanLimit; i++ {
 		if !now.Before(s.resetQueue[i].readyAt) {
 			item = s.resetQueue[i]
-			s.resetQueue = append(s.resetQueue[:i], s.resetQueue[i+1:]...)
+			s.resetQueue[i] = s.resetQueue[0]
+			s.resetQueue = s.resetQueue[1:]
 			delete(s.resetQueued, item.actorID)
 			s.resetInFlight[item.actorID] = true
 			claimed = true
@@ -460,13 +474,15 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.RLock()
 	running := s.running
+	simCount := s.count
 	resetting := s.isResetting()
 	simCtx := s.simCtx
+	runWG := s.runWG
 	rDelay := s.readingDelay
 	lDelay := s.loopDelay
-	active := (running || resetting) && simCtx != nil && simCtx.Err() == nil
+	active := (running || resetting) && simCtx != nil && simCtx.Err() == nil && runWG != nil
 	if active {
-		s.wg.Add(1)
+		runWG.Add(1)
 	}
 	s.mu.RUnlock()
 
@@ -474,7 +490,72 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	defer s.wg.Done()
+
+	var payload TurnPayload
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&payload)
+	}
+
+	if !resetting && simCount > 65536 {
+		runWG.Done()
+		reviewDelay := time.Duration(payload.ReviewDelayMs) * time.Millisecond
+		if reviewDelay <= 0 {
+			reviewDelay = s.calculateReviewDelay(0, rDelay)
+		}
+		idleDelay := time.Duration(payload.IdleDelayMs) * time.Millisecond
+		if idleDelay <= 0 {
+			idleDelay = s.calculateInterTurnDelay(lDelay)
+		}
+		now := time.Now()
+		dispatched := 0
+		const hyperBatchFanout = 12
+	fanoutLoop:
+		for range hyperBatchFanout {
+			if s.turnSem != nil {
+				select {
+				case s.turnSem <- struct{}{}:
+				default:
+					break fanoutLoop
+				}
+			}
+			canAcquireChatSeat := true
+			if checker, ok := s.target.(SeatLoadChecker); ok {
+				canAcquireChatSeat = checker.CanAcquireSimulatedSeat()
+			}
+			canAcquireApproveSeat := canAcquireChatSeat
+			if appChecker, ok := s.target.(ApproveSeatLoadChecker); ok {
+				canAcquireApproveSeat = appChecker.CanAcquireSimulatedApproveSeat()
+			}
+			slotIndex, phase, approvalID, ok := s.claimNextSlot(now, canAcquireChatSeat, canAcquireApproveSeat)
+			if !ok {
+				if s.turnSem != nil {
+					<-s.turnSem
+				}
+				break fanoutLoop
+			}
+			runWG.Add(1)
+			dispatched++
+			go func(idx int, ph slotPhase, appID, prompt string) {
+				defer func() {
+					if s.turnSem != nil {
+						<-s.turnSem
+					}
+					runWG.Done()
+				}()
+				_, _, _, _ = s.runClaimedTurn(simCtx, idx, ph, appID, prompt, reviewDelay, idleDelay)
+			}(slotIndex, phase, approvalID, payload.Prompt)
+		}
+		if dispatched == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"executed": true, "queued": true, "dispatched": dispatched})
+		return
+	}
+
+	defer runWG.Done()
 
 	if s.turnSem != nil {
 		select {
@@ -484,11 +565,6 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-	}
-
-	var payload TurnPayload
-	if r.Body != nil {
-		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&payload)
 	}
 
 	ctx := r.Context()
@@ -509,7 +585,23 @@ func (s *SimulationRunner) HandleTurn(w http.ResponseWriter, r *http.Request) {
 		err        error
 	)
 	if resetting {
-		executed, attendeeID, action, err = s.executeNextResetTurn(ctx)
+		s.resetMu.Lock()
+		qLen := len(s.resetQueue)
+		s.resetMu.Unlock()
+		if qLen > 256 {
+			var rwg sync.WaitGroup
+			for range 7 {
+				rwg.Add(1)
+				go func() {
+					defer rwg.Done()
+					_, _, _, _ = s.executeNextResetTurn(ctx)
+				}()
+			}
+			executed, attendeeID, action, err = s.executeNextResetTurn(ctx)
+			rwg.Wait()
+		} else {
+			executed, attendeeID, action, err = s.executeNextResetTurn(ctx)
+		}
 	} else {
 		reviewDelay := time.Duration(payload.ReviewDelayMs) * time.Millisecond
 		if reviewDelay <= 0 {

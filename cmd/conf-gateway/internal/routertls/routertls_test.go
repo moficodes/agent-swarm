@@ -15,6 +15,7 @@
 package routertls
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -211,5 +212,85 @@ func writeCredBundle(t *testing.T, path string, ca *x509.Certificate, caKey *ecd
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNewHTTPClient_DisablesHTTP2ForServiceLoadBalancing(t *testing.T) {
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "router-ca.pem")
+	credFile := filepath.Join(dir, "credential-bundle.pem")
+
+	serverCACert, _ := mustSelfSignedCA(t, "servicedns-ca")
+	clientCACert, clientCAKey := mustSelfSignedCA(t, "podidentity-ca")
+	writeTrustBundle(t, caFile, serverCACert)
+	writeCredBundle(t, credFile, clientCACert, clientCAKey, "spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway")
+
+	client, err := NewHTTPClient(caFile, credFile)
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", client.Transport)
+	}
+	if tr.ForceAttemptHTTP2 {
+		t.Fatal("ForceAttemptHTTP2 = true, want false so ClusterIP router connections spread across HTTP/1.1 sockets instead of wedging on a shared HTTP/2 connection")
+	}
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Fatal("ResponseHeaderTimeout <= 0, want a bounded header timeout")
+	}
+}
+
+func TestNewHTTPClient_EndpointResolverRoundRobinsRouterPods(t *testing.T) {
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "router-ca.pem")
+	credFile := filepath.Join(dir, "credential-bundle.pem")
+
+	serverCACert, serverCAKey := mustSelfSignedCA(t, "servicedns-ca")
+	clientCACert, clientCAKey := mustSelfSignedCA(t, "podidentity-ca")
+	serverTLSCert := mustIssueLeaf(t, serverCACert, serverCAKey, "atenet-router.ate-system.svc", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	writeTrustBundle(t, caFile, serverCACert)
+	writeCredBundle(t, credFile, clientCACert, clientCAKey, "spiffe://cluster.local/ns/ate-demo-conf/sa/conf-gateway")
+
+	clientCAPool := x509.NewCertPool()
+	clientCAPool.AddCert(clientCACert)
+
+	hits := make([]int, 2)
+	var addrs []string
+	for idx := 0; idx < 2; idx++ {
+		i := idx
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits[i]++
+			w.WriteHeader(http.StatusOK)
+		}))
+		srv.TLS = &tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			Certificates: []tls.Certificate{serverTLSCert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    clientCAPool,
+		}
+		srv.StartTLS()
+		defer srv.Close()
+		addrs = append(addrs, srv.Listener.Addr().String())
+	}
+
+	client, err := NewHTTPClient(caFile, credFile, WithEndpointResolver(func(_ context.Context) ([]string, error) {
+		return addrs, nil
+	}))
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	tr := client.Transport.(*http.Transport)
+	tr.DisableKeepAlives = true
+
+	for i := 0; i < 4; i++ {
+		resp, err := client.Get("https://atenet-router.ate-system.svc:443/healthz")
+		if err != nil {
+			t.Fatalf("GET %d: %v", i, err)
+		}
+		_ = resp.Body.Close()
+	}
+	if hits[0] != 2 || hits[1] != 2 {
+		t.Fatalf("hits = %v, want [2 2] across both router endpoints", hits)
 	}
 }

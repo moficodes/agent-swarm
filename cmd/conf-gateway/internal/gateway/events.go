@@ -41,7 +41,7 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a token for this attendee is required", http.StatusUnauthorized)
 		return
 	}
-	if isReservedHumanSlotID(attendeeID, g.maxActors) || g.IsLeased(attendeeID) {
+	if isReservedHumanSlotID(attendeeID, g.maxActors, g.HumanSlotStride()) || g.IsLeased(attendeeID) {
 		g.LeaseAttendee(attendeeID)
 	}
 

@@ -42,3 +42,25 @@ type ActorControl interface {
 	// it SUSPENDED. Anything since that snapshot is lost.
 	Revert(ctx context.Context, name string) error
 }
+
+// ActiveSeatLister is an optional extension implemented by gRPC-backed
+// ActorControl clients to list only actors currently occupying worker seats
+// (via ListWorkers + ListWorkerActorAssignments) instead of paging through
+// millions of idle suspended actors on every poll.
+type ActiveSeatLister interface {
+	ListActiveSeats(ctx context.Context) ([]Status, error)
+}
+
+// SingleActorGetter is an optional extension implemented by gRPC-backed
+// ActorControl clients to fetch one actor's full status on demand.
+type SingleActorGetter interface {
+	Get(ctx context.Context, name string) (Status, error)
+}
+
+// CheckpointHydrator is an optional extension implemented by gRPC-backed
+// ActorControl clients to stream already-checkpointed 1-based actor indices in
+// batches on gateway startup so hyper-mode boards immediately reflect actors
+// that ran and checkpointed before the gateway pod started.
+type CheckpointHydrator interface {
+	HydrateCheckpointed(ctx context.Context, maxActors int, onBatch func(indices []int)) error
+}

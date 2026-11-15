@@ -17,10 +17,12 @@ package actorproxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/agent-substrate/agent-swarm/cmd/conf-gateway/internal/auth"
@@ -307,5 +309,115 @@ func TestProxy_RouterInFlight(t *testing.T) {
 	}
 	if got := p.RouterInFlight(); got != 0 {
 		t.Fatalf("final RouterInFlight() = %d, want 0", got)
+	}
+}
+
+func TestProxy_IsolatesHumanTransportFromMockSaturation(t *testing.T) {
+	mockEntered := make(chan struct{})
+	releaseMock := make(chan struct{})
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("ate-target-actor") == "space/attendee-01" {
+			close(mockEntered)
+			<-releaseMock
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "m1", Content: "ok"})
+	}))
+	defer router.Close()
+	u, _ := url.Parse(router.URL)
+
+	// Constrain the base transport to MaxConnsPerHost: 1 so a single simulated
+	// mock turn saturates the mock pool. A real human turn must still succeed
+	// immediately over its own isolated transport pool.
+	baseTr := http.DefaultTransport.(*http.Transport).Clone()
+	baseTr.MaxConnsPerHost = 1
+
+	p := New(u, "space", []byte("secret"), baseTr, nil, Hooks{})
+
+	mockDone := make(chan struct{})
+	go func() {
+		defer close(mockDone)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"sim","mock":true}`))
+		p.ServeHTTP(rec, WithMock(WithAttendee(req, "attendee-01"), true))
+	}()
+	<-mockEntered
+
+	if got := p.SimRouterInFlight(); got != 1 {
+		t.Fatalf("SimRouterInFlight() = %d, want 1 while mock turn is parked", got)
+	}
+
+	humanDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"human"}`))
+		p.ServeHTTP(rec, WithMock(WithAttendee(req, "attendee-4096"), false))
+		humanDone <- rec.Code
+	}()
+
+	select {
+	case code := <-humanDone:
+		if code != http.StatusOK {
+			t.Fatalf("human turn status = %d, want 200", code)
+		}
+	case <-mockDone:
+		t.Fatal("mock turn finished unexpectedly")
+	}
+
+	close(releaseMock)
+	<-mockDone
+}
+
+func TestProxy_RetriesEnvoyResetBeforeHeadersOnHumanTurns(t *testing.T) {
+	var chatAttempts atomic.Int32
+	var resultAttempts atomic.Int32
+	var lastChatBody string
+
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/chat":
+			b, _ := io.ReadAll(r.Body)
+			lastChatBody = string(b)
+			if chatAttempts.Add(1) == 1 {
+				http.Error(w, "upstream connect error or disconnect/reset before headers. reset reason: connection termination", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(types.ModelCallStep{
+				ModelCall: &types.ModelCall{CallID: "c1"},
+			})
+		case types.ModelResultPath:
+			if resultAttempts.Add(1) == 1 {
+				http.Error(w, "upstream connect error or disconnect/reset before headers. reset reason: connection termination", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(types.ChatMessage{ID: "m-retried", Content: "recovered"})
+		}
+	}))
+	defer router.Close()
+	u, _ := url.Parse(router.URL)
+
+	model := funcModelCaller(func(ctx context.Context, actor string, call types.ModelCall) types.ModelResult {
+		return types.ModelResult{CallID: call.CallID, Status: http.StatusOK}
+	})
+	p := New(u, "space", []byte("secret"), nil, model, Hooks{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"message":"hello"}`))
+	p.ServeHTTP(rec, WithMock(WithAttendee(req, "attendee-4096"), false))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	if lastChatBody != `{"message":"hello"}` {
+		t.Fatalf("retried chat body = %q, want original JSON", lastChatBody)
+	}
+	if got := chatAttempts.Load(); got != 2 {
+		t.Fatalf("chatAttempts = %d, want 2", got)
+	}
+	if got := resultAttempts.Load(); got != 2 {
+		t.Fatalf("resultAttempts = %d, want 2", got)
 	}
 }
