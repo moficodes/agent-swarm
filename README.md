@@ -16,6 +16,42 @@ limitations under the License.
 
 # Interactive Conference Agent Swarm Demo
 
+Live interactive multi-tier demo for [Agent Substrate](https://github.com/agent-substrate/substrate) (`v1.0.0`) on GKE, scaling from **50** (`swarm`) to **65,536** (`megaswarm`, $16^4$) to **16,777,216** (`hyperswarm`, $64^4$) stateful gVisor-sandboxed agents with live memory checkpointing to Cloud Storage.
+
+## Demo videos (`1080p` · `30fps`)
+
+Click any preview thumbnail below to open the `1920×1080` (`30fps`) recording showing both the `/stage` control plane and a live attendee `/chat` turn running on GKE. See [`docs/demos/README.md`](docs/demos/README.md) for full timestamped walkthroughs and direct raw download links.
+
+<table>
+  <tr>
+    <td colspan="2" align="center">
+      <a href="docs/demos/hyperswarm.mp4">
+        <img src="docs/demos/hyperswarm-preview.jpg" alt="Watch Hyperswarm Demo (16,777,216 Agents · 4:14 · 1080p 30fps)" width="100%" />
+      </a>
+      <br />
+      <strong>Level 3 · Hyperswarm (16,777,216 actors · 4,096 worker pods · 64× oversubscription)</strong> — 4m 14s · <a href="docs/demos/hyperswarm.mp4">View file</a> · <a href="https://github.com/moficodes/agent-swarm/raw/main/docs/demos/hyperswarm.mp4">Download MP4 (57.8 MB)</a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/demos/swarm.mp4">
+        <img src="docs/demos/swarm-preview.jpg" alt="Watch Swarm Demo (50 Agents · 1:45 · 1080p 30fps)" width="100%" />
+      </a>
+      <br />
+      <strong>Level 1 · Swarm (50 actors · Filestore <code>/workspace</code>)</strong><br />
+      1m 45s · <a href="docs/demos/swarm.mp4">View file</a> · <a href="https://github.com/moficodes/agent-swarm/raw/main/docs/demos/swarm.mp4">Download MP4 (22.3 MB)</a>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/demos/megaswarm.mp4">
+        <img src="docs/demos/megaswarm-preview.jpg" alt="Watch Megaswarm Demo (65,536 Agents · 2:12 · 1080p 30fps)" width="100%" />
+      </a>
+      <br />
+      <strong>Level 2 · Megaswarm (65,536 actors · 256 worker pods)</strong><br />
+      2m 12s · <a href="docs/demos/megaswarm.mp4">View file</a> · <a href="https://github.com/moficodes/agent-swarm/raw/main/docs/demos/megaswarm.mp4">Download MP4 (37.5 MB)</a>
+    </td>
+  </tr>
+</table>
+
 ## Prerequisites
 
 - A GKE cluster running [Substrate](https://github.com/agent-substrate/substrate)
